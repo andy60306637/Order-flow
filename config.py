@@ -1,0 +1,62 @@
+from datetime import timezone, timedelta
+
+# ── 顯示時區（UTC+8，Binance 預設）──────────────────────────────────────────────
+DISPLAY_TZ = timezone(timedelta(hours=8))
+
+# ── 交易對與 Footprint tick size ───────────────────────────────────────────────
+SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT",
+    "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT",
+]
+
+INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "4h"]
+
+# Footprint 每個交易對的最小 tick（價格分桶大小）
+TICK_SIZES: dict[str, float] = {
+    "BTCUSDT":  10.0,
+    "ETHUSDT":   1.0,
+    "BNBUSDT":   0.5,
+    "SOLUSDT":   0.1,
+    "XRPUSDT":   0.0001,
+    "DOGEUSDT":  0.00001,
+    "ADAUSDT":   0.0001,
+    "AVAXUSDT":  0.01,
+}
+
+DEFAULT_SYMBOL   = "BTCUSDT"
+DEFAULT_INTERVAL = "1m"
+
+# ── Binance USDT-M Futures 端點 ────────────────────────────────────────────────
+WS_BASE   = "wss://fstream.binance.com"
+REST_BASE = "https://fapi.binance.com"
+
+# ── 歷史 K 線 ──────────────────────────────────────────────────────────────────
+KLINE_HISTORY_LIMIT = 200
+
+# ── Heatmap ────────────────────────────────────────────────────────────────────
+HEATMAP_TIME_SLOTS   = 300    # 保留幾個 OB 快照（x 軸）
+HEATMAP_PRICE_BUCKETS = 150   # 價格分桶數（y 軸）
+HEATMAP_PRICE_RANGE  = 0.015  # 以當前價格 ±1.5% 為顯示範圍
+HEATMAP_UPDATE_MS    = 1000   # 快照更新頻率（ms）
+
+# ── Order Book 顯示層數 ────────────────────────────────────────────────────────
+OB_DISPLAY_LEVELS = 20
+
+# ── 顏色主題（深色）──────────────────────────────────────────────────────────
+COLOR_UP     = "#26a69a"
+COLOR_DOWN   = "#ef5350"
+COLOR_BG     = "#131722"
+COLOR_GRID   = "#1e222d"
+COLOR_FG     = "#d1d4dc"
+COLOR_PANEL  = "#1e222d"
+COLOR_ACCENT = "#2962ff"
+
+# ── Footprint ──────────────────────────────────────────────────────────────────
+FOOTPRINT_MODES = ["BidxAsk", "Delta", "Volume", "Imbalance"]
+FOOTPRINT_MAX_CANDLES = 100  # 保留幾根 K 棒的 Footprint 資料
+
+# ── CVD ────────────────────────────────────────────────────────────────────────
+CVD_HISTORY = 300   # 大於 KLINE_HISTORY_LIMIT + 50，避免 deque 比 kline 早 drop
+
+# ── Footprint 歷史 aggTrade 回填 ────────────────────────────────────────────────
+FOOTPRINT_HISTORY_CANDLES = 20   # 啟動時回填最近 N 根 K 棒的成交
