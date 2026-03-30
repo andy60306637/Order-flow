@@ -231,6 +231,7 @@ class FootprintItem(pg.GraphicsObject):
         self._mode:         str                      = "BidxAsk"
         self._picture:      Optional[QtGui.QPicture] = None
         self._cur_zband:    int                      = -1
+        self._text_cmds:    list                     = []  # (dx,dy,dw,dh,align,text,color,font_px)
 
     # ── public API ───────────────────────────────────────────────────────────
 
@@ -270,7 +271,7 @@ class FootprintItem(pg.GraphicsObject):
             (max(c.levels) + self._tick_size if c.levels else c.high)
             for c in valid
         )
-        mg = self._tick_size
+        mg = self._tick_size * 2.5
         return QtCore.QRectF(lo_x - 0.5, lo - mg, hi_x - lo_x + 1.5, (hi - lo) + mg * 2)
 
     def paint(self, p: QtGui.QPainter, *args) -> None:
@@ -283,11 +284,34 @@ class FootprintItem(pg.GraphicsObject):
             self._build(tick_px, band)
         self._picture.play(p)
 
+        # ── 文字渲染（螢幕座標）──────────────────────────────────────────
+        if self._text_cmds:
+            tr = p.worldTransform()
+            p.save()
+            p.resetTransform()
+            font = QtGui.QFont("Consolas")
+            cur_fpx = -1
+            for (dx, dy, dw, dh, align, text, color, fpx) in self._text_cmds:
+                if fpx != cur_fpx:
+                    cur_fpx = fpx
+                    font.setPixelSize(fpx)
+                    p.setFont(font)
+                tl = tr.map(QtCore.QPointF(dx, dy))
+                br = tr.map(QtCore.QPointF(dx + dw, dy + dh))
+                sx = min(tl.x(), br.x())
+                sy = min(tl.y(), br.y())
+                sw = abs(br.x() - tl.x())
+                sh = abs(br.y() - tl.y())
+                p.setPen(QtGui.QPen(color))
+                p.drawText(QtCore.QRectF(sx, sy, sw, sh), align, text)
+            p.restore()
+
     # ── 內部 ─────────────────────────────────────────────────────────────────
 
     def _invalidate(self) -> None:
         self._picture   = None
         self._cur_zband = -1
+        self._text_cmds = []
         self.update()
 
     def _build(self, tick_px: float, band: int) -> None:
@@ -296,9 +320,7 @@ class FootprintItem(pg.GraphicsObject):
         pa  = QtGui.QPainter(pic)
 
         font_px = max(7, min(11, int(tick_px * 0.52)))
-        font = QtGui.QFont("Consolas")
-        font.setPixelSize(font_px)
-        pa.setFont(font)
+        self._text_cmds = []
 
         ts          = self._tick_size
         half        = _HALF_W
@@ -402,8 +424,8 @@ class FootprintItem(pg.GraphicsObject):
                         pa.drawRect(rect)
 
                 # ⑤ 文字（依 mode + zoom band）
-                self._draw_cell_text(pa, band, mode, lv, xi, pr, ts, half,
-                                     div_pen)
+                self._collect_cell_text(pa, band, mode, lv, xi, pr, ts, half,
+                                        div_pen, font_px)
 
                 # ⑥ 角標 imbalance（Imbalance 模式已用亮框，不重複畫角標）
                 if mode != "Imbalance" and band >= _Z_SINGLE:
@@ -417,6 +439,69 @@ class FootprintItem(pg.GraphicsObject):
                             QtCore.QRectF(xi - half, pr, mk, mk),
                             _C_IMB_SELL,
                         )
+
+            # ⑥½ K 棒匯總（bid/ask 總量 · delta · volume）
+            if band >= _Z_SINGLE and sorted_prices:
+                total_bid = sum(lv.bid_vol for lv in candle.levels.values())
+                total_ask = sum(lv.ask_vol for lv in candle.levels.values())
+                bot_price = min(sorted_prices)
+                sum_font_px = max(6, min(10, int(tick_px * 0.42)))
+                A = Qt.AlignmentFlag
+
+                if mode in ("BidxAsk", "Imbalance"):
+                    row1_y = bot_price - ts * 1.15
+                    row1_h = ts * 0.55
+                    row2_y = bot_price - ts * 1.75
+                    row2_h = ts * 0.55
+                    self._text_cmds.append((
+                        xi - half, row1_y, half, row1_h,
+                        A.AlignRight | A.AlignVCenter, _fmt(total_ask),
+                        _C_TEXT_SELL, sum_font_px))
+                    self._text_cmds.append((
+                        xi, row1_y, half, row1_h,
+                        A.AlignLeft | A.AlignVCenter, _fmt(total_bid),
+                        _C_TEXT_BUY, sum_font_px))
+                    self._text_cmds.append((
+                        xi - half, row2_y, 2.0 * half, row2_h,
+                        A.AlignCenter, f"Σ{_fmt(total_bid + total_ask)}",
+                        _C_TEXT_NEU, sum_font_px))
+                elif mode == "Delta":
+                    delta = total_bid - total_ask
+                    row1_y = bot_price - ts * 1.15
+                    row1_h = ts * 0.55
+                    row2_y = bot_price - ts * 1.75
+                    row2_h = ts * 0.55
+                    color = _C_TEXT_BUY if delta > 0 else _C_TEXT_SELL if delta < 0 else _C_TEXT_NEU
+                    self._text_cmds.append((
+                        xi - half, row1_y, 2.0 * half, row1_h,
+                        A.AlignCenter, _fmt_delta(delta),
+                        color, sum_font_px))
+                    self._text_cmds.append((
+                        xi - half, row2_y, half, row2_h,
+                        A.AlignRight | A.AlignVCenter, _fmt(total_ask),
+                        _C_TEXT_SELL, sum_font_px))
+                    self._text_cmds.append((
+                        xi, row2_y, half, row2_h,
+                        A.AlignLeft | A.AlignVCenter, _fmt(total_bid),
+                        _C_TEXT_BUY, sum_font_px))
+                elif mode == "Volume":
+                    total_vol = total_bid + total_ask
+                    row1_y = bot_price - ts * 1.15
+                    row1_h = ts * 0.55
+                    row2_y = bot_price - ts * 1.75
+                    row2_h = ts * 0.55
+                    self._text_cmds.append((
+                        xi - half, row1_y, 2.0 * half, row1_h,
+                        A.AlignCenter, f"Σ{_fmt(total_vol)}",
+                        QtGui.QColor(220, 180, 50), sum_font_px))
+                    self._text_cmds.append((
+                        xi - half, row2_y, half, row2_h,
+                        A.AlignRight | A.AlignVCenter, _fmt(total_ask),
+                        _C_TEXT_SELL, sum_font_px))
+                    self._text_cmds.append((
+                        xi, row2_y, half, row2_h,
+                        A.AlignLeft | A.AlignVCenter, _fmt(total_bid),
+                        _C_TEXT_BUY, sum_font_px))
 
             # ⑦ Stacked 側條
             for lo_r, hi_r in buy_stk_ranges:
@@ -469,87 +554,60 @@ class FootprintItem(pg.GraphicsObject):
         pa.end()
         self._picture = pic
 
-    # ── 單格文字渲染（依 mode + zoom band）──────────────────────────────────
+    # ── 單格文字收集（依 mode + zoom band）──────────────────────────────────
 
-    @staticmethod
-    def _draw_cell_text(
-        pa: QtGui.QPainter, band: int, mode: str,
+    def _collect_cell_text(
+        self, pa: QtGui.QPainter, band: int, mode: str,
         lv, idx: int, pr: float, ts: float, half: float,
-        div_pen,
+        div_pen, font_px: int,
     ) -> None:
         if band == _Z_NONE:
             return
 
+        A = Qt.AlignmentFlag
+
         if mode in ("BidxAsk", "Imbalance"):
-            # 雙欄：左=賣量（紅）、右=買量（青）
             if band == _Z_FULL:
                 pad_x  = half * 0.06
                 pad_y  = ts   * 0.08
                 cell_h = ts - 2.0 * pad_y
-                left_rect = QtCore.QRectF(
-                    idx - half + pad_x, pr + pad_y, half - pad_x, cell_h,
-                )
-                right_rect = QtCore.QRectF(
-                    idx + pad_x, pr + pad_y, half - pad_x, cell_h,
-                )
+                # 分隔線留在 QPicture（幾何圖形可正常縮放）
                 pa.setPen(div_pen)
                 pa.drawLine(
                     QtCore.QPointF(idx, pr + ts * 0.12),
                     QtCore.QPointF(idx, pr + ts * 0.88),
                 )
-                pa.setPen(pg.mkPen(_C_TEXT_SELL))
-                pa.drawText(
-                    left_rect,
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    _fmt(lv.ask_vol),
-                )
-                pa.setPen(pg.mkPen(_C_TEXT_BUY))
-                pa.drawText(
-                    right_rect,
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    _fmt(lv.bid_vol),
-                )
+                self._text_cmds.append((
+                    idx - half + pad_x, pr + pad_y, half - pad_x, cell_h,
+                    A.AlignRight | A.AlignVCenter, _fmt(lv.ask_vol),
+                    _C_TEXT_SELL, font_px))
+                self._text_cmds.append((
+                    idx + pad_x, pr + pad_y, half - pad_x, cell_h,
+                    A.AlignLeft | A.AlignVCenter, _fmt(lv.bid_vol),
+                    _C_TEXT_BUY, font_px))
             else:  # Z_SINGLE
                 hr = half * 0.96
-                left_r  = QtCore.QRectF(idx - hr, pr, hr, ts)
-                right_r = QtCore.QRectF(idx,      pr, hr, ts)
-                pa.setPen(pg.mkPen(_C_TEXT_SELL))
-                pa.drawText(
-                    left_r,
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    _fmt(lv.ask_vol),
-                )
-                pa.setPen(pg.mkPen(_C_TEXT_BUY))
-                pa.drawText(
-                    right_r,
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    _fmt(lv.bid_vol),
-                )
+                self._text_cmds.append((
+                    idx - hr, pr, hr, ts,
+                    A.AlignRight | A.AlignVCenter, _fmt(lv.ask_vol),
+                    _C_TEXT_SELL, font_px))
+                self._text_cmds.append((
+                    idx, pr, hr, ts,
+                    A.AlignLeft | A.AlignVCenter, _fmt(lv.bid_vol),
+                    _C_TEXT_BUY, font_px))
 
         elif mode == "Delta":
-            # 中央顯示 delta，顏色依正負
             delta = lv.bid_vol - lv.ask_vol
             txt = _fmt_delta(delta)
-            if delta > 0:
-                color = _C_TEXT_BUY
-            elif delta < 0:
-                color = _C_TEXT_SELL
-            else:
-                color = _C_TEXT_NEU
-            rect = QtCore.QRectF(idx - half, pr, 2.0 * half, ts)
-            pa.setPen(pg.mkPen(color))
-            pa.drawText(
-                rect, Qt.AlignmentFlag.AlignCenter, txt,
-            )
+            color = _C_TEXT_BUY if delta > 0 else _C_TEXT_SELL if delta < 0 else _C_TEXT_NEU
+            self._text_cmds.append((
+                idx - half, pr, 2.0 * half, ts,
+                A.AlignCenter, txt, color, font_px))
 
         elif mode == "Volume":
-            # 中央顯示總量
-            txt = _fmt(lv.total)
-            rect = QtCore.QRectF(idx - half, pr, 2.0 * half, ts)
-            pa.setPen(pg.mkPen(_C_TEXT_NEU))
-            pa.drawText(
-                rect, Qt.AlignmentFlag.AlignCenter, txt,
-            )
+            self._text_cmds.append((
+                idx - half, pr, 2.0 * half, ts,
+                A.AlignCenter, _fmt(lv.total), _C_TEXT_NEU, font_px))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
