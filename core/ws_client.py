@@ -29,13 +29,15 @@ logger = logging.getLogger(__name__)
 
 class WsWorkerThread(QThread):
     # ── Qt signals（在主執行緒消費）──────────────────────────────────────────
-    trade_signal       = pyqtSignal(dict)   # aggTrade payload
-    kline_signal       = pyqtSignal(dict)   # kline payload (含 'k' 子物件)
-    depth_signal       = pyqtSignal(dict)   # depthUpdate payload
-    ob_snapshot_signal = pyqtSignal(dict)   # REST /fapi/v1/depth 回應
-    history_signal     = pyqtSignal(list)   # 歷史 K 線列表
-    agg_history_signal = pyqtSignal(list)   # 歷史 aggTrades（Footprint 回填用）
-    status_signal      = pyqtSignal(str)    # 狀態文字
+    trade_signal            = pyqtSignal(dict)   # aggTrade payload
+    kline_signal            = pyqtSignal(dict)   # kline payload (含 'k' 子物件)
+    depth_signal            = pyqtSignal(dict)   # depthUpdate payload
+    ob_snapshot_signal      = pyqtSignal(dict)   # REST /fapi/v1/depth 回應
+    history_signal          = pyqtSignal(list)   # 歷史 K 線列表
+    agg_history_signal      = pyqtSignal(list)   # 歷史 aggTrades（Footprint 回填用）
+    more_history_signal     = pyqtSignal(list)   # 往前翻頁的更早 K 線
+    more_agg_history_signal = pyqtSignal(list)   # 往前翻頁附帶的 aggTrades
+    status_signal           = pyqtSignal(str)    # 狀態文字
 
     def __init__(
         self,
@@ -47,13 +49,27 @@ class WsWorkerThread(QThread):
         self._symbol   = symbol.lower()
         self._interval = interval
         self._running  = True
-        self._resync_requested = False
+        self._resync_requested  = False
+        self._loading_more      = False   # 防止並發的 load-more 請求
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ──────────────────────────────────────────────────────────────────────────
     def request_resync(self) -> None:
         """外部（主執行緒）請求重新取 OB 快照。"""
         self._resync_requested = True
+
+    def request_more_history(self, end_time_ms: int) -> None:
+        """
+        從主執行緒請求比 end_time_ms 更早的歷史 K 線。
+        非同步排入 event loop，不阻塞 UI。
+        """
+        if self._loading_more:
+            return
+        if self._loop and not self._loop.is_closed():
+            self._loading_more = True
+            asyncio.run_coroutine_threadsafe(
+                self._load_more_history(end_time_ms), self._loop
+            )
 
     def stop(self) -> None:
         """安全停止：cancel 所有 tasks，讓各 coroutine 自行清理後再關 loop。"""
@@ -106,8 +122,29 @@ class WsWorkerThread(QThread):
                         start_row = history[-min(n, len(history))]
                         start_t   = int(start_row[0])           # kline open_time ms
                         end_t     = int(history[-1][6]) + 1     # kline close_time ms + 1
+
+                        # ── 依 interval 限制最大回填時間範圍 ──────────────────
+                        # 大 interval（1h/4h）的 N 根橫跨數十小時，aggTrades 量
+                        # 可達百萬筆，每頁 0.8s 節流會拖慢數分鐘。
+                        # 依設定表截短 start_t，只拉近期足夠的量。
+                        max_ms = config.FOOTPRINT_MAX_BACKFILL_MS.get(
+                            self._interval,
+                            n * 60 * 1_000,  # 未列出的 interval 預設 N 分鐘
+                        )
+                        capped_start_t = max(start_t, end_t - max_ms)
+                        if capped_start_t > start_t:
+                            # 依截短後的 start_t 重新找對應的 kline slice
+                            backfill_rows = [
+                                r for r in history[-min(n, len(history)):]
+                                if int(r[6]) >= capped_start_t   # close_time 仍在範圍內
+                            ]
+                            start_t = capped_start_t
+                        else:
+                            backfill_rows = history[-min(n, len(history)):]
+
+                        actual_n = len(backfill_rows) if capped_start_t > int(start_row[0]) else n
                         self.status_signal.emit(
-                            f"拉取 Footprint 歷史 ({n} 根) …"
+                            f"拉取 Footprint 歷史 ({actual_n} 根) …"
                         )
                         agg_trades = await self._fetch_agg_history(
                             session, start_t, end_t
@@ -118,7 +155,7 @@ class WsWorkerThread(QThread):
                                 "trades":  agg_trades,
                                 "klines": [
                                     (int(r[0]), int(r[6]))
-                                    for r in history[-min(n, len(history)):]
+                                    for r in backfill_rows
                                 ],
                             }
                             self.agg_history_signal.emit([payload])  # list wrapper for signal type
@@ -143,13 +180,23 @@ class WsWorkerThread(QThread):
         if snapshot:
             self.ob_snapshot_signal.emit(snapshot)
 
-    async def _fetch_history(self, session: aiohttp.ClientSession) -> list:
+    async def _fetch_history(
+        self,
+        session: aiohttp.ClientSession,
+        end_time_ms: int = 0,
+    ) -> list:
+        """
+        拉取最新（或 end_time_ms 之前）的歷史 K 線。
+        end_time_ms > 0 時，Binance 回傳 open_time <= end_time_ms 的最後 limit 根。
+        """
         url = (
             f"{config.REST_BASE}/fapi/v1/klines"
             f"?symbol={self._symbol.upper()}"
             f"&interval={self._interval}"
             f"&limit={config.KLINE_HISTORY_LIMIT}"
         )
+        if end_time_ms > 0:
+            url += f"&endTime={end_time_ms}"
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                 if r.status == 200:
@@ -157,6 +204,49 @@ class WsWorkerThread(QThread):
         except Exception as exc:
             logger.error("History fetch error: %s", exc)
         return []
+
+    async def _load_more_history(self, end_time_ms: int) -> None:
+        """
+        拉取比 end_time_ms 更早的歷史 K 線，並附帶對應的 Footprint aggTrades。
+        完成後重置 _loading_more，允許下一次觸發。
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Binance endTime 是 inclusive open_time，所以傳 end_time_ms - 1
+                rows = await self._fetch_history(session, end_time_ms=end_time_ms - 1)
+                if not rows:
+                    self.more_history_signal.emit([])
+                    return
+                self.more_history_signal.emit(rows)
+
+                # ── 附帶 aggTrades 供 Footprint 回填 ─────────────────────────
+                n = config.FOOTPRINT_HISTORY_CANDLES
+                slice_rows = rows[-min(n, len(rows)):]
+                start_t = int(slice_rows[0][0])
+                end_t   = int(rows[-1][6]) + 1
+                max_ms  = config.FOOTPRINT_MAX_BACKFILL_MS.get(
+                    self._interval, n * 60 * 1_000
+                )
+                capped_start_t = max(start_t, end_t - max_ms)
+                backfill_rows  = [
+                    r for r in slice_rows if int(r[6]) >= capped_start_t
+                ] or slice_rows
+                capped_start_t = int(backfill_rows[0][0])
+
+                agg_trades = await self._fetch_agg_history(
+                    session, capped_start_t, end_t
+                )
+                if agg_trades:
+                    payload = {
+                        "trades": agg_trades,
+                        "klines": [(int(r[0]), int(r[6])) for r in backfill_rows],
+                    }
+                    self.more_agg_history_signal.emit([payload])
+        except Exception as exc:
+            logger.error("load_more_history error: %s", exc)
+            self.more_history_signal.emit([])
+        finally:
+            self._loading_more = False
 
     async def _fetch_ob_snapshot(self, session: aiohttp.ClientSession) -> dict:
         url = (

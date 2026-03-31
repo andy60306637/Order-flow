@@ -16,7 +16,7 @@ from typing import List, Optional
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 
 import config
 from core.data_types import Kline
@@ -150,6 +150,9 @@ class CandlestickItem(pg.GraphicsObject):
 
 # ── KlineChart widget ─────────────────────────────────────────────────────────
 class KlineChart(pg.PlotWidget):
+    # 滾到最左端時發出，帶帶最舊一根 K 棒的 open_time_ms
+    need_more_history = pyqtSignal(int)
+
     def __init__(self, parent=None) -> None:
         self._time_axis  = _TimeAxis()
         self._price_axis = _PriceAxis()
@@ -186,6 +189,10 @@ class KlineChart(pg.PlotWidget):
         self._vol_vb.setXLink(pi.vb)
 
         pi.vb.sigResized.connect(self._update_vol_vb_geo)
+
+        # 偵測使用者滚到最左端，觸發載入更早歷史
+        self._loading_more: bool = False
+        pi.vb.sigXRangeChanged.connect(self._on_x_range_changed)
 
         # 內部資料
         self._klines: List[Kline] = []
@@ -303,6 +310,37 @@ class KlineChart(pg.PlotWidget):
             if n - 2 <= vr[1] + 2:
                 width = vr[1] - vr[0]
                 pi.setXRange(n - 1 - width, n - 1, padding=0)
+
+    # ── 往前捲動歷史載入 ──────────────────────────────────────────────────────
+    def _on_x_range_changed(self, vb, x_range) -> None:
+        """偵測使用者是否滾到最左邊，若是則觸發歷史資料請求。"""
+        if self._loading_more or not self._klines:
+            return
+        # 可見左邊界在距最舊 K 棒 15 根以內時觸發
+        if x_range[0] < 15:
+            self._loading_more = True
+            self.need_more_history.emit(self._klines[0].open_time)
+
+    def set_loading_more(self, loading: bool) -> None:
+        """由 MainWindow 在請求完成後呼叫，解除 loading 鎖定。"""
+        self._loading_more = loading
+
+    def prepend_history(self, klines: List[Kline]) -> None:
+        """
+        將更舊的 K 棒插入最前端，並平移視圖以保持當前畫面不跳動。
+        klines 應已排序（最舊在前）且不包含與現有資料重疊的 K 棒。
+        """
+        if not klines:
+            return
+        m = len(klines)
+        pi = self.getPlotItem()
+        vr = pi.viewRange()[0]   # 儲存當前可見範圍
+
+        self._klines = list(klines) + self._klines
+        self._rebuild_all()
+
+        # 將視圖右移 m 格，保持使用者正在看的位置不變
+        pi.setXRange(vr[0] + m, vr[1] + m, padding=0)
 
     # ──────────────────────────────────────────────────────────────────────────
     def get_plot_item(self) -> pg.PlotItem:

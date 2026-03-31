@@ -82,6 +82,8 @@ class MainWindow(QMainWindow):
         self._flush_timer.timeout.connect(self._flush_updates)
 
         # ── 啟動 ─────────────────────────────────────────────────────────────
+        # K 線圖左滾觸發歷史載入（只連接一次，不隨 _start_stream 重建）
+        self._kline_chart.need_more_history.connect(self._on_need_more_history)
         self._start_stream()
 
     # ══════════════════════════════════════════════════════════════
@@ -255,6 +257,8 @@ class MainWindow(QMainWindow):
         self._ws_thread.ob_snapshot_signal.connect(self._on_ob_snapshot)
         self._ws_thread.history_signal.connect(self._on_history)
         self._ws_thread.agg_history_signal.connect(self._on_agg_history)
+        self._ws_thread.more_history_signal.connect(self._on_more_history)
+        self._ws_thread.more_agg_history_signal.connect(self._on_more_agg_history)
         self._ws_thread.status_signal.connect(self._on_status)
         self._ws_thread.start()
 
@@ -386,6 +390,46 @@ class MainWindow(QMainWindow):
         self._history_proc.result_signal.connect(self._on_history_processed)
         self._history_proc.status_signal.connect(self._on_status)
         self._history_proc.start()
+
+    def _on_need_more_history(self, oldest_open_time_ms: int) -> None:
+        """K 線圖滚到最左端，請求更早的歷史資料。"""
+        if self._ws_thread:
+            self._ws_thread.request_more_history(oldest_open_time_ms)
+
+    def _on_more_history(self, rows: list) -> None:
+        """WsWorkerThread 完成更早歷史 K 線載入後回調。"""
+        self._kline_chart.set_loading_more(False)
+        if not rows:
+            return
+
+        from core.data_types import Kline as _Kline
+        new_klines = [
+            _Kline.from_rest(self._symbol, self._interval, row)
+            for row in rows
+        ]
+        # 去除與現有資料重疊的部分
+        if self._loaded_klines:
+            cutoff = self._loaded_klines[0].open_time
+            new_klines = [k for k in new_klines if k.open_time < cutoff]
+        if not new_klines:
+            return
+
+        # 將新 K 棒插入歷史最前端
+        self._loaded_klines = new_klines + self._loaded_klines
+        self._kline_timestamps = [k.open_time for k in self._loaded_klines]
+        self._fp_chart.set_kline_timestamps(self._kline_timestamps)
+
+        # Footprint 小圖已連結 x 軸，更新 timestamps 後重繪現有資料
+        fp_candles = self._fp_builder.get_candles()
+        if fp_candles:
+            self._fp_chart.update_candles(fp_candles)
+
+        # K 線圖前插新 K 棒並平移視圖
+        self._kline_chart.prepend_history(new_klines)
+
+    def _on_more_agg_history(self, payload_list: list) -> None:
+        """WsWorkerThread 完成更早 aggTrades 載入後回調，連同處理 Footprint。"""
+        self._on_agg_history(payload_list)
 
     def _on_history_processed(self, candles: list) -> None:
         """背景執行緒完成後，將 Footprint K 棒合併進主資料層並更新 UI。"""
