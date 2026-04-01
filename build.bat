@@ -3,7 +3,7 @@
 :: 執行前確保已安裝：pip install -r requirements.txt pyinstaller
 
 echo [1/3] 检查 PyInstaller...
-python -m pyinstaller --version >nul 2>&1
+python -m PyInstaller --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo PyInstaller 未安裝，正在安裝...
     pip install pyinstaller
@@ -15,7 +15,7 @@ rmdir /s /q dist  2>nul
 del /q OrderFlow.exe 2>nul
 
 echo [3/3] 開始打包...
-python -m pyinstaller orderflow.spec --clean
+python -m PyInstaller orderflow.spec --clean
 
 if %errorlevel% equ 0 (
     echo.

@@ -15,6 +15,7 @@ all_hidden   = (
     + pyqtgraph_hidden
     + websockets_hidden
     + collect_submodules("numpy")
+    + collect_submodules("strategies")
     + [
         "PyQt6.sip",
         "PyQt6.QtCore",
