@@ -7,11 +7,12 @@ K 線圖（Candlestick + Volume）。
 - 自訂時間軸（index → HH:MM）
 - 支援線性 / 對數 Y 軸切換（toggle_log_scale）
 - 對外暴露 set_history() / update_candle() / toggle_log_scale()
+- 策略標記覆蓋：set_strategy_markers() / clear_strategy_markers()
 """
 from __future__ import annotations
 import math
 from datetime import datetime
-from typing import List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
 import pyqtgraph as pg
@@ -20,6 +21,9 @@ from PyQt6.QtCore import Qt, pyqtSignal
 
 import config
 from core.data_types import Kline
+
+if TYPE_CHECKING:
+    from strategies.base import StrategySignal
 
 
 # ── 自訂時間軸 ────────────────────────────────────────────────────────────────
@@ -194,6 +198,9 @@ class KlineChart(pg.PlotWidget):
         self._loading_more: bool = False
         pi.vb.sigXRangeChanged.connect(self._on_x_range_changed)
 
+        # 策略標記视覺層（ScatterPlotItem + TextItem 列表）
+        self._strategy_items: list = []
+
         # 內部資料
         self._klines: List[Kline] = []
         self._candle_data: List[tuple] = []  # (idx, o, c, l, h)
@@ -342,6 +349,104 @@ class KlineChart(pg.PlotWidget):
         # 將視圖右移 m 格，保持使用者正在看的位置不變
         pi.setXRange(vr[0] + m, vr[1] + m, padding=0)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── 策略標記 API ──────────────────────────────────────────────────────────
+    def get_open_time_index_map(self) -> Dict[int, int]:
+        """
+        回傳 {open_time_ms: chart_index} 映射表。
+        以 KlineChart 自身 _klines 為唯一基準，
+        確保 marker x 座標與圖內部資料完全一致。
+        """
+        return {k.open_time: i for i, k in enumerate(self._klines)}
+
+    def set_strategy_markers(
+        self,
+        signals: "List[StrategySignal]",
+    ) -> None:
+        """
+        清除舊標記後，依據 signals 在 K 線圖上渲染 ▲▼ 樣式的進出場標記。
+        - long_entry / short_exit  → ▲ (小三角向上)，標在 K 棒低點下方
+        - short_entry / long_exit  → ▼ (小三角向下)，標在 K 棒高點上方
+        open_time 不存在於圖表內的 signal 會被跳過。
+        """
+        self.clear_strategy_markers()
+        if not signals or not self._klines:
+            return
+
+        pi       = self.getPlotItem()
+        ot_map   = self.get_open_time_index_map()  # {open_time: index}
+        kline_by_ot = {k.open_time: k for k in self._klines}
+
+        # 顏色映射
+        color_map = {
+            "long_entry":  config.STRATEGY_LONG_COLOR,
+            "long_exit":   config.STRATEGY_LONG_COLOR,
+            "short_entry": config.STRATEGY_SHORT_COLOR,
+            "short_exit":  config.STRATEGY_SHORT_COLOR,
+            "info":        config.STRATEGY_INFO_COLOR,
+        }
+        # below_types: 渲染在 K 棒下方；above_types: 渲染在 K 棒上方
+        below_types = {"long_entry", "short_exit", "info"}
+        above_types = {"short_entry", "long_exit"}
+
+        for sig in signals:
+            idx = ot_map.get(sig.open_time)
+            if idx is None:
+                continue  # 這根 K 棒不在圖表目前範圍內
+
+            k = kline_by_ot[sig.open_time]
+            color = color_map.get(sig.signal_type, config.STRATEGY_INFO_COLOR)
+            brush = pg.mkBrush(color)
+            pen   = pg.mkPen(color, width=1)
+
+            body_range = k.high - k.low
+            offset = body_range * 0.5 if body_range > 1e-10 else k.close * 0.005
+
+            if sig.signal_type in below_types:
+                # ▲ 向上的三角形，樓在低點下方
+                y = self._p(k.low - offset)
+                scatter = pg.ScatterPlotItem(
+                    x=[idx], y=[y],
+                    symbol="t",        # ▲
+                    size=12,
+                    brush=brush, pen=pen,
+                )
+            else:
+                # ▼ 向下的三角形，樓在高點上方
+                y = self._p(k.high + offset)
+                scatter = pg.ScatterPlotItem(
+                    x=[idx], y=[y],
+                    symbol="t1",       # ▼
+                    size=12,
+                    brush=brush, pen=pen,
+                )
+
+            pi.addItem(scatter)
+            self._strategy_items.append(scatter)
+
+            # label 文字（有內容時才加）
+            if sig.label:
+                text_y_offset = offset * 1.2
+                if sig.signal_type in below_types:
+                    ty = self._p(k.low - offset - text_y_offset)
+                else:
+                    ty = self._p(k.high + offset + text_y_offset)
+
+                txt = pg.TextItem(
+                    text=sig.label,
+                    color=color,
+                    anchor=(0.5, 0.5),
+                )
+                txt.setPos(idx, ty)
+                pi.addItem(txt)
+                self._strategy_items.append(txt)
+
+    def clear_strategy_markers(self) -> None:
+        """移除 K 線圖上所有策略標記與標籤。"""
+        pi = self.getPlotItem()
+        for item in self._strategy_items:
+            pi.removeItem(item)
+        self._strategy_items.clear()
+
+    # ─────────────────────────────────────────────────────────────────────────
     def get_plot_item(self) -> pg.PlotItem:
         return self.getPlotItem()

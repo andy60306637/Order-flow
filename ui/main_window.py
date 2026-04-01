@@ -32,6 +32,8 @@ from core.cvd_calculator import CvdCalculator
 from core.footprint_builder import FootprintBuilder
 from core.ws_client import WsWorkerThread
 from core.history_processor import HistoryProcessorThread
+from strategies import STRATEGY_REGISTRY
+from strategies.base import StrategyBase, StrategySignal
 from ui.order_book_widget import OrderBookWidget
 from ui.kline_chart import KlineChart
 from ui.cvd_chart import CvdChart, StatsPanel
@@ -66,7 +68,10 @@ class MainWindow(QMainWindow):
         # ── 節流更新旗標 ──────────────────────────────────────────────────────
         self._dirty_cvd: bool = False
         self._dirty_fp: bool  = False
-
+        # ── 策略測試狀態 ────────────────────────────────────────────
+        self._strategy_engine: Optional[StrategyBase] = None
+        self._strategy_realtime: bool = False
+        self._strategy_signals: List[StrategySignal] = []
         # ── UI ────────────────────────────────────────────────────────────────
         self._build_ui()
         self._build_toolbar()
@@ -140,7 +145,48 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        # 狀態
+        # ── 策略測試區域 ────────────────────────────────────────────────────
+        tb.addWidget(QLabel("策略 "))
+        self._strategy_combo = QComboBox()
+        self._strategy_combo.addItem("── 無 ──")
+        self._strategy_combo.addItems(list(STRATEGY_REGISTRY.keys()))
+        self._strategy_combo.currentTextChanged.connect(self._on_strategy_changed)
+        tb.addWidget(self._strategy_combo)
+
+        _btn_style = (
+            "QPushButton { background:#1e222d; color:#d1d4dc; border:1px solid #2a2e39;"
+            " border-radius:3px; padding:2px 7px; }"
+            "QPushButton:checked { background:#2962ff; color:#fff; }"
+            "QPushButton:hover   { background:#2a2e39; }"
+        )
+
+        self._run_btn = QPushButton("▶ 執行")
+        self._run_btn.setToolTip("對目前歷史 K 棒執行回測")
+        self._run_btn.setStyleSheet(_btn_style)
+        self._run_btn.clicked.connect(self._on_run_strategy)
+        tb.addWidget(self._run_btn)
+
+        self._rt_btn = QPushButton("⚡ 即時")
+        self._rt_btn.setCheckable(True)
+        self._rt_btn.setToolTip("開啟後，每根 K 棒收盤自動標註")
+        self._rt_btn.setStyleSheet(_btn_style)
+        self._rt_btn.toggled.connect(self._on_realtime_toggled)
+        tb.addWidget(self._rt_btn)
+
+        self._clear_btn = QPushButton("✕ 清除")
+        self._clear_btn.setToolTip("清除標記與統計")
+        self._clear_btn.setStyleSheet(_btn_style)
+        self._clear_btn.clicked.connect(self._on_clear_strategy)
+        tb.addWidget(self._clear_btn)
+
+        self._strategy_stats_lbl = QLabel()
+        self._strategy_stats_lbl.setStyleSheet(
+            "color:#f0c040; font-size:11px; padding-left:8px;"
+        )
+        self._strategy_stats_lbl.setVisible(False)
+        tb.addWidget(self._strategy_stats_lbl)
+
+        tb.addSeparator()
         self._status_lbl = QLabel("初始化中 …")
         self._status_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
         tb.addWidget(self._status_lbl)
@@ -249,6 +295,11 @@ class MainWindow(QMainWindow):
         self._cvd_chart.update_cvd([])
         self._stats_panel.update_data([], [])
 
+        # 重置策略狀態（清標記、統計；保留選取的策略 engine）
+        self._on_clear_strategy()
+        self._strategy_realtime = False
+        self._rt_btn.setChecked(False)
+
         # 建立新執行緒
         self._ws_thread = WsWorkerThread(self._symbol, self._interval)
         self._ws_thread.trade_signal.connect(self._on_trade)
@@ -303,6 +354,13 @@ class MainWindow(QMainWindow):
         k_raw = data["k"]
         kline = Kline.from_ws(k_raw)
 
+        # ── 同步 _loaded_klines（即時策略的前提條件）──────────────────────
+        if self._loaded_klines:
+            if self._loaded_klines[-1].open_time == kline.open_time:
+                self._loaded_klines[-1] = kline
+            else:
+                self._loaded_klines.append(kline)
+
         # 通知 CVD 新 K 棒開始
         if kline.open_time != self._current_kline_open_time:
             self._cvd_calc.on_new_candle(kline.open_time)
@@ -318,6 +376,19 @@ class MainWindow(QMainWindow):
 
         # 更新 K 線圖
         self._kline_chart.update_candle(kline)
+
+        # ── 即時策略標註（K 棒收盤後觸發）──────────────────────────
+        if (
+            kline.is_closed
+            and self._strategy_realtime
+            and self._strategy_engine is not None
+            and self._loaded_klines
+        ):
+            sig = self._strategy_engine.on_kline(kline, self._loaded_klines)
+            if sig is not None:
+                self._strategy_signals.append(sig)
+                self._kline_chart.set_strategy_markers(self._strategy_signals)
+                self._update_strategy_stats()
 
     def _on_depth(self, data: dict) -> None:
         needs_resync = self._order_book.apply_diff(data)
@@ -427,6 +498,10 @@ class MainWindow(QMainWindow):
         # K 線圖前插新 K 棒並平移視圖
         self._kline_chart.prepend_history(new_klines)
 
+        # 如果目前有策略標記，前插後 x 索引已整體右移，需重新渲染
+        if self._strategy_signals:
+            self._kline_chart.set_strategy_markers(self._strategy_signals)
+
     def _on_more_agg_history(self, payload_list: list) -> None:
         """WsWorkerThread 完成更早 aggTrades 載入後回調，連同處理 Footprint。"""
         self._on_agg_history(payload_list)
@@ -518,6 +593,53 @@ class MainWindow(QMainWindow):
         self._kline_chart.toggle_log_scale()
         lbl = "Log ✓" if checked else "Log"
         self._log_btn.setText(lbl)
+
+    # ── 策略事件 ──────────────────────────────────────────────────────────────
+
+    def _on_strategy_changed(self, name: str) -> None:
+        """下拉選單切換策略 engine。"""
+        if name == "── 無 ──":
+            self._strategy_engine = None
+        else:
+            cls = STRATEGY_REGISTRY.get(name)
+            self._strategy_engine = cls() if cls else None
+
+    def _on_run_strategy(self) -> None:
+        """對目前已載入的歷史 K 棒執行回測，繪製標記並顯示統計。"""
+        if not self._strategy_engine or not self._loaded_klines:
+            return
+        self._strategy_signals = self._strategy_engine.on_history(self._loaded_klines)
+        self._kline_chart.set_strategy_markers(self._strategy_signals)
+        self._update_strategy_stats()
+
+    def _on_realtime_toggled(self, checked: bool) -> None:
+        """⚡ 即時按鈕 toggle：開啟後每根收盤 K 棒自動標注。"""
+        self._strategy_realtime = checked
+
+    def _on_clear_strategy(self) -> None:
+        """清除所有策略標記、訊號與統計。"""
+        self._kline_chart.clear_strategy_markers()
+        self._strategy_signals = []
+        self._strategy_stats_lbl.setVisible(False)
+        self._strategy_stats_lbl.setText("")
+
+    def _update_strategy_stats(self) -> None:
+        """根據目前 _strategy_signals 計算並顯示統計 label。"""
+        if not self._strategy_engine or not self._strategy_signals:
+            self._strategy_stats_lbl.setVisible(False)
+            return
+        stats = self._strategy_engine.compute_stats(self._strategy_signals)
+        n      = stats.get("trades", 0)
+        wr     = stats.get("win_rate", 0.0)
+        pnl    = stats.get("total_pnl", 0.0)
+        opens  = stats.get("open_count", 0)
+
+        pnl_sign = "+" if pnl >= 0 else ""
+        txt = f"{n} 筆  勝率 {wr:.1f}%  PnL {pnl_sign}{pnl:.2f}%"
+        if opens:
+            txt += f"  (+{opens} 未平倉)"
+        self._strategy_stats_lbl.setText(txt)
+        self._strategy_stats_lbl.setVisible(True)
 
     # ══════════════════════════════════════════════════════════════
     # 視窗生命週期
