@@ -69,6 +69,11 @@ class StrategyBase(ABC):
 
         for sig in signals:
             if sig.signal_type == "long_entry":
+                # 對向 entry 自動平掉空單
+                if open_short is not None:
+                    pnl = (open_short - sig.price) / open_short * 100
+                    trades.append({"dir": "short", "entry": open_short, "exit": sig.price, "pnl_pct": pnl})
+                    open_short = None
                 if open_long is None:
                     open_long = sig.price
             elif sig.signal_type == "long_exit":
@@ -77,6 +82,11 @@ class StrategyBase(ABC):
                     trades.append({"dir": "long", "entry": open_long, "exit": sig.price, "pnl_pct": pnl})
                     open_long = None
             elif sig.signal_type == "short_entry":
+                # 對向 entry 自動平掉多單
+                if open_long is not None:
+                    pnl = (sig.price - open_long) / open_long * 100
+                    trades.append({"dir": "long", "entry": open_long, "exit": sig.price, "pnl_pct": pnl})
+                    open_long = None
                 if open_short is None:
                     open_short = sig.price
             elif sig.signal_type == "short_exit":
