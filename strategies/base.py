@@ -103,7 +103,8 @@ class StrategyBase(ABC):
 
         n = len(trades)
         if n == 0:
-            return {"trades": 0, "win_rate": 0.0, "total_pnl": 0.0, "open_count": open_count}
+            return {"trades": 0, "win_rate": 0.0, "total_pnl": 0.0,
+                    "open_count": open_count, "trade_list": []}
 
         wins      = sum(1 for t in trades if t["pnl_pct"] > 0)
         total_pnl = sum(t["pnl_pct"] for t in trades)
@@ -114,4 +115,5 @@ class StrategyBase(ABC):
             "win_rate":  win_rate,
             "total_pnl": total_pnl,
             "open_count": open_count,
+            "trade_list": trades,
         }

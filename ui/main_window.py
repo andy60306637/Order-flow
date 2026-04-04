@@ -22,8 +22,10 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QTabWidget,
     QVBoxLayout, QHBoxLayout, QComboBox, QLabel,
     QToolBar, QFrame, QSizePolicy, QPushButton,
+    QDialog, QTableWidget, QTableWidgetItem, QHeaderView,
 )
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QColor
+from PyQt6 import QtGui
 
 import config
 from core.data_types import Trade, Kline
@@ -41,6 +43,78 @@ from ui.heatmap_widget import HeatmapWidget
 from ui.footprint_widget import FootprintChart
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 回測結果對話框
+# ═══════════════════════════════════════════════════════════════════
+
+class BacktestResultDialog(QDialog):
+    """顯示策略回測統計摘要與逐筆交易明細。"""
+
+    def __init__(self, stats: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("回測結果")
+        self.setMinimumSize(560, 420)
+        self.setStyleSheet(
+            f"QDialog {{ background: {config.COLOR_BG}; color: {config.COLOR_FG}; }}"
+            f"QTableWidget {{ background: #1e222d; color: {config.COLOR_FG};"
+            f" gridline-color: #2a2e39; font-size: 12px; }}"
+            f"QHeaderView::section {{ background: #1e222d; color: {config.COLOR_FG};"
+            f" border: 1px solid #2a2e39; padding: 4px; font-weight: bold; }}"
+        )
+
+        layout = QVBoxLayout(self)
+
+        n      = stats.get("trades", 0)
+        wr     = stats.get("win_rate", 0.0)
+        pnl    = stats.get("total_pnl", 0.0)
+        opens  = stats.get("open_count", 0)
+        trades = stats.get("trade_list", [])
+
+        pnl_c = config.COLOR_UP if pnl >= 0 else config.COLOR_DOWN
+        pnl_s = f"+{pnl:.2f}" if pnl >= 0 else f"{pnl:.2f}"
+
+        summary = QLabel(
+            f"<b>交易次數:</b> {n} &nbsp;|&nbsp; "
+            f"<b>勝率:</b> {wr:.1f}% &nbsp;|&nbsp; "
+            f"<b>總 PnL:</b> <span style='color:{pnl_c}'>{pnl_s}%</span> &nbsp;|&nbsp; "
+            f"<b>未平倉:</b> {opens}"
+        )
+        summary.setStyleSheet("font-size: 13px; padding: 8px;")
+        layout.addWidget(summary)
+
+        if not trades:
+            layout.addWidget(QLabel("（無已平倉交易）"))
+            return
+
+        table = QTableWidget(len(trades), 5)
+        table.setHorizontalHeaderLabels(["#", "方向", "入場價", "出場價", "PnL%"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+
+        for i, t in enumerate(trades):
+            table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            dir_txt = "做多" if t["dir"] == "long" else "做空"
+            dir_item = QTableWidgetItem(dir_txt)
+            dir_item.setForeground(
+                QtGui.QColor(config.COLOR_UP if t["dir"] == "long" else config.COLOR_DOWN)
+            )
+            table.setItem(i, 1, dir_item)
+            table.setItem(i, 2, QTableWidgetItem(f"{t['entry']:,.4f}"))
+            table.setItem(i, 3, QTableWidgetItem(f"{t['exit']:,.4f}"))
+
+            pv = t["pnl_pct"]
+            pnl_txt = f"+{pv:.2f}%" if pv >= 0 else f"{pv:.2f}%"
+            pnl_item = QTableWidgetItem(pnl_txt)
+            pnl_item.setForeground(
+                QtGui.QColor(config.COLOR_UP if pv >= 0 else config.COLOR_DOWN)
+            )
+            table.setItem(i, 4, pnl_item)
+
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(table)
 
 
 class MainWindow(QMainWindow):
@@ -89,6 +163,15 @@ class MainWindow(QMainWindow):
         # ── 啟動 ─────────────────────────────────────────────────────────────
         # K 線圖左滾觸發歷史載入（只連接一次，不隨 _start_stream 重建）
         self._kline_chart.need_more_history.connect(self._on_need_more_history)
+
+        # ── 十字線同步 ────────────────────────────────────────────────────────
+        self._crosshair_charts = [
+            self._kline_chart, self._fp_chart, self._cvd_chart,
+        ]
+        for chart in self._crosshair_charts:
+            chart.crosshair_moved.connect(self._sync_crosshair)
+            chart.crosshair_left.connect(self._hide_all_crosshairs)
+
         self._start_stream()
 
     # ══════════════════════════════════════════════════════════════
@@ -294,6 +377,7 @@ class MainWindow(QMainWindow):
         self._heatmap.reset()
         self._cvd_chart.update_cvd([])
         self._stats_panel.update_data([], [])
+        self._fp_chart.reset_auto_range()
 
         # 重置策略狀態（清標記、統計；保留選取的策略 engine）
         self._on_clear_strategy()
@@ -610,7 +694,12 @@ class MainWindow(QMainWindow):
             return
         self._strategy_signals = self._strategy_engine.on_history(self._loaded_klines)
         self._kline_chart.set_strategy_markers(self._strategy_signals)
-        self._update_strategy_stats()
+        stats = self._strategy_engine.compute_stats(self._strategy_signals)
+        self._show_strategy_stats_label(stats)
+
+        # 彈出回測結果對話框
+        dlg = BacktestResultDialog(stats, parent=self)
+        dlg.exec()
 
     def _on_realtime_toggled(self, checked: bool) -> None:
         """⚡ 即時按鈕 toggle：開啟後每根收盤 K 棒自動標注。"""
@@ -629,6 +718,10 @@ class MainWindow(QMainWindow):
             self._strategy_stats_lbl.setVisible(False)
             return
         stats = self._strategy_engine.compute_stats(self._strategy_signals)
+        self._show_strategy_stats_label(stats)
+
+    def _show_strategy_stats_label(self, stats: dict) -> None:
+        """將回測統計顯示在工具列 label 上。"""
         n      = stats.get("trades", 0)
         wr     = stats.get("win_rate", 0.0)
         pnl    = stats.get("total_pnl", 0.0)
@@ -640,6 +733,24 @@ class MainWindow(QMainWindow):
             txt += f"  (+{opens} 未平倉)"
         self._strategy_stats_lbl.setText(txt)
         self._strategy_stats_lbl.setVisible(True)
+
+    # ══════════════════════════════════════════════════════════════
+    # 十字線同步
+    # ══════════════════════════════════════════════════════════════
+
+    def _sync_crosshair(self, x_pos: float) -> None:
+        """任一右側面板的十字線移動時，同步垂直線至其他面板。"""
+        sender = self.sender()
+        for chart in self._crosshair_charts:
+            if chart is not sender:
+                chart.set_crosshair_x(x_pos)
+        self._stats_panel.set_crosshair_x(x_pos)
+
+    def _hide_all_crosshairs(self) -> None:
+        """滑鼠離開面板時，隱藏所有十字線。"""
+        for chart in self._crosshair_charts:
+            chart.hide_crosshair()
+        self._stats_panel.hide_crosshair()
 
     # ══════════════════════════════════════════════════════════════
     # 視窗生命週期

@@ -45,7 +45,7 @@ from typing import List, Optional, Set, Tuple
 
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 
 import config
 from core.data_types import FootprintCandle
@@ -246,13 +246,15 @@ class FootprintItem(pg.GraphicsObject):
             self._invalidate()
 
     def set_candles(self, candles: List[FootprintCandle],
-                    x_positions: Optional[List[int]] = None) -> None:
+                    x_positions: Optional[List[int]] = None,
+                    notify_bounds: bool = True) -> None:
         self._candles = candles
         self._x_positions = (x_positions if x_positions is not None
                              else list(range(len(candles))))
         self._invalidate()
-        self.prepareGeometryChange()
-        self.informViewBoundsChanged()
+        if notify_bounds:
+            self.prepareGeometryChange()
+            self.informViewBoundsChanged()
         self.update()
 
     # ── pyqtgraph 介面 ────────────────────────────────────────────────────────
@@ -695,6 +697,10 @@ class FootprintChart(pg.PlotWidget):
       get_plot_item()             ─ 取得 PlotItem 供 x 軸連結
     """
 
+    # 十字線同步訊號
+    crosshair_moved = pyqtSignal(float)
+    crosshair_left  = pyqtSignal()
+
     def __init__(self, parent=None) -> None:
         self._time_axis = _TimeAxis()
         super().__init__(
@@ -715,6 +721,20 @@ class FootprintChart(pg.PlotWidget):
 
         self._kline_ts_to_idx: dict[int, int] = {}
 
+        # ── 十字線 ─────────────────────────────────────────────────
+        _ch_pen = pg.mkPen('#888888', width=0.8, style=Qt.PenStyle.DashLine)
+        self._ch_vline = pg.InfiniteLine(angle=90, pen=_ch_pen, movable=False)
+        self._ch_hline = pg.InfiniteLine(angle=0,  pen=_ch_pen, movable=False)
+        pi.addItem(self._ch_vline, ignoreBounds=True)
+        pi.addItem(self._ch_hline, ignoreBounds=True)
+        self._ch_vline.setVisible(False)
+        self._ch_hline.setVisible(False)
+        self._ch_active: bool = False
+        self.scene().sigMouseMoved.connect(self._on_mouse_moved)
+
+        # 首次資料更新旗標（第一次 notify bounds 以觸發 auto-range）
+        self._needs_auto_range: bool = True
+
     def set_mode(self, mode: str) -> None:
         self._fp_item.set_mode(mode)
 
@@ -728,9 +748,42 @@ class FootprintChart(pg.PlotWidget):
     def update_candles(self, candles: List[FootprintCandle]) -> None:
         x_positions = [self._kline_ts_to_idx.get(int(c.open_time), i)
                        for i, c in enumerate(candles)]
-        self._fp_item.set_candles(candles, x_positions)
+        notify = self._needs_auto_range and bool(candles)
+        self._fp_item.set_candles(candles, x_positions, notify_bounds=notify)
         self._time_axis.set_times(candles, x_positions)
+        if notify:
+            self._needs_auto_range = False
+
+    def reset_auto_range(self) -> None:
+        """符號/週期切換時呼叫，讓下次 update_candles 觸發 auto-range。"""
+        self._needs_auto_range = True
 
     def get_plot_item(self) -> pg.PlotItem:
         return self.getPlotItem()
+
+    # ── 十字線 ────────────────────────────────────────────────────────────────
+    def _on_mouse_moved(self, scene_pos) -> None:
+        vb = self.getPlotItem().vb
+        if vb.sceneBoundingRect().contains(scene_pos):
+            pt = vb.mapSceneToView(scene_pos)
+            self._ch_vline.setPos(pt.x())
+            self._ch_hline.setPos(pt.y())
+            self._ch_vline.setVisible(True)
+            self._ch_hline.setVisible(True)
+            self._ch_active = True
+            self.crosshair_moved.emit(pt.x())
+        elif self._ch_active:
+            self._ch_active = False
+            self._ch_vline.setVisible(False)
+            self._ch_hline.setVisible(False)
+            self.crosshair_left.emit()
+
+    def set_crosshair_x(self, x: float) -> None:
+        self._ch_vline.setPos(x)
+        self._ch_vline.setVisible(True)
+
+    def hide_crosshair(self) -> None:
+        self._ch_vline.setVisible(False)
+        self._ch_hline.setVisible(False)
+        self._ch_active = False
 

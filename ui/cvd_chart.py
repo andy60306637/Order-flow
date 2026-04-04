@@ -21,7 +21,7 @@ from typing import List, Tuple
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 
 import config
 
@@ -38,6 +38,10 @@ _BR_NEG = pg.mkBrush(239,  83,  80, 155)   # bar 模式：負值紅色
 class CvdChart(pg.PlotWidget):
     """CVD chart，支援 line（折線+填色）和 bar（直方圖）兩種顯示模式。"""
 
+    # 十字線同步訊號
+    crosshair_moved = pyqtSignal(float)
+    crosshair_left  = pyqtSignal()
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent, background=config.COLOR_BG)
 
@@ -53,6 +57,17 @@ class CvdChart(pg.PlotWidget):
             angle=0, pos=0, pen=_PEN_ZERO, movable=False
         )
         pi.addItem(self._zero_line)
+
+        # ── 十字線 ──────────────────────────────────────────────────────────
+        _ch_pen = pg.mkPen('#888888', width=0.8, style=Qt.PenStyle.DashLine)
+        self._ch_vline = pg.InfiniteLine(angle=90, pen=_ch_pen, movable=False)
+        self._ch_hline = pg.InfiniteLine(angle=0,  pen=_ch_pen, movable=False)
+        pi.addItem(self._ch_vline, ignoreBounds=True)
+        pi.addItem(self._ch_hline, ignoreBounds=True)
+        self._ch_vline.setVisible(False)
+        self._ch_hline.setVisible(False)
+        self._ch_active: bool = False
+        self.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
         # ── 折線模式元件 ──────────────────────────────────────────────────────
         self._curve = pi.plot(pen=_PEN_CVD)
@@ -154,6 +169,32 @@ class CvdChart(pg.PlotWidget):
     def link_x(self, other_plot: pg.PlotItem) -> None:
         """將本圖的 x 軸連結到另一個 PlotItem（例如 KlineChart）。"""
         self.getPlotItem().setXLink(other_plot)
+
+    # ── 十字線 ────────────────────────────────────────────────────────────────
+    def _on_mouse_moved(self, scene_pos) -> None:
+        vb = self.getPlotItem().vb
+        if vb.sceneBoundingRect().contains(scene_pos):
+            pt = vb.mapSceneToView(scene_pos)
+            self._ch_vline.setPos(pt.x())
+            self._ch_hline.setPos(pt.y())
+            self._ch_vline.setVisible(True)
+            self._ch_hline.setVisible(True)
+            self._ch_active = True
+            self.crosshair_moved.emit(pt.x())
+        elif self._ch_active:
+            self._ch_active = False
+            self._ch_vline.setVisible(False)
+            self._ch_hline.setVisible(False)
+            self.crosshair_left.emit()
+
+    def set_crosshair_x(self, x: float) -> None:
+        self._ch_vline.setPos(x)
+        self._ch_vline.setVisible(True)
+
+    def hide_crosshair(self) -> None:
+        self._ch_vline.setVisible(False)
+        self._ch_hline.setVisible(False)
+        self._ch_active = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -329,6 +370,12 @@ class StatsPanel(pg.PlotWidget):
         self._item = StatsItem()
         pi.addItem(self._item)
 
+        # ── 十字線（僅垂直線）───────────────────────────────────
+        _ch_pen = pg.mkPen('#888888', width=0.8, style=Qt.PenStyle.DashLine)
+        self._ch_vline = pg.InfiniteLine(angle=90, pen=_ch_pen, movable=False)
+        pi.addItem(self._ch_vline, ignoreBounds=True)
+        self._ch_vline.setVisible(False)
+
     def update_data(
         self,
         candles: list,
@@ -338,3 +385,10 @@ class StatsPanel(pg.PlotWidget):
 
     def link_x(self, other_plot: pg.PlotItem) -> None:
         self.getPlotItem().setXLink(other_plot)
+
+    def set_crosshair_x(self, x: float) -> None:
+        self._ch_vline.setPos(x)
+        self._ch_vline.setVisible(True)
+
+    def hide_crosshair(self) -> None:
+        self._ch_vline.setVisible(False)

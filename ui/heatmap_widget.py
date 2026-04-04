@@ -60,6 +60,10 @@ class HeatmapWidget(pg.PlotWidget):
         # 是否累積過一輪（用於正確顯示）
         self._filled_once = False
 
+        # 使用者是否手動縮放過（有的話不強制設定 range）
+        self._user_interacted = False
+        pi.vb.sigRangeChangedManually.connect(self._on_user_zoom)
+
     # ──────────────────────────────────────────────────────────────────────────
     def add_snapshot(
         self,
@@ -113,6 +117,10 @@ class HeatmapWidget(pg.PlotWidget):
         self._trade_buf.clear()
         self._scatter.setData([], [])
         self._current_price = 0.0
+        self._user_interacted = False
+
+    def _on_user_zoom(self) -> None:
+        self._user_interacted = True
 
     # ──────────────────────────────────────────────────────────────────────────
     def _redraw(self) -> None:
@@ -139,9 +147,10 @@ class HeatmapWidget(pg.PlotWidget):
         tr.scale(1.0, (p_max - p_min) / self._P)
         self._img.setTransform(tr)
 
-        # 同步 y 軸
-        self.getPlotItem().setYRange(p_min, p_max, padding=0)
-        self.getPlotItem().setXRange(0, self._T, padding=0)
+        # 僅在使用者未手動縮放時自動設定顯示範圍
+        if not self._user_interacted:
+            self.getPlotItem().setYRange(p_min, p_max, padding=0)
+            self.getPlotItem().setXRange(0, self._T, padding=0)
 
         # 更新成交點
         self._redraw_trades(p_min, p_max)

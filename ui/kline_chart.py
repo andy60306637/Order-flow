@@ -98,11 +98,12 @@ class CandlestickItem(pg.GraphicsObject):
         self._data: List[tuple] = []
         self._picture: Optional[QtGui.QPicture] = None
 
-    def set_data(self, data: List[tuple]) -> None:
+    def set_data(self, data: List[tuple], notify_bounds: bool = True) -> None:
         self._data = data
         self._picture = None
-        self.prepareGeometryChange()
-        self.informViewBoundsChanged()
+        if notify_bounds:
+            self.prepareGeometryChange()
+            self.informViewBoundsChanged()
         self.update()
 
     def _build(self) -> None:
@@ -156,6 +157,9 @@ class CandlestickItem(pg.GraphicsObject):
 class KlineChart(pg.PlotWidget):
     # 滾到最左端時發出，帶帶最舊一根 K 棒的 open_time_ms
     need_more_history = pyqtSignal(int)
+    # 十字線同步訊號 (x_data_pos)
+    crosshair_moved = pyqtSignal(float)
+    crosshair_left  = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         self._time_axis  = _TimeAxis()
@@ -185,6 +189,15 @@ class KlineChart(pg.PlotWidget):
         )
         pi.addItem(self._price_line)
 
+        # ── 十字線（虛線）──────────────────────────────────────────────────
+        _ch_pen = pg.mkPen('#888888', width=0.8, style=Qt.PenStyle.DashLine)
+        self._ch_vline = pg.InfiniteLine(angle=90, pen=_ch_pen, movable=False)
+        self._ch_hline = pg.InfiniteLine(angle=0,  pen=_ch_pen, movable=False)
+        pi.addItem(self._ch_vline, ignoreBounds=True)
+        pi.addItem(self._ch_hline, ignoreBounds=True)
+        self._ch_vline.setVisible(False)
+        self._ch_hline.setVisible(False)
+
         # ── Volume 獨立 ViewBox（底部 20%）─────────────────────────────────
         self._vol_vb = pg.ViewBox()
         pi.scene().addItem(self._vol_vb)
@@ -197,6 +210,10 @@ class KlineChart(pg.PlotWidget):
         # 偵測使用者滚到最左端，觸發載入更早歷史
         self._loading_more: bool = False
         pi.vb.sigXRangeChanged.connect(self._on_x_range_changed)
+
+        # 十字線滑鼠追蹤
+        self.scene().sigMouseMoved.connect(self._on_mouse_moved)
+        self._ch_active: bool = False
 
         # 策略標記视覺層（ScatterPlotItem + TextItem 列表）
         self._strategy_items: list = []
@@ -285,7 +302,7 @@ class KlineChart(pg.PlotWidget):
             timestamps.append(k.open_time)
 
         self._candle_data = candle_data
-        self._candle_item.set_data(candle_data)
+        self._candle_item.set_data(candle_data, notify_bounds=self._need_auto_range)
         self._time_axis.timestamps = timestamps
 
         # Volume bar
@@ -450,3 +467,30 @@ class KlineChart(pg.PlotWidget):
     # ─────────────────────────────────────────────────────────────────────────
     def get_plot_item(self) -> pg.PlotItem:
         return self.getPlotItem()
+
+    # ── 十字線 ────────────────────────────────────────────────────────────────
+    def _on_mouse_moved(self, scene_pos) -> None:
+        vb = self.getPlotItem().vb
+        if vb.sceneBoundingRect().contains(scene_pos):
+            pt = vb.mapSceneToView(scene_pos)
+            self._ch_vline.setPos(pt.x())
+            self._ch_hline.setPos(pt.y())
+            self._ch_vline.setVisible(True)
+            self._ch_hline.setVisible(True)
+            self._ch_active = True
+            self.crosshair_moved.emit(pt.x())
+        elif self._ch_active:
+            self._ch_active = False
+            self._ch_vline.setVisible(False)
+            self._ch_hline.setVisible(False)
+            self.crosshair_left.emit()
+
+    def set_crosshair_x(self, x: float) -> None:
+        """由外部（同步十字線）設定垂直線位置。"""
+        self._ch_vline.setPos(x)
+        self._ch_vline.setVisible(True)
+
+    def hide_crosshair(self) -> None:
+        self._ch_vline.setVisible(False)
+        self._ch_hline.setVisible(False)
+        self._ch_active = False
