@@ -11,7 +11,8 @@ SYMBOLS = [
 
 INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "4h"]
 
-# Footprint 每個交易對的最小 tick（價格分桶大小）
+# Footprint 顯示用 tick size（已針對視覺效果調校的分桶大小）
+# 這些值是「可讀性優先」的預設值，不會被 exchangeInfo 覆蓋
 TICK_SIZES: dict[str, float] = {
     "BTCUSDT":  10.0,
     "ETHUSDT":   1.0,
@@ -23,6 +24,13 @@ TICK_SIZES: dict[str, float] = {
     "AVAXUSDT":  0.01,
 }
 
+# 交易所原始 tickSize（啟動時從 exchangeInfo 動態填入）
+EXCHANGE_TICK_SIZES: dict[str, float] = {}
+
+# 價格聚合倍數選項（基於 TICK_SIZES 中的顯示用 tick）
+TICK_MULTIPLIERS = [1, 2, 5, 10, 20, 50]
+DEFAULT_TICK_MULTIPLIER = 1
+
 DEFAULT_SYMBOL   = "BTCUSDT"
 DEFAULT_INTERVAL = "1m"
 
@@ -32,6 +40,7 @@ REST_BASE = "https://fapi.binance.com"
 
 # ── 歷史 K 線 ──────────────────────────────────────────────────────────────────
 KLINE_HISTORY_LIMIT = 200
+KLINE_MAX_LOADED    = 2000   # _loaded_klines 最大長度，超過時移除最舊資料
 
 # ── Heatmap ────────────────────────────────────────────────────────────────────
 HEATMAP_TIME_SLOTS   = 300    # 保留幾個 OB 快照（x 軸）

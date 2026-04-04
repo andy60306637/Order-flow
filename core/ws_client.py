@@ -37,6 +37,7 @@ class WsWorkerThread(QThread):
     agg_history_signal      = pyqtSignal(list)   # 歷史 aggTrades（Footprint 回填用）
     more_history_signal     = pyqtSignal(list)   # 往前翻頁的更早 K 線
     more_agg_history_signal = pyqtSignal(list)   # 往前翻頁附帶的 aggTrades
+    exchange_info_signal    = pyqtSignal(dict)   # {symbol: tick_size} 動態 tick size
     status_signal           = pyqtSignal(str)    # 狀態文字
 
     def __init__(
@@ -112,6 +113,9 @@ class WsWorkerThread(QThread):
                     f"正在連線 {self._symbol.upper()} …"
                 )
                 async with aiohttp.ClientSession() as session:
+                    # 0) 動態獲取交易對的 tick size
+                    await self._fetch_exchange_info(session)
+
                     # 1) 歷史 K 線
                     history = await self._fetch_history(session)
                     if history:
@@ -179,6 +183,36 @@ class WsWorkerThread(QThread):
         snapshot = await self._fetch_ob_snapshot(session)
         if snapshot:
             self.ob_snapshot_signal.emit(snapshot)
+
+    async def _fetch_exchange_info(self, session: aiohttp.ClientSession) -> None:
+        """
+        從 GET /fapi/v1/exchangeInfo 動態獲取交易對的 tickSize，
+        發送 exchange_info_signal 給主執行緒更新 config.TICK_SIZES。
+        """
+        url = f"{config.REST_BASE}/fapi/v1/exchangeInfo"
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    logger.warning("exchangeInfo HTTP %d", r.status)
+                    return
+                data = await r.json()
+        except Exception as exc:
+            logger.error("exchangeInfo fetch error: %s", exc)
+            return
+
+        tick_map: dict[str, float] = {}
+        for sym_info in data.get("symbols", []):
+            symbol = sym_info.get("symbol", "")
+            for f in sym_info.get("filters", []):
+                if f.get("filterType") == "PRICE_FILTER":
+                    try:
+                        tick_map[symbol] = float(f["tickSize"])
+                    except (KeyError, ValueError):
+                        pass
+                    break
+        if tick_map:
+            self.exchange_info_signal.emit(tick_map)
+            logger.info("Fetched tickSize for %d symbols from exchangeInfo", len(tick_map))
 
     async def _fetch_history(
         self,
@@ -270,6 +304,7 @@ class WsWorkerThread(QThread):
         """
         分頁拉取 [start_time_ms, end_time_ms) 範圍內的 Futures aggTrades。
         每次最多 1000 筆，自動翻頁直到覆蓋整個區間。
+        根據 X-MBX-USED-WEIGHT-1M header 動態調整節流間隔。
         """
         all_trades: list = []
         from_t = start_time_ms
@@ -279,6 +314,10 @@ class WsWorkerThread(QThread):
         )
 
         retry_delay = 1.0   # 初始 429 退避秒數
+        # Binance Futures IP 限制 2400 weight/min，aggTrades weight=20
+        _WEIGHT_LIMIT = 2400
+        _AGG_WEIGHT   = 20
+
         while from_t < end_time_ms and self._running:
             url = f"{url_base}&startTime={from_t}&endTime={end_time_ms}"
             try:
@@ -296,7 +335,15 @@ class WsWorkerThread(QThread):
                     if r.status != 200:
                         logger.warning("aggTrades HTTP %d", r.status)
                         break
-                    retry_delay = 2.0   # 成功後重置（保守值，避免連續請求後仍觸發）
+                    retry_delay = 2.0   # 成功後重置
+
+                    # ── 動態節流：根據已用權重決定等待時間 ──────────────────
+                    used_weight_str = r.headers.get("X-MBX-USED-WEIGHT-1M", "")
+                    try:
+                        used_weight = int(used_weight_str) if used_weight_str else 0
+                    except ValueError:
+                        used_weight = 0
+
                     data = await r.json()
                     if not data:
                         break
@@ -307,9 +354,26 @@ class WsWorkerThread(QThread):
                     from_t = last_t + 1
                     if len(data) < 1000:
                         break       # 最後一頁
-                    # 節流：fapi aggTrades weight=20，IP 限制 2400/min → 最快 0.5s/頁
-                    # 保留 50% 餘量，使用 0.8s 確保不觸發 rate limit
-                    await asyncio.sleep(0.8)
+
+                    # 根據剩餘權重動態決定間隔
+                    if used_weight > 0:
+                        remaining = _WEIGHT_LIMIT - used_weight
+                        if remaining < _AGG_WEIGHT * 3:
+                            # 接近限制，長等待
+                            delay = 5.0
+                        elif remaining < _AGG_WEIGHT * 10:
+                            # 餘量較少，保守等待
+                            delay = 1.0
+                        elif remaining < _WEIGHT_LIMIT * 0.5:
+                            # 餘量中等
+                            delay = 0.3
+                        else:
+                            # 充裕，快速拉取
+                            delay = 0.1
+                    else:
+                        # 無 header 資訊，回退保守策略
+                        delay = 0.8
+                    await asyncio.sleep(delay)
             except Exception as exc:
                 logger.error("aggTrades fetch error: %s", exc)
                 break

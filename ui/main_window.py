@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional, List
 
 from PyQt6.QtCore import Qt, QTimer
@@ -142,6 +143,8 @@ class MainWindow(QMainWindow):
         # ── 節流更新旗標 ──────────────────────────────────────────────────────
         self._dirty_cvd: bool = False
         self._dirty_fp: bool  = False
+        self._last_trade_time: float = 0.0  # monotonic time of last aggTrade
+        self._data_stale: bool = False       # 是否處於數據過期狀態
         # ── 策略測試狀態 ────────────────────────────────────────────
         self._strategy_engine: Optional[StrategyBase] = None
         self._strategy_realtime: bool = False
@@ -159,6 +162,11 @@ class MainWindow(QMainWindow):
         self._flush_timer = QTimer(self)
         self._flush_timer.setInterval(150)
         self._flush_timer.timeout.connect(self._flush_updates)
+
+        # ── 數據過期偵測 timer（每秒檢查一次，超過 5 秒無成交顯示警告）────────
+        self._stale_timer = QTimer(self)
+        self._stale_timer.setInterval(1000)
+        self._stale_timer.timeout.connect(self._check_data_stale)
 
         # ── 啟動 ─────────────────────────────────────────────────────────────
         # K 線圖左滾觸發歷史載入（只連接一次，不隨 _start_stream 重建）
@@ -210,6 +218,19 @@ class MainWindow(QMainWindow):
         self._fp_combo.addItems(config.FOOTPRINT_MODES)
         self._fp_combo.currentTextChanged.connect(self._on_fp_mode_changed)
         tb.addWidget(self._fp_combo)
+
+        tb.addSeparator()
+
+        # Tick 聚合倍數
+        tb.addWidget(QLabel("Tick "))
+        self._tick_combo = QComboBox()
+        for m in config.TICK_MULTIPLIERS:
+            self._tick_combo.addItem(f"{m}x")
+        self._tick_combo.setCurrentIndex(
+            config.TICK_MULTIPLIERS.index(config.DEFAULT_TICK_MULTIPLIER)
+        )
+        self._tick_combo.currentIndexChanged.connect(self._on_tick_multiplier_changed)
+        tb.addWidget(self._tick_combo)
 
         tb.addSeparator()
 
@@ -370,6 +391,8 @@ class MainWindow(QMainWindow):
         )
         self._current_kline_open_time = 0
         self._last_price = 0.0
+        self._last_trade_time = 0.0
+        self._data_stale = False
         self._kline_timestamps = []
 
         # 重置 UI
@@ -394,11 +417,13 @@ class MainWindow(QMainWindow):
         self._ws_thread.agg_history_signal.connect(self._on_agg_history)
         self._ws_thread.more_history_signal.connect(self._on_more_history)
         self._ws_thread.more_agg_history_signal.connect(self._on_more_agg_history)
+        self._ws_thread.exchange_info_signal.connect(self._on_exchange_info)
         self._ws_thread.status_signal.connect(self._on_status)
         self._ws_thread.start()
 
         self._heatmap_timer.start()
         self._flush_timer.start()
+        self._stale_timer.start()
 
     # ══════════════════════════════════════════════════════════════
     # Signal handlers（主執行緒）
@@ -413,6 +438,13 @@ class MainWindow(QMainWindow):
             trade_time=int(data["T"]),
         )
         self._last_price = trade.price
+        self._last_trade_time = time.monotonic()
+
+        # 若之前處於斷線/延遲狀態，恢復正常
+        if self._data_stale:
+            self._data_stale = False
+            self._status_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
+            self._status_lbl.setText(f"已連線：{self._symbol} {self._interval}")
 
         # CVD — 只累加數值，不立即重繪
         self._cvd_calc.update(trade)
@@ -444,6 +476,9 @@ class MainWindow(QMainWindow):
                 self._loaded_klines[-1] = kline
             else:
                 self._loaded_klines.append(kline)
+                # 內存管理：限制最大長度
+                if len(self._loaded_klines) > config.KLINE_MAX_LOADED:
+                    self._loaded_klines = self._loaded_klines[-config.KLINE_MAX_LOADED:]
 
         # 通知 CVD 新 K 棒開始
         if kline.open_time != self._current_kline_open_time:
@@ -454,6 +489,7 @@ class MainWindow(QMainWindow):
             if not self._kline_timestamps or self._kline_timestamps[-1] != kline.open_time:
                 self._kline_timestamps.append(kline.open_time)
                 self._fp_chart.set_kline_timestamps(self._kline_timestamps)
+                self._fp_builder.set_kline_open_times(self._kline_timestamps)
 
         # 更新 Footprint OHLCV
         self._fp_builder.update_kline(kline)
@@ -490,6 +526,32 @@ class MainWindow(QMainWindow):
         self._order_book.init_snapshot(data)
         logger.debug("OB snapshot received")
 
+    def _on_exchange_info(self, tick_map: dict) -> None:
+        """從 exchangeInfo 動態更新交易所原始 tick，並為未知幣種推算顯示用 tick。"""
+        config.EXCHANGE_TICK_SIZES.update(tick_map)
+
+        # 僅對 TICK_SIZES 中尚未定義的幣種，自動推算合理的顯示用 tick
+        for symbol, raw_tick in tick_map.items():
+            if symbol not in config.TICK_SIZES:
+                # 啟發式：取交易所 tick 的 100 倍作為初始顯示 tick
+                # （多數幣種的原始 tick 遠小於可讀的分桶大小）
+                config.TICK_SIZES[symbol] = raw_tick * 100
+                logger.info(
+                    "Auto-computed display tick for %s: exchange=%.10g → display=%.10g",
+                    symbol, raw_tick, raw_tick * 100,
+                )
+
+        # 用目前選中的聚合倍數重新計算實際 tick size
+        base_tick = config.TICK_SIZES.get(self._symbol, 1.0)
+        multiplier = config.TICK_MULTIPLIERS[self._tick_combo.currentIndex()]
+        effective_tick = base_tick * multiplier
+        self._fp_builder.reset(tick_size=effective_tick)
+        self._fp_chart.set_tick_size(effective_tick)
+        logger.info(
+            "tickSize for %s: display_base=%.10g, multiplier=%dx, effective=%.10g",
+            self._symbol, base_tick, multiplier, effective_tick,
+        )
+
     def _on_history(self, rows: list) -> None:
         """從 REST 取得的歷史 K 線（list of list）。"""
         from core.data_types import Kline as _Kline
@@ -504,6 +566,7 @@ class MainWindow(QMainWindow):
             # 傳遞 kline timestamps 給 footprint chart 供 x 軸對齊
             self._kline_timestamps = [k.open_time for k in klines]
             self._fp_chart.set_kline_timestamps(self._kline_timestamps)
+            self._fp_builder.set_kline_open_times(self._kline_timestamps)
 
             # ── CVD: 從歷史 K 線的 taker_buy_volume 計算真正 CVD ──
             self._cvd_calc.seed_history(klines[:-1])
@@ -571,8 +634,12 @@ class MainWindow(QMainWindow):
 
         # 將新 K 棒插入歷史最前端
         self._loaded_klines = new_klines + self._loaded_klines
+        # 內存管理：限制最大長度
+        if len(self._loaded_klines) > config.KLINE_MAX_LOADED:
+            self._loaded_klines = self._loaded_klines[-config.KLINE_MAX_LOADED:]
         self._kline_timestamps = [k.open_time for k in self._loaded_klines]
         self._fp_chart.set_kline_timestamps(self._kline_timestamps)
+        self._fp_builder.set_kline_open_times(self._kline_timestamps)
 
         # Footprint 小圖已連結 x 軸，更新 timestamps 後重繪現有資料
         fp_candles = self._fp_builder.get_candles()
@@ -637,6 +704,25 @@ class MainWindow(QMainWindow):
     def _on_status(self, msg: str) -> None:
         self._status_lbl.setText(msg)
 
+    def _check_data_stale(self) -> None:
+        """每秒檢查：若超過 5 秒未收到 aggTrade，標記數據過期。"""
+        if self._last_trade_time <= 0:
+            return
+        elapsed = time.monotonic() - self._last_trade_time
+        if elapsed > 5.0 and not self._data_stale:
+            self._data_stale = True
+            self._status_lbl.setStyleSheet(
+                "color: #ff4444; font-size: 11px; font-weight: bold;"
+            )
+            self._status_lbl.setText(
+                f"⚠ 數據延遲 ({elapsed:.0f}s 無成交) — 請留意行情可能不準確"
+            )
+        elif self._data_stale and elapsed > 5.0:
+            # 持續更新延遲秒數
+            self._status_lbl.setText(
+                f"⚠ 數據延遲 ({elapsed:.0f}s 無成交) — 請留意行情可能不準確"
+            )
+
     # ══════════════════════════════════════════════════════════════
     # Heatmap timer
     # ══════════════════════════════════════════════════════════════
@@ -671,6 +757,17 @@ class MainWindow(QMainWindow):
 
     def _on_fp_mode_changed(self, mode: str) -> None:
         self._fp_chart.set_mode(mode)
+
+    def _on_tick_multiplier_changed(self, index: int) -> None:
+        """切換價格聚合倍數，重新設定 tick size 並清空 Footprint。"""
+        multiplier = config.TICK_MULTIPLIERS[index]
+        base_tick = config.TICK_SIZES.get(self._symbol, 1.0)
+        effective_tick = base_tick * multiplier
+        self._fp_builder.reset(tick_size=effective_tick)
+        self._fp_chart.set_tick_size(effective_tick)
+        if self._kline_timestamps:
+            self._fp_builder.set_kline_open_times(self._kline_timestamps)
+        logger.info("Tick multiplier changed to %dx (tick=%.10g)", multiplier, effective_tick)
 
     def _on_log_toggled(self, checked: bool) -> None:
         """Log scale 按鈕切換。"""
@@ -759,6 +856,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._heatmap_timer.stop()
         self._flush_timer.stop()
+        self._stale_timer.stop()
         if self._history_proc and self._history_proc.isRunning():
             self._history_proc.quit()
             self._history_proc.wait(3000)

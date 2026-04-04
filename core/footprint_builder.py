@@ -6,6 +6,7 @@ Footprint K 棒建構器。
 記錄每個分桶的 bid_vol / ask_vol。
 """
 from __future__ import annotations
+import bisect
 import math
 import logging
 from collections import OrderedDict
@@ -22,11 +23,29 @@ class FootprintBuilder:
         self._tick_size: float = 1.0
         self._candles: OrderedDict[int, FootprintCandle] = OrderedDict()
         self._current_open_time: int = 0
+        self._kline_open_times: List[int] = []  # 已排序的 K 棒 open_time 列表
 
     def reset(self, tick_size: float = 1.0) -> None:
         self._tick_size = tick_size
         self._candles.clear()
         self._current_open_time = 0
+        self._kline_open_times = []
+
+    def set_kline_open_times(self, times: List[int]) -> None:
+        """設定已知的 K 棒 open_time 列表（須已排序）。"""
+        self._kline_open_times = times
+
+    def resolve_open_time(self, trade_time_ms: int) -> int:
+        """
+        根據成交時間戳 (T)，用二分搜尋找出其所屬的 K 棒 open_time。
+        回傳 <= trade_time_ms 的最大 open_time；若無則回傳 0。
+        """
+        if not self._kline_open_times:
+            return self._current_open_time
+        idx = bisect.bisect_right(self._kline_open_times, trade_time_ms) - 1
+        if idx >= 0:
+            return self._kline_open_times[idx]
+        return 0
 
     # ──────────────────────────────────────────────────────────────────────────
     def _bucket(self, price: float) -> float:
@@ -45,10 +64,12 @@ class FootprintBuilder:
     def update_trade(self, trade: Trade, open_time: int = 0) -> None:
         """
         以一筆 aggTrade 更新對應 K 棒的 Footprint。
-        open_time: 目前 K 棒的 open_time（由 WS kline 事件提供），
-                   呼叫時也可直接用 positional 參數。
+        優先根據成交時間戳 (trade.trade_time) 二分搜尋確定歸屬 K 棒，
+        避免異步到達時因 _current_kline_open_time 尚未更新而歸錯根。
         """
-        kline_open_time = open_time
+        # 優先用 bisect 從成交時間戳精確定位
+        resolved = self.resolve_open_time(trade.trade_time)
+        kline_open_time = resolved if resolved > 0 else open_time
         if kline_open_time == 0:
             return
         candle = self._get_or_create_candle(kline_open_time)

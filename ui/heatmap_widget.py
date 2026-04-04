@@ -129,9 +129,11 @@ class HeatmapWidget(pg.PlotWidget):
         if p_max <= p_min:
             return
 
-        # 把循環矩陣從「最老→最新」排列（最新在右）
+        # 使用 np.concatenate 拼接兩段來生成有序視圖（避免 np.roll 拷貝整個矩陣）
         cur = self._slot_idx % self._T
-        ordered = np.roll(self._data, -cur, axis=0)  # shape (T, P)
+        ordered = np.concatenate(
+            (self._data[cur:], self._data[:cur]), axis=0
+        )  # shape (T, P)
 
         # 全域正規化到 [0, 1]
         mx = ordered.max()
