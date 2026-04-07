@@ -394,16 +394,20 @@ class KlineChart(pg.PlotWidget):
         kline_by_ot = {k.open_time: k for k in self._klines}
 
         # 顏色映射
+        _K0_COLOR = "#ff9800"   # k0 標記用橙色
         color_map = {
             "long_entry":  config.STRATEGY_LONG_COLOR,
             "long_exit":   config.STRATEGY_LONG_COLOR,
             "short_entry": config.STRATEGY_SHORT_COLOR,
             "short_exit":  config.STRATEGY_SHORT_COLOR,
             "info":        config.STRATEGY_INFO_COLOR,
+            "k0_long":     _K0_COLOR,
+            "k0_short":    _K0_COLOR,
         }
         # below_types: 渲染在 K 棒下方；above_types: 渲染在 K 棒上方
-        below_types = {"long_entry", "short_exit", "info"}
-        above_types = {"short_entry", "long_exit"}
+        below_types = {"long_entry", "short_exit", "info", "k0_long"}
+        above_types = {"short_entry", "long_exit", "k0_short"}
+        k0_types    = {"k0_long", "k0_short"}   # 菱形符號
 
         for sig in signals:
             idx = ot_map.get(sig.open_time)
@@ -417,6 +421,33 @@ class KlineChart(pg.PlotWidget):
 
             body_range = k.high - k.low
             offset = body_range * 0.5 if body_range > 1e-10 else k.close * 0.005
+
+            if sig.signal_type in k0_types:
+                # k0 標記：菱形，偏移較小（貼近 K 棒，不遇揋進出場標記）
+                k0_offset = body_range * 0.25 if body_range > 1e-10 else k.close * 0.002
+                if sig.signal_type == "k0_long":
+                    y = self._p(k.low - k0_offset)
+                else:
+                    y = self._p(k.high + k0_offset)
+                scatter = pg.ScatterPlotItem(
+                    x=[idx], y=[y],
+                    symbol="d",        # 菱形
+                    size=9,
+                    brush=brush, pen=pen,
+                )
+                pi.addItem(scatter)
+                self._strategy_items.append(scatter)
+                if sig.label:
+                    txt_offset = k0_offset * 1.4
+                    if sig.signal_type == "k0_long":
+                        ty = self._p(k.low - k0_offset - txt_offset)
+                    else:
+                        ty = self._p(k.high + k0_offset + txt_offset)
+                    txt = pg.TextItem(text=sig.label, color=color, anchor=(0.5, 0.5))
+                    txt.setPos(idx, ty)
+                    pi.addItem(txt)
+                    self._strategy_items.append(txt)
+                continue
 
             if sig.signal_type in below_types:
                 # ▲ 向上的三角形，樓在低點下方
