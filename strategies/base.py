@@ -104,16 +104,49 @@ class StrategyBase(ABC):
         n = len(trades)
         if n == 0:
             return {"trades": 0, "win_rate": 0.0, "total_pnl": 0.0,
+                    "profit_factor": 0.0, "max_consec_loss": 0,
+                    "max_drawdown": 0.0,
                     "open_count": open_count, "trade_list": []}
 
         wins      = sum(1 for t in trades if t["pnl_pct"] > 0)
         total_pnl = sum(t["pnl_pct"] for t in trades)
         win_rate  = wins / n * 100
 
+        # ── Profit Factor ────────────────────────────────────────
+        gross_profit = sum(t["pnl_pct"] for t in trades if t["pnl_pct"] > 0)
+        gross_loss   = abs(sum(t["pnl_pct"] for t in trades if t["pnl_pct"] < 0))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+
+        # ── 最大連續虧損次數 ─────────────────────────────────────
+        max_consec_loss = 0
+        cur_consec = 0
+        for t in trades:
+            if t["pnl_pct"] < 0:
+                cur_consec += 1
+                if cur_consec > max_consec_loss:
+                    max_consec_loss = cur_consec
+            else:
+                cur_consec = 0
+
+        # ── 最大回撤 (%) ────────────────────────────────────────
+        equity_peak = 0.0
+        equity = 0.0
+        max_drawdown = 0.0
+        for t in trades:
+            equity += t["pnl_pct"]
+            if equity > equity_peak:
+                equity_peak = equity
+            dd = equity_peak - equity
+            if dd > max_drawdown:
+                max_drawdown = dd
+
         return {
             "trades":    n,
             "win_rate":  win_rate,
             "total_pnl": total_pnl,
+            "profit_factor": profit_factor,
+            "max_consec_loss": max_consec_loss,
+            "max_drawdown": max_drawdown,
             "open_count": open_count,
             "trade_list": trades,
         }

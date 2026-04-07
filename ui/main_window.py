@@ -71,15 +71,22 @@ class BacktestResultDialog(QDialog):
         wr     = stats.get("win_rate", 0.0)
         pnl    = stats.get("total_pnl", 0.0)
         opens  = stats.get("open_count", 0)
+        pf     = stats.get("profit_factor", 0.0)
+        mcl    = stats.get("max_consec_loss", 0)
+        mdd    = stats.get("max_drawdown", 0.0)
         trades = stats.get("trade_list", [])
 
         pnl_c = config.COLOR_UP if pnl >= 0 else config.COLOR_DOWN
         pnl_s = f"+{pnl:.2f}" if pnl >= 0 else f"{pnl:.2f}"
+        pf_s  = f"{pf:.2f}" if pf != float("inf") else "∞"
 
         summary = QLabel(
             f"<b>交易次數:</b> {n} &nbsp;|&nbsp; "
             f"<b>勝率:</b> {wr:.1f}% &nbsp;|&nbsp; "
             f"<b>總 PnL:</b> <span style='color:{pnl_c}'>{pnl_s}%</span> &nbsp;|&nbsp; "
+            f"<b>Profit Factor:</b> {pf_s} &nbsp;|&nbsp; "
+            f"<b>最大連續虧損:</b> {mcl} &nbsp;|&nbsp; "
+            f"<b>最大回撤:</b> {mdd:.2f}% &nbsp;|&nbsp; "
             f"<b>未平倉:</b> {opens}"
         )
         summary.setStyleSheet("font-size: 13px; padding: 8px;")
@@ -823,9 +830,14 @@ class MainWindow(QMainWindow):
         wr     = stats.get("win_rate", 0.0)
         pnl    = stats.get("total_pnl", 0.0)
         opens  = stats.get("open_count", 0)
+        pf     = stats.get("profit_factor", 0.0)
+        mcl    = stats.get("max_consec_loss", 0)
+        mdd    = stats.get("max_drawdown", 0.0)
 
         pnl_sign = "+" if pnl >= 0 else ""
-        txt = f"{n} 筆  勝率 {wr:.1f}%  PnL {pnl_sign}{pnl:.2f}%"
+        pf_s = f"{pf:.2f}" if pf != float("inf") else "∞"
+        txt = (f"{n} 筆  勝率 {wr:.1f}%  PnL {pnl_sign}{pnl:.2f}%"
+               f"  PF {pf_s}  連虧 {mcl}  回撤 {mdd:.2f}%")
         if opens:
             txt += f"  (+{opens} 未平倉)"
         self._strategy_stats_lbl.setText(txt)
