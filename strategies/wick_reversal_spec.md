@@ -1,228 +1,182 @@
-# Wick Reversal 1m — 策略規格文件
+# Wick Reversal 1m 策略規格（對齊 `wick_reversal.py`）
 
-## 概覽
+## 1) 策略定位
 
-| 項目 | 內容 |
-|------|------|
-| 策略名稱 | Wick Reversal 1m |
-| 交易商品 | BTCUSDT（Binance USDT-M Futures） |
-| 週期 | 1 分鐘 |
-| 方向 | 雙向（做多 / 做空） |
-| 盈虧比 | 1:1 起（Delta 順向可追蹤放大） |
-| 同時持倉 | 最多 1 筆 |
-| 版本 | v3 |
+- 策略名稱：`Wick Reversal 1m`
+- 交易方向：雙向（做多 / 做空）
+- 資料粒度：1m K 線（使用 K 線層級 Delta）
+- 持倉限制：同時最多 1 筆
+- 版本：v3（同棒觸發、同棒成交語義）
 
 ---
 
-## 核心概念
-
-### K0 — 觸發 K 棒
-
-K0 是訊號的起點，代表一根具有**明顯引線**的反轉意圖 K 棒。
-
-- **做多 K0**：看跌 K 棒 + 長下引線（價格被下方買盤強力承接）
-- **做空 K0**：看漲 K 棒 + 長上引線（價格被上方賣盤強力壓制）
-
-> 若出現新的 K0，**立即取代**舊的 K0，不保留前一根。
-
-### 順向追蹤 — Delta Trail
-
-當價格達到 1:1 停利位時，策略檢查當前 K 棒的 Delta：
-
-- **Delta 順向**（做多 delta > 0 / 做空 delta < 0）：不出場，切換為「追蹤模式」，停損上移至原始 1:1 停利位。
-- **Delta 逆向**：正常 1:1 停利出場。
-
-追蹤模式內，持續持倉直到：
-1. **Delta 轉向**：做多時 delta ≤ 0 / 做空時 delta ≥ 0 → 以該根 K 棒的 `close` 停利出場（標記 TD）
-2. **追蹤停損觸發**：價格回落到原始 1:1 停利位 → 停損出場（標記 TS）
-
-### Zoom — 觀察窗口
-
-Zoom 為 K0 之後的第 **1 至 5** 根 K 棒，是等待突破的觀察期間。  
-Zoom 期間若防守線被破，K0 立即**失效**；若突破條件+Delta 條件同時達成，**立即進場**，不等第 5 根結束。
-
----
-
-## 做多策略
-
-### Step 1 — K0 條件
-
-```
-close < open                               ← 看跌 K 棒
-high - low > 0                             ← K 棒有實體長度
-close >= (high + low) / 2                  ← 收盤在整體 K 棒上半部（買方實際承接）
-(close - low) > (open - close)             ← 下引線長度 > 實體長度
-```
-
-$$\text{mid} = \frac{\text{high} + \text{low}}{2}$$
-$$\text{body} = \text{open} - \text{close}$$
-$$\text{lower\_wick} = \text{close} - \text{low} > \text{body}$$
-
-### Step 2 — Zoom 有效性（防守線）
-
-防守線為 **K0.low**。
-
-| 狀況 | 條件 | 結果 |
-|------|------|------|
-| 有效 | zoom 內每根 `low >= k0.low` | 持續觀察 |
-| 失效 | zoom 內任一根 `low < k0.low` | K0 立即失效，重新尋找 |
-
-### Step 3 — 進場條件
-
-zoom 內任一根 K 棒**同時**滿足：
-
-```
-high >= k0.high       ← 突破 K0 高點
-delta > 0             ← 買方主動力強（taker buy > taker sell）
-```
-
-### Step 4 — 進出場價位
-
-```
-entry  = k0.high
-stop   = k0.low - 10
-risk   = entry - stop
-target = entry + risk        (1:1 初始停利)
-```
-
-#### 追蹤模式（觸及 target 時 delta > 0）
-
-```
-trailing = True
-stop ← target                (停損上移至 1:1 位置)
-待 delta 轉負 → 以 close 停利
-或 low <= stop(1:1) → 追蹤停損
-```
-
----
-
-## 做空策略
-
-### Step 1 — K0 條件
-
-```
-close > open                               ← 看漲 K 棒
-high - low > 0                             ← K 棒有實體長度
-close <= (high + low) / 2                  ← 收盤在整體 K 棒下半部（賣方實際壓下）
-(high - close) > (close - open)            ← 上引線長度 > 實體長度
-```
-
-$$\text{mid} = \frac{\text{high} + \text{low}}{2}$$
-$$\text{body} = \text{close} - \text{open}$$
-$$\text{upper\_wick} = \text{high} - \text{close} > \text{body}$$
-
-### Step 2 — Zoom 有效性（防守線）
-
-防守線為 **K0.high**。
-
-| 狀況 | 條件 | 結果 |
-|------|------|------|
-| 有效 | zoom 內每根 `high <= k0.high` | 持續觀察 |
-| 失效 | zoom 內任一根 `high > k0.high` | K0 立即失效，重新尋找 |
-
-### Step 3 — 進場條件
-
-zoom 內任一根 K 棒**同時**滿足：
-
-```
-low <= k0.low         ← 跌破 K0 低點
-delta < 0             ← 賣方主動力強（taker sell > taker buy）
-```
-
-### Step 4 — 進出場價位
-
-```
-entry  = k0.low
-stop   = k0.high + 10
-risk   = stop - entry
-target = entry - risk        (1:1 初始停利)
-```
-
-#### 追蹤模式（觸及 target 時 delta < 0）
-
-```
-trailing = True
-stop ← target                (停損下移至 1:1 位置)
-待 delta 轉正 → 以 close 停利
-或 high >= stop(1:1) → 追蹤停損
-```
-
----
-
-## Delta 計算方式
-
-本策略使用 K 棒層級的訂單流 Delta，來自 Binance K 線資料中的 `taker_buy_volume`：
-
-$$\text{delta} = 2 \times \text{taker\_buy\_volume} - \text{volume}$$
-
-- `delta > 0`：該 K 棒買方主動量大於賣方主動量
-- `delta < 0`：該 K 棒賣方主動量大於買方主動量
-
----
-
-## 完整流程圖
-
-程式碼每根 K 棒依序執行以下四個步驟：
-
-```
-每根新 K 棒出現
-│
-├─ [Step 0] 無持倉？
-│   → 檢查 K0 條件，若符合則發出 K0 標記訊號（純圖表標記，不更新狀態）
-│
-├─ [Step 1] 有持倉？
-│   ├─ 檢查 SL：[多] k.low <= stop  → 停損出場 (SL / TS)
-│   │          [空] k.high >= stop → 停損出場 (SL / TS)
-│   ├─ 追蹤模式？
-│   │   ├─ [多] delta <= 0  → 以 close 停利出場 (TD)
-│   │   └─ [空] delta >= 0  → 以 close 停利出場 (TD)
-│   ├─ 觸及 1:1 target？
-│   │   ├─ delta 順向 → 切換追蹤模式，stop 移至 target
-│   │   └─ delta 逆向 → 正常 1:1 停利出場 (TP)
-│   ├─ 已出場 → 同根繼續往下執行 Step 2 / Step 3
-│   └─ 未出場 → continue，跳過 Step 2 / Step 3
-│
-├─ [Step 2] 有 K0 且在 Zoom 窗口內 (bars_after <= 5)？
-│   ├─ [多] low < k0.low   → K0 失效
-│   ├─ [多] high >= k0.high AND delta > 0 → 做多進場（continue）
-│   ├─ [空] high > k0.high → K0 失效
-│   └─ [空] low <= k0.low  AND delta < 0 → 做空進場（continue）
-│
-└─ [Step 3] 無持倉 → 更新 K0 狀態指針
-    ├─ 看跌 + 收在上半部 + 下引線 > 實體 → 設定為做多 K0（取代舊 K0）
-    └─ 看漲 + 收在下半部 + 上引線 > 實體 → 設定為做空 K0（取代舊 K0）
-```
-
----
-
-## 參數表
+## 2) 參數
 
 | 參數 | 預設值 | 說明 |
-|------|--------|------|
-| `zoom_bars` | `5` | K0 後的最大觀察 K 棒數 |
-| `sl_offset` | `10.0` USDT | 超出 K0 引線頂端/底部的停損位移 |
-| `rr_ratio` | `1.0` | 盈虧比（1.0 = 1:1） |
+|---|---:|---|
+| `zoom_bars` | `5` | K0 後允許突破進場的最大觀察 K 棒數 |
+| `sl_offset` | `10.0` | 進場後固定停損位移（USDT） |
+| `rr_ratio` | `1.0` | 初始風報比（1.0 = 1:1） |
 
 ---
 
-## 圖表標記說明
+## 3) Delta 定義
 
-回測結果在 K 線圖上以以下符號呈現：
+策略使用 Binance K 線的 `volume` 與 `taker_buy_volume`：
 
-| 符號 | 顏色 | 位置 | 意義 |
-|------|------|------|------|
-| ◆ 菱形 | 橙色 | K 棒引線端旁 | K0 候選標記（含失效者） |
-| ▲ 三角 | 綠色 | K 棒低點下方 | 做多進場 |
-| ▼ 三角 | 紅色 | K 棒高點上方 | 做空進場 |
-| ▲ 三角 | 綠色（標 TP/SL/TS/TD） | 對應價位 | 做多出場（停利 / 停損 / 追蹤停損 / 追蹤停利） |
-| ▼ 三角 | 紅色（標 TP/SL/TS/TD） | 對應價位 | 做空出場（停利 / 停損 / 追蹤停損 / 追蹤停利） |
+```text
+delta = 2 * taker_buy_volume - volume
+```
 
-> 橙色菱形（K0）為全量顯示，包含最終進場的 K0 以及失效未進場的 K0，可用於判斷策略識別品質。
+- `delta > 0`：買方主動量較強
+- `delta < 0`：賣方主動量較強
 
 ---
 
-## 注意事項
+## 4) 訊號型別與標籤
 
-1. **資料依賴**：Delta 計算需要 `taker_buy_volume`，歷史回填需確保 aggTrade 資料完整。
-2. **同根進出**：持倉在 SL/TP 觸發後（Step 1 出場），同根 K 棒仍會繼續執行 Step 2（Zoom 進場檢查）與 Step 3（K0 狀態指針更新）。因此同根內可發生「出場 → 立即從既有 Zoom 進場」的情形。K0 標記訊號（Step 0）因在持倉檢查之前執行且有 `not in_position` 保護，該根不會補發。
-3. **無出場訊號時**：若歷史資料末端仍有未平倉，統計欄會顯示「未平倉」數量，不計入勝率與 PnL。
+- `k0_long` / `k0_short`：僅圖表標記用，不直接開倉
+- `long_entry` / `short_entry`：進場訊號
+- `long_exit` / `short_exit`：出場訊號
+- 出場標籤：
+  - `SL`：固定停損
+  - `TP`：1:1 停利
+  - `TS`：追蹤停損（stop 已移至 1:1 位）
+  - `TD`：追蹤模式下 Delta 反轉出場（同棒以 close 出場）
+
+---
+
+## 5) K0 判定條件
+
+### 做多 K0
+
+```text
+close < open
+close >= (high + low) / 2
+(close - low) > abs(close - open)
+high - low > 0
+```
+
+### 做空 K0
+
+```text
+close > open
+close <= (high + low) / 2
+(high - close) > abs(close - open)
+high - low > 0
+```
+
+說明：
+- K0 代表「長下影（做多）/ 長上影（做空）」的潛在反轉棒。
+- 出現新 K0 時，內部狀態只保留最新一根（舊 K0 被覆蓋）。
+
+---
+
+## 6) 每根 K 棒執行順序（與程式一致）
+
+程式對每根 K 棒按下列順序處理：
+
+### Step 0：K0 標記（圖示）
+
+- 條件：`not in_position` 且該棒滿足 K0 形態
+- 動作：發出 `k0_long` / `k0_short` 標記訊號
+- 注意：這一步只做標記，不更新 K0 指標狀態
+
+### Step 1：持倉管理（僅 `in_position=True`）
+
+#### 做多持倉優先順序
+
+1. `k.low <= stop_price` -> `SL`（若 `trailing=True` 則標 `TS`）
+2. 若 `trailing=True` 且 `delta <= 0` -> `TD`，價格=`k.close`
+3. 若 `k.high >= target_price`：
+   - `delta > 0` -> 切換 `trailing=True`，`stop_price = target_price`
+   - 否則 -> `TP`，價格=`target_price`
+
+#### 做空持倉優先順序
+
+1. `k.high >= stop_price` -> `SL`（若 `trailing=True` 則標 `TS`）
+2. 若 `trailing=True` 且 `delta >= 0` -> `TD`，價格=`k.close`
+3. 若 `k.low <= target_price`：
+   - `delta < 0` -> 切換 `trailing=True`，`stop_price = target_price`
+   - 否則 -> `TP`，價格=`target_price`
+
+#### Step 1 的流程分支
+
+- 若出場成功：本棒會繼續執行 Step 2 / Step 3
+- 若未出場：`continue`，本棒不再執行 Step 2 / Step 3
+
+### Step 2：K0 + Zoom 進場判定
+
+先決條件：
+- 有 K0（`k0 is not None`）
+- `i > k0_idx`
+- `bars_after = i - k0_idx <= zoom_bars`
+
+#### 做多分支
+
+1. 若 `k.low < k0.low` -> K0 失效
+2. 否則若 `k.high >= k0.high` 且 `delta > 0` -> 進場
+
+進場定義：
+
+```text
+entry  = k0.high
+stop   = k0.low - sl_offset
+risk   = entry - stop
+target = entry + risk * rr_ratio
+```
+
+#### 做空分支
+
+1. 若 `k.high > k0.high` -> K0 失效
+2. 否則若 `k.low <= k0.low` 且 `delta < 0` -> 進場
+
+進場定義：
+
+```text
+entry  = k0.low
+stop   = k0.high + sl_offset
+risk   = stop - entry
+target = entry - risk * rr_ratio
+```
+
+#### Step 2 補充
+
+- 進場後會 `continue`，本棒不再執行 Step 3
+- 若超過 `zoom_bars`，K0 直接失效
+
+### Step 3：更新 K0 狀態指標
+
+- 條件：`not in_position` 且 `high - low > 0`
+- 動作：若當前棒符合做多/做空 K0 條件，則覆蓋 `k0 / k0_idx / k0_dir`
+
+---
+
+## 7) 價格語義（回測對接）
+
+- 進場價：做多=`k0.high`，做空=`k0.low`
+- `SL/TS`：`stop_price`
+- `TP`：`target_price`
+- `TD`：當根 `k.close`
+
+策略本身不填 `fill_price`，回測引擎將使用 `signal.price` 計算。
+
+---
+
+## 8) 狀態機摘要
+
+- `in_position`: 是否持倉
+- `pos_dir`: `"long"` / `"short"`
+- `stop_price`: 當前有效停損
+- `target_price`: 1:1 目標價
+- `trailing`: 是否進入 Delta Trail 模式
+- `k0`, `k0_idx`, `k0_dir`: 當前待突破的 K0
+
+---
+
+## 9) 重要行為與限制
+
+1. 策略採同棒觸發與同棒成交語義（含 TD 用 close），非 next-bar 執行。
+2. 同棒若同時滿足多種條件，依 Step 1 / Step 2 的程式判斷順序決定結果。
+3. SL/TS 判定優先於 TP/TD（保守路徑）。
+4. 若歷史資料最後仍有未平倉，該筆不會形成完整 round-trip 統計。
