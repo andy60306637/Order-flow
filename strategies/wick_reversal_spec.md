@@ -162,29 +162,35 @@ $$\text{delta} = 2 \times \text{taker\_buy\_volume} - \text{volume}$$
 
 ## 完整流程圖
 
+程式碼每根 K 棒依序執行以下四個步驟：
+
 ```
 每根新 K 棒出現
 │
-├─ 有持倉？
-│   ├─ 檢查 SL：k.low <= stop      → 停損出場 (SL)
-│   │       k.high >= stop     → 停損出場 (SL)
+├─ [Step 0] 無持倉？
+│   → 檢查 K0 條件，若符合則發出 K0 標記訊號（純圖表標記，不更新狀態）
+│
+├─ [Step 1] 有持倉？
+│   ├─ 檢查 SL：[多] k.low <= stop  → 停損出場 (SL / TS)
+│   │          [空] k.high >= stop → 停損出場 (SL / TS)
 │   ├─ 追蹤模式？
 │   │   ├─ [多] delta <= 0  → 以 close 停利出場 (TD)
 │   │   └─ [空] delta >= 0  → 以 close 停利出場 (TD)
 │   ├─ 觸及 1:1 target？
 │   │   ├─ delta 順向 → 切換追蹤模式，stop 移至 target
 │   │   └─ delta 逆向 → 正常 1:1 停利出場 (TP)
-│   └─ 未觸發 → 繼續持倉，跳過後續
+│   ├─ 已出場 → 同根繼續往下執行 Step 2 / Step 3
+│   └─ 未出場 → continue，跳過 Step 2 / Step 3
 │
-├─ 有 K0 且在 Zoom 窗口內 (bars_after <= 5)？
-│   ├─ [多] low < k0.low  → K0 失效
-│   ├─ [多] high >= k0.high AND delta > 0 → 做多進場
+├─ [Step 2] 有 K0 且在 Zoom 窗口內 (bars_after <= 5)？
+│   ├─ [多] low < k0.low   → K0 失效
+│   ├─ [多] high >= k0.high AND delta > 0 → 做多進場（continue）
 │   ├─ [空] high > k0.high → K0 失效
-│   └─ [空] low <= k0.low AND delta < 0  → 做空進場
+│   └─ [空] low <= k0.low  AND delta < 0 → 做空進場（continue）
 │
-└─ 無持倉 → 尋找新 K0
-    ├─ 看跌 + 收在上半部 + 下引線 > 實體 → 標記為做多 K0（取代舊 K0）
-    └─ 看漲 + 收在下半部 + 上引線 > 實體 → 標記為做空 K0（取代舊 K0）
+└─ [Step 3] 無持倉 → 更新 K0 狀態指針
+    ├─ 看跌 + 收在上半部 + 下引線 > 實體 → 設定為做多 K0（取代舊 K0）
+    └─ 看漲 + 收在下半部 + 上引線 > 實體 → 設定為做空 K0（取代舊 K0）
 ```
 
 ---
@@ -193,7 +199,6 @@ $$\text{delta} = 2 \times \text{taker\_buy\_volume} - \text{volume}$$
 
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
-
 | `zoom_bars` | `5` | K0 後的最大觀察 K 棒數 |
 | `sl_offset` | `10.0` USDT | 超出 K0 引線頂端/底部的停損位移 |
 | `rr_ratio` | `1.0` | 盈虧比（1.0 = 1:1） |
@@ -219,5 +224,5 @@ $$\text{delta} = 2 \times \text{taker\_buy\_volume} - \text{volume}$$
 ## 注意事項
 
 1. **資料依賴**：Delta 計算需要 `taker_buy_volume`，歷史回填需確保 aggTrade 資料完整。
-2. **同根進出**：持倉在 SL/TP 觸發後，同根 K 棒不會立即尋找新 K0，避免過度頻繁換倉。
+2. **同根進出**：持倉在 SL/TP 觸發後（Step 1 出場），同根 K 棒仍會繼續執行 Step 2（Zoom 進場檢查）與 Step 3（K0 狀態指針更新）。因此同根內可發生「出場 → 立即從既有 Zoom 進場」的情形。K0 標記訊號（Step 0）因在持倉檢查之前執行且有 `not in_position` 保護，該根不會補發。
 3. **無出場訊號時**：若歷史資料末端仍有未平倉，統計欄會顯示「未平倉」數量，不計入勝率與 PnL。
