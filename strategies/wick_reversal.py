@@ -24,14 +24,22 @@ def _kline_delta(k: Kline) -> float:
     return 2.0 * k.taker_buy_volume - k.volume
 
 
+def _kline_delta_eff(k: Kline) -> float:
+    """Delta efficiency = delta / volume（介於 -1 ~ +1）。"""
+    if k.volume == 0:
+        return 0.0
+    return _kline_delta(k) / k.volume
+
+
 @register
 class WickReversalStrategy(StrategyBase):
     name = "Wick Reversal 1m"
 
     # ── 可調參數 ──────────────────────────────────────────────────────────────
-    zoom_bars:  int   = 5            # k0 後觀察窗口（根）
-    sl_offset:  float = 10.0         # 固定停損位移 (USDT)
-    rr_ratio:   float = 1.0          # 盈虧比
+    zoom_bars:        int   = 5     # k0 後觀察窗口（根）
+    sl_offset:        float = 10.0   # 固定停損位移 (USDT)
+    rr_ratio:         float = 1.0    # 盈虧比
+    delta_eff_threshold: float = 0.0 # Delta Efficiency 閾值（0~1）；0 = 與原版相同
 
     # ─────────────────────────────────────────────────────────────────────────
     def on_history(self, klines: List[Kline]) -> List[StrategySignal]:
@@ -155,7 +163,7 @@ class WickReversalStrategy(StrategyBase):
                     if k0_dir == "long":
                         if k.low < k0.low:
                             k0 = None          # 防守線被破，失效
-                        elif k.high >= k0.high and _kline_delta(k) > 0:
+                        elif k.high >= k0.high and _kline_delta_eff(k) > self.delta_eff_threshold:
                             entry = k0.high
                             stop_price = k0.low - self.sl_offset
                             risk = entry - stop_price
@@ -172,7 +180,7 @@ class WickReversalStrategy(StrategyBase):
                     else:  # short
                         if k.high > k0.high:
                             k0 = None          # 防守線被破，失效
-                        elif k.low <= k0.low and _kline_delta(k) < 0:
+                        elif k.low <= k0.low and _kline_delta_eff(k) < -self.delta_eff_threshold:
                             entry = k0.low
                             stop_price = k0.high + self.sl_offset
                             risk = stop_price - entry
