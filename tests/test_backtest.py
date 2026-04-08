@@ -6,6 +6,8 @@ backtest.engine 單元測試。
   2. 槓桿放大手續費（按名目價值計算）
   3. max_loss_pct 確實限制單筆最大虧損
   4. 多空分離統計正確
+  5. 滑價模型
+  6. 資金費 & 維持保證金
 """
 import math
 import unittest
@@ -18,9 +20,10 @@ from backtest.engine import BacktestConfig, simulate_trades, FEE_RATES, _calc_qt
 # 輔助函式
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _make_signal(sig_type: str, price: float, stop: float = None, t: int = 0) -> StrategySignal:
+def _make_signal(sig_type: str, price: float, stop: float = None,
+                 t: int = 0, fill_price: float = None) -> StrategySignal:
     return StrategySignal(open_time=t, price=price, signal_type=sig_type,
-                          label="", stop_price=stop)
+                          label="", stop_price=stop, fill_price=fill_price)
 
 
 class TestFeeCalculation(unittest.TestCase):
@@ -237,6 +240,190 @@ class TestEquityTracking(unittest.TestCase):
         cfg = BacktestConfig(initial_capital=10_000, max_loss_pct=0.02, leverage=20)
         result = simulate_trades(signals, cfg)
         self.assertGreater(result["max_drawdown_pct"], 0)
+
+
+class TestSlippage(unittest.TestCase):
+    """滑價模型測試。"""
+
+    def test_slippage_worsens_long_pnl(self):
+        """滑價使做多淨利下降。"""
+        signals = [
+            _make_signal("long_entry", 50_000, stop=49_900, t=1),
+            _make_signal("long_exit", 50_200, t=2),
+        ]
+        r0 = simulate_trades(signals, BacktestConfig(initial_capital=100_000,
+                                                      slippage_bps=0.0))
+        r1 = simulate_trades(signals, BacktestConfig(initial_capital=100_000,
+                                                      slippage_bps=5.0))
+        self.assertGreater(r0["total_net_pnl"], r1["total_net_pnl"])
+
+    def test_slippage_worsens_short_pnl(self):
+        """滑價使做空淨利下降。"""
+        signals = [
+            _make_signal("short_entry", 50_000, stop=50_100, t=1),
+            _make_signal("short_exit", 49_800, t=2),
+        ]
+        r0 = simulate_trades(signals, BacktestConfig(initial_capital=100_000,
+                                                      slippage_bps=0.0))
+        r1 = simulate_trades(signals, BacktestConfig(initial_capital=100_000,
+                                                      slippage_bps=5.0))
+        self.assertGreater(r0["total_net_pnl"], r1["total_net_pnl"])
+
+    def test_zero_slippage_same_as_default(self):
+        """slippage_bps=0 結果與無滑價相同。"""
+        signals = [
+            _make_signal("long_entry", 50_000, stop=49_900, t=1),
+            _make_signal("long_exit", 50_200, t=2),
+        ]
+        r0 = simulate_trades(signals, BacktestConfig(initial_capital=10_000,
+                                                      slippage_bps=0.0))
+        r1 = simulate_trades(signals, BacktestConfig(initial_capital=10_000))
+        self.assertAlmostEqual(r0["total_net_pnl"], r1["total_net_pnl"], places=6)
+
+
+class TestFundingFee(unittest.TestCase):
+    """資金費率測試。"""
+
+    def test_funding_deducted_for_long_hold(self):
+        """持倉跨越 8h 應扣除資金費。"""
+        ms_8h = 8 * 3600 * 1000
+        signals = [
+            _make_signal("long_entry", 50_000, stop=49_900, t=0),
+            _make_signal("long_exit", 50_200, t=ms_8h * 2),  # 跨 2 次 8h
+        ]
+        cfg = BacktestConfig(initial_capital=100_000, funding_rate=0.0001,
+                             leverage=20)
+        result = simulate_trades(signals, cfg)
+        t = result["trade_list"][0]
+        self.assertGreater(t["funding_cost"], 0)
+        # 2 次 funding: entry_notional * 0.0001 * 2
+        expected = t["qty"] * t["entry"] * 0.0001 * 2
+        self.assertAlmostEqual(t["funding_cost"], expected, places=4)
+
+    def test_no_funding_within_8h(self):
+        """持倉不跨越 8h → 無資金費。"""
+        ms_1h = 3600 * 1000
+        signals = [
+            _make_signal("long_entry", 50_000, stop=49_900, t=0),
+            _make_signal("long_exit", 50_200, t=ms_1h),
+        ]
+        cfg = BacktestConfig(initial_capital=100_000, funding_rate=0.0001)
+        result = simulate_trades(signals, cfg)
+        self.assertEqual(result["trade_list"][0]["funding_cost"], 0.0)
+
+    def test_zero_funding_rate_no_cost(self):
+        """funding_rate=0 → 無資金費。"""
+        ms_8h = 8 * 3600 * 1000
+        signals = [
+            _make_signal("long_entry", 50_000, stop=49_900, t=0),
+            _make_signal("long_exit", 50_200, t=ms_8h * 3),
+        ]
+        cfg = BacktestConfig(initial_capital=100_000, funding_rate=0.0)
+        result = simulate_trades(signals, cfg)
+        self.assertEqual(result["trade_list"][0]["funding_cost"], 0.0)
+
+    def test_total_funding_in_stats(self):
+        """stats 中 total_funding 等於各筆 funding_cost 之和。"""
+        ms_8h = 8 * 3600 * 1000
+        signals = [
+            _make_signal("long_entry", 50_000, stop=49_900, t=0),
+            _make_signal("long_exit", 50_200, t=ms_8h),
+            _make_signal("short_entry", 50_000, stop=50_100, t=ms_8h * 2),
+            _make_signal("short_exit", 49_800, t=ms_8h * 4),
+        ]
+        cfg = BacktestConfig(initial_capital=100_000, funding_rate=0.0001)
+        result = simulate_trades(signals, cfg)
+        expected_total = sum(t.get("funding_cost", 0) for t in result["trade_list"]
+                            if not t.get("skipped"))
+        self.assertAlmostEqual(result["total_funding"], expected_total, places=4)
+
+
+class TestLiquidation(unittest.TestCase):
+    """爆倉判定測試。"""
+
+    def test_liquidated_above_initial_capital(self):
+        """帳戶成長後回撤至維持保證金以下，仍應觸發爆倉（不受 initial_capital 下限限制）。"""
+        # 第一筆：高槓桿大獲利，讓 equity 遠超 initial_capital
+        # 第二筆：巨虧，使 equity < maint_req 但仍 > initial_capital
+        signals = [
+            _make_signal("long_entry", 1_000, stop=995, t=0),
+            _make_signal("long_exit", 1_500, t=1),    # 大贏，equity 大漲
+            _make_signal("long_entry", 1_000, stop=995, t=2),
+            _make_signal("long_exit",    10, t=3),     # 大輸，觸發維持保證金
+        ]
+        cfg = BacktestConfig(initial_capital=100, leverage=100,
+                             max_loss_pct=1.0, fee_mode="Maker",
+                             funding_rate=0.0, maint_margin=0.5)
+        result = simulate_trades(signals, cfg)
+        liq_trades = [t for t in result["trade_list"] if t.get("liquidated")]
+        self.assertGreater(len(liq_trades), 0, "帳戶成長後巨虧應觸發爆倉")
+
+    def test_no_liquidation_when_equity_sufficient(self):
+        """正常獲利後，equity 高於維持保證金，不應爆倉。"""
+        signals = [
+            _make_signal("long_entry", 50_000, stop=49_900, t=0),
+            _make_signal("long_exit", 50_200, t=1),
+        ]
+        cfg = BacktestConfig(initial_capital=10_000, leverage=20,
+                             maint_margin=0.005, funding_rate=0.0)
+        result = simulate_trades(signals, cfg)
+        liq_trades = [t for t in result["trade_list"] if t.get("liquidated")]
+        self.assertEqual(len(liq_trades), 0)
+
+
+class TestFundingDirection(unittest.TestCase):
+    """資金費方向語義測試（正 funding_rate：多付空收）。"""
+
+    def test_long_pays_funding(self):
+        """多單在正 funding_rate 下，funding_cost > 0（為費用）。"""
+        ms_8h = 8 * 3600 * 1000
+        signals = [
+            _make_signal("long_entry", 50_000, stop=49_900, t=0),
+            _make_signal("long_exit", 50_200, t=ms_8h * 2),
+        ]
+        cfg = BacktestConfig(initial_capital=100_000, funding_rate=0.0001,
+                             leverage=20)
+        result = simulate_trades(signals, cfg)
+        t = result["trade_list"][0]
+        self.assertGreater(t["funding_cost"], 0, "多單應支付資金費（正值）")
+
+    def test_short_receives_funding(self):
+        """空單在正 funding_rate 下，funding_cost < 0（為收入），net_pnl 因此增加。"""
+        ms_8h = 8 * 3600 * 1000
+        signals = [
+            _make_signal("short_entry", 50_000, stop=50_100, t=0),
+            _make_signal("short_exit", 49_800, t=ms_8h * 2),
+        ]
+        cfg = BacktestConfig(initial_capital=100_000, funding_rate=0.0001,
+                             leverage=20)
+        result_with = simulate_trades(signals, cfg)
+        result_zero = simulate_trades(
+            signals,
+            BacktestConfig(initial_capital=100_000, funding_rate=0.0, leverage=20),
+        )
+        tw = result_with["trade_list"][0]
+        tz = result_zero["trade_list"][0]
+        self.assertLess(tw["funding_cost"], 0, "空單 funding_cost 應為負值（收取）")
+        self.assertGreater(tw["net_pnl"], tz["net_pnl"],
+                           "空單收取資金費後 net_pnl 應比無資金費版本更高")
+
+
+class TestFillPrice(unittest.TestCase):
+    """fill_price 優先使用測試。"""
+
+    def test_fill_price_used_over_signal_price(self):
+        """有 fill_price 時，PnL 用 fill_price 計算。"""
+        signals = [
+            _make_signal("long_entry", 50_000, stop=49_900, t=1, fill_price=50_050),
+            _make_signal("long_exit", 50_200, t=2, fill_price=50_180),
+        ]
+        cfg = BacktestConfig(initial_capital=100_000, leverage=20,
+                             slippage_bps=0.0, funding_rate=0.0)
+        result = simulate_trades(signals, cfg)
+        t = result["trade_list"][0]
+        # entry=50050, exit=50180 → gross = (50180-50050)*qty
+        expected_gross = (50_180 - 50_050) * t["qty"]
+        self.assertAlmostEqual(t["gross_pnl"], expected_gross, places=2)
 
 
 if __name__ == "__main__":

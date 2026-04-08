@@ -25,6 +25,12 @@ class BacktestConfig:
     max_loss_pct:    float = 0.02       # 每筆最高損失比例（0.02 = 2%）
     leverage:        int   = 20
     fee_mode:        str   = "Taker"    # "Maker" | "Taker"
+    slippage_bps:    float = 0.0        # 滑價 bps（1 bps = 0.01% = 0.0001）
+    funding_rate:    float = 0.0        # 資金費率 (0.01% per 8h)；0 = 不計
+    maint_margin:    float = 0.005       # 維持保證金率 (0.5%)
+
+
+FUNDING_INTERVAL_MS = 8 * 3600 * 1000   # 8 小時 (ms)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -48,11 +54,22 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
 
     trade_list: List[dict] = []
 
+    slip = cfg.slippage_bps * 1e-4   # bps → 小數
+
     for rt in raw_trades:
         entry_p = rt["entry"]
         exit_p  = rt["exit"]
         stop_p  = rt.get("stop")
         d       = rt["dir"]
+
+        # ── 滑價 ──────────────────────────────────────────────────
+        if slip:
+            if d == "long":
+                entry_p *= (1 + slip)   # 買入更貴
+                exit_p  *= (1 - slip)   # 賣出更便宜
+            else:
+                entry_p *= (1 - slip)   # 做空進場更低
+                exit_p  *= (1 + slip)   # 做空平倉更高
 
         qty = _calc_qty(equity, entry_p, stop_p, d, cfg.max_loss_pct, cfg.leverage)
         if qty is None:
@@ -77,18 +94,37 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
         else:
             gross_pnl = (entry_p - exit_p) * qty
 
-        net_pnl = gross_pnl - total_fee
+        # ── 資金費 (funding fee) ────────────────────────────────
+        entry_time = rt.get("entry_time", 0)
+        exit_time  = rt.get("exit_time", 0)
+        funding_cost = 0.0
+        if cfg.funding_rate and entry_time is not None and exit_time is not None:
+            hold_ms = exit_time - entry_time
+            n_fundings = int(hold_ms // FUNDING_INTERVAL_MS)
+            funding_cost = n_fundings * entry_notional * cfg.funding_rate
+
+        # ── 資金費方向：多單支付（扣費），空單收取（回收）────────────
+        if d == "short":
+            funding_cost = -funding_cost
+
+        net_pnl = gross_pnl - total_fee - funding_cost
         equity += net_pnl
+
+        # ── 維持保證金檢查（簡化爆倉）────────────────────
+        maint_req = entry_notional * cfg.maint_margin
+        liquidated = equity < maint_req
 
         trade_list.append({
             "dir": d, "entry": entry_p, "exit": exit_p,
             "qty": qty, "total_fee": total_fee,
+            "funding_cost": funding_cost,
             "gross_pnl": gross_pnl, "net_pnl": net_pnl,
             "equity_after": equity,
             "skipped": False, "skip_reason": "",
+            "liquidated": liquidated,
         })
 
-        if equity <= 0:
+        if equity <= 0 or liquidated:
             break  # 爆倉
 
     return _build_stats(trade_list, cfg, equity, open_count)
@@ -105,34 +141,43 @@ def _pair_signals(signals: List[StrategySignal]):
     open_short: Optional[float] = None
     long_stop: Optional[float] = None
     short_stop: Optional[float] = None
+    long_time: int = 0
+    short_time: int = 0
     open_count = 0
 
     for sig in signals:
+        fp = sig.fill_price or sig.price   # 優先使用實際成交價
         if sig.signal_type == "long_entry":
             if open_short is not None:
                 trades.append({"dir": "short", "entry": open_short,
-                               "exit": sig.price, "stop": short_stop})
+                               "exit": fp, "stop": short_stop,
+                               "entry_time": short_time, "exit_time": sig.open_time})
                 open_short = None
             if open_long is None:
-                open_long = sig.price
+                open_long = fp
                 long_stop = sig.stop_price
+                long_time = sig.open_time
         elif sig.signal_type == "long_exit":
             if open_long is not None:
                 trades.append({"dir": "long", "entry": open_long,
-                               "exit": sig.price, "stop": long_stop})
+                               "exit": fp, "stop": long_stop,
+                               "entry_time": long_time, "exit_time": sig.open_time})
                 open_long = None
         elif sig.signal_type == "short_entry":
             if open_long is not None:
                 trades.append({"dir": "long", "entry": open_long,
-                               "exit": sig.price, "stop": long_stop})
+                               "exit": fp, "stop": long_stop,
+                               "entry_time": long_time, "exit_time": sig.open_time})
                 open_long = None
             if open_short is None:
-                open_short = sig.price
+                open_short = fp
                 short_stop = sig.stop_price
+                short_time = sig.open_time
         elif sig.signal_type == "short_exit":
             if open_short is not None:
                 trades.append({"dir": "short", "entry": open_short,
-                               "exit": sig.price, "stop": short_stop})
+                               "exit": fp, "stop": short_stop,
+                               "entry_time": short_time, "exit_time": sig.open_time})
                 open_short = None
 
     if open_long is not None:
@@ -198,6 +243,7 @@ def _build_stats(
         "total_net_pnl": 0.0, "total_fees": 0.0,
         "profit_factor": 0.0,
         "max_consec_loss": 0, "max_drawdown_pct": 0.0,
+        "total_funding": 0.0,
         "long_trades": 0, "long_win_rate": 0.0, "long_profit_factor": 0.0,
         "short_trades": 0, "short_win_rate": 0.0, "short_profit_factor": 0.0,
         "open_count": open_count,
@@ -209,6 +255,7 @@ def _build_stats(
     wins = sum(1 for t in active if t["net_pnl"] > 0)
     total_net = sum(t["net_pnl"] for t in active)
     total_fees = sum(t["total_fee"] for t in active)
+    total_funding = sum(t.get("funding_cost", 0.0) for t in active)
 
     gp = sum(t["net_pnl"] for t in active if t["net_pnl"] > 0)
     gl = abs(sum(t["net_pnl"] for t in active if t["net_pnl"] < 0))
@@ -256,6 +303,9 @@ def _build_stats(
         "fee_mode": cfg.fee_mode,
         "fee_rate": FEE_RATES[cfg.fee_mode],
         "max_loss_pct": cfg.max_loss_pct,
+        "slippage_bps": cfg.slippage_bps,
+        "funding_rate": cfg.funding_rate,
+        "total_funding": total_funding,
         "trades": n,
         "win_rate": wins / n * 100,
         "total_net_pnl": total_net,

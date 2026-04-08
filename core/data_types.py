@@ -1,5 +1,6 @@
 """共用資料結構 (dataclasses)"""
 from __future__ import annotations
+import time as _time
 from dataclasses import dataclass, field
 from typing import Dict
 
@@ -48,18 +49,19 @@ class Kline:
     @classmethod
     def from_rest(cls, symbol: str, interval: str, row: list) -> "Kline":
         """從 REST /fapi/v1/klines 的單列建立。"""
+        close_time_ms = int(row[6])
         return cls(
             symbol=symbol,
             interval=interval,
             open_time=int(row[0]),
-            close_time=int(row[6]),
+            close_time=close_time_ms,
             open=float(row[1]),
             high=float(row[2]),
             low=float(row[3]),
             close=float(row[4]),
             volume=float(row[5]),
             taker_buy_volume=float(row[9]),
-            is_closed=True,
+            is_closed=(close_time_ms < int(_time.time() * 1000)),
         )
 
 

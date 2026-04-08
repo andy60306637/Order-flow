@@ -78,11 +78,13 @@ class BacktestResultDialog(QDialog):
         fm   = stats.get("fee_mode", "")
         fr   = stats.get("fee_rate", 0)
         mlp  = stats.get("max_loss_pct", 0)
+        slip = stats.get("slippage_bps", 0.0)
         cfg_lbl = QLabel(
             f"<b>初始資金:</b> {cap:,.0f} USDT &nbsp;|&nbsp; "
             f"<b>槓桿:</b> {lev}x &nbsp;|&nbsp; "
             f"<b>費率:</b> {fm} ({fr*100:.2f}%) &nbsp;|&nbsp; "
-            f"<b>每筆最高損失:</b> {mlp*100:.1f}%"
+            f"<b>每筆最高損失:</b> {mlp*100:.1f}% &nbsp;|&nbsp; "
+            f"<b>滑價:</b> {slip:.1f} bps"
         )
         cfg_lbl.setStyleSheet("font-size: 12px; padding: 4px 8px; color: #aaa;")
         layout.addWidget(cfg_lbl)
@@ -92,6 +94,7 @@ class BacktestResultDialog(QDialog):
         wr     = stats.get("win_rate", 0.0)
         net    = stats.get("total_net_pnl", 0.0)
         fees   = stats.get("total_fees", 0.0)
+        funding = stats.get("total_funding", 0.0)
         pf     = stats.get("profit_factor", 0.0)
         mcl    = stats.get("max_consec_loss", 0)
         mdd    = stats.get("max_drawdown_pct", 0.0)
@@ -111,7 +114,8 @@ class BacktestResultDialog(QDialog):
             f"<b>淨損益:</b> <span style='color:{net_c}'>{net_s} USDT</span> &nbsp;|&nbsp; "
             f"<b>報酬率:</b> <span style='color:{ret_c}'>{ret_s}%</span> &nbsp;|&nbsp; "
             f"<b>PF:</b> {self._fmt_pf(pf)} &nbsp;|&nbsp; "
-            f"<b>手續費:</b> {fees:,.2f}<br>"
+            f"<b>手續費:</b> {fees:,.2f} &nbsp;|&nbsp; "
+            f"<b>資金費:</b> {funding:,.2f}<br>"
             f"<b>最大連虧:</b> {mcl} &nbsp;|&nbsp; "
             f"<b>最大回撤:</b> {mdd:.2f}% &nbsp;|&nbsp; "
             f"<b>最終餘額:</b> {feq:,.2f} USDT &nbsp;|&nbsp; "
@@ -144,7 +148,7 @@ class BacktestResultDialog(QDialog):
             return
 
         # ── 交易明細表 ────────────────────────────────────────────
-        cols = ["#", "方向", "入場價", "出場價", "數量", "手續費", "淨利(USDT)", "餘額"]
+        cols = ["#", "方向", "入場價", "出場價", "數量", "手續費", "資金費", "淨利(USDT)", "餘額"]
         table = QTableWidget(len(trades), len(cols))
         table.setHorizontalHeaderLabels(cols)
         table.verticalHeader().setVisible(False)
@@ -167,6 +171,7 @@ class BacktestResultDialog(QDialog):
             table.setItem(i, 3, QTableWidgetItem(f"{t['exit']:,.4f}"))
             table.setItem(i, 4, QTableWidgetItem(f"{t.get('qty', 0):,.6f}"))
             table.setItem(i, 5, QTableWidgetItem(f"{t.get('total_fee', 0):,.2f}"))
+            table.setItem(i, 6, QTableWidgetItem(f"{t.get('funding_cost', 0):,.2f}"))
 
             pv = t.get("net_pnl", 0.0)
             pnl_txt = f"+{pv:,.2f}" if pv >= 0 else f"{pv:,.2f}"
@@ -174,8 +179,8 @@ class BacktestResultDialog(QDialog):
             pnl_item.setForeground(
                 QtGui.QColor(config.COLOR_UP if pv >= 0 else config.COLOR_DOWN)
             )
-            table.setItem(i, 6, pnl_item)
-            table.setItem(i, 7, QTableWidgetItem(f"{t.get('equity_after', 0):,.2f}"))
+            table.setItem(i, 7, pnl_item)
+            table.setItem(i, 8, QTableWidgetItem(f"{t.get('equity_after', 0):,.2f}"))
 
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(table)
@@ -383,6 +388,16 @@ class MainWindow(QMainWindow):
         self._bt_fee_combo.addItems(["Taker", "Maker"])
         self._bt_fee_combo.setToolTip("Maker=0.02%  Taker=0.05%")
         tb.addWidget(self._bt_fee_combo)
+
+        tb.addWidget(QLabel("滑價 "))
+        self._bt_slippage_spin = QDoubleSpinBox()
+        self._bt_slippage_spin.setRange(0.0, 50.0)
+        self._bt_slippage_spin.setValue(0.0)
+        self._bt_slippage_spin.setDecimals(1)
+        self._bt_slippage_spin.setSuffix(" bps")
+        self._bt_slippage_spin.setStyleSheet(_spin_style)
+        self._bt_slippage_spin.setToolTip("滑價 (1 bps = 0.01%)")
+        tb.addWidget(self._bt_slippage_spin)
 
         self._rt_btn = QPushButton("⚡ 即時")
         self._rt_btn.setCheckable(True)
@@ -989,6 +1004,7 @@ class MainWindow(QMainWindow):
             max_loss_pct=self._bt_loss_spin.value() / 100.0,
             leverage=self._bt_leverage_spin.value(),
             fee_mode=self._bt_fee_combo.currentText(),
+            slippage_bps=self._bt_slippage_spin.value(),
         )
         sim_stats = simulate_trades(self._strategy_signals, cfg)
 

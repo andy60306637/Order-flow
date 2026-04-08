@@ -18,6 +18,7 @@ class StrategySignal:
     signal_type: str    # "long_entry" | "long_exit" | "short_entry" | "short_exit" | "info"
     label:       str = field(default="")  # 顯示在標記旁的文字
     stop_price:  Optional[float] = field(default=None)  # 進場時的停損價（用於倉位計算）
+    fill_price:  Optional[float] = field(default=None)  # 實際成交價（next-bar open 等；None 時 fallback 到 price）
 
 
 class StrategyBase(ABC):
