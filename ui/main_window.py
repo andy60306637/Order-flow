@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QComboBox, QLabel,
     QToolBar, QFrame, QSizePolicy, QPushButton,
     QDialog, QTableWidget, QTableWidgetItem, QHeaderView,
+    QSpinBox, QDoubleSpinBox,
 )
 from PyQt6.QtGui import QAction, QColor
 from PyQt6 import QtGui
@@ -51,12 +52,16 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════
 
 class BacktestResultDialog(QDialog):
-    """顯示策略回測統計摘要與逐筆交易明細。"""
+    """顯示策略回測統計摘要與逐筆交易明細（含資金/手續費/多空分離）。"""
+
+    @staticmethod
+    def _fmt_pf(v: float) -> str:
+        return "∞" if v == float("inf") else f"{v:.2f}"
 
     def __init__(self, stats: dict, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("回測結果")
-        self.setMinimumSize(560, 420)
+        self.setMinimumSize(720, 520)
         self.setStyleSheet(
             f"QDialog {{ background: {config.COLOR_BG}; color: {config.COLOR_FG}; }}"
             f"QTableWidget {{ background: #1e222d; color: {config.COLOR_FG};"
@@ -67,44 +72,92 @@ class BacktestResultDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
+        # ── 回測參數回顯 ──────────────────────────────────────────
+        cap  = stats.get("initial_capital", 0)
+        lev  = stats.get("leverage", 0)
+        fm   = stats.get("fee_mode", "")
+        fr   = stats.get("fee_rate", 0)
+        mlp  = stats.get("max_loss_pct", 0)
+        cfg_lbl = QLabel(
+            f"<b>初始資金:</b> {cap:,.0f} USDT &nbsp;|&nbsp; "
+            f"<b>槓桿:</b> {lev}x &nbsp;|&nbsp; "
+            f"<b>費率:</b> {fm} ({fr*100:.2f}%) &nbsp;|&nbsp; "
+            f"<b>每筆最高損失:</b> {mlp*100:.1f}%"
+        )
+        cfg_lbl.setStyleSheet("font-size: 12px; padding: 4px 8px; color: #aaa;")
+        layout.addWidget(cfg_lbl)
+
+        # ── 整體統計 ──────────────────────────────────────────────
         n      = stats.get("trades", 0)
         wr     = stats.get("win_rate", 0.0)
-        pnl    = stats.get("total_pnl", 0.0)
-        opens  = stats.get("open_count", 0)
+        net    = stats.get("total_net_pnl", 0.0)
+        fees   = stats.get("total_fees", 0.0)
         pf     = stats.get("profit_factor", 0.0)
         mcl    = stats.get("max_consec_loss", 0)
-        mdd    = stats.get("max_drawdown", 0.0)
+        mdd    = stats.get("max_drawdown_pct", 0.0)
+        feq    = stats.get("final_equity", 0.0)
+        ret    = stats.get("total_return_pct", 0.0)
+        opens  = stats.get("open_count", 0)
         trades = stats.get("trade_list", [])
 
-        pnl_c = config.COLOR_UP if pnl >= 0 else config.COLOR_DOWN
-        pnl_s = f"+{pnl:.2f}" if pnl >= 0 else f"{pnl:.2f}"
-        pf_s  = f"{pf:.2f}" if pf != float("inf") else "∞"
+        net_c = config.COLOR_UP if net >= 0 else config.COLOR_DOWN
+        net_s = f"+{net:,.2f}" if net >= 0 else f"{net:,.2f}"
+        ret_c = config.COLOR_UP if ret >= 0 else config.COLOR_DOWN
+        ret_s = f"+{ret:.2f}" if ret >= 0 else f"{ret:.2f}"
 
         summary = QLabel(
             f"<b>交易次數:</b> {n} &nbsp;|&nbsp; "
             f"<b>勝率:</b> {wr:.1f}% &nbsp;|&nbsp; "
-            f"<b>總 PnL:</b> <span style='color:{pnl_c}'>{pnl_s}%</span> &nbsp;|&nbsp; "
-            f"<b>Profit Factor:</b> {pf_s} &nbsp;|&nbsp; "
-            f"<b>最大連續虧損:</b> {mcl} &nbsp;|&nbsp; "
+            f"<b>淨損益:</b> <span style='color:{net_c}'>{net_s} USDT</span> &nbsp;|&nbsp; "
+            f"<b>報酬率:</b> <span style='color:{ret_c}'>{ret_s}%</span> &nbsp;|&nbsp; "
+            f"<b>PF:</b> {self._fmt_pf(pf)} &nbsp;|&nbsp; "
+            f"<b>手續費:</b> {fees:,.2f}<br>"
+            f"<b>最大連虧:</b> {mcl} &nbsp;|&nbsp; "
             f"<b>最大回撤:</b> {mdd:.2f}% &nbsp;|&nbsp; "
+            f"<b>最終餘額:</b> {feq:,.2f} USDT &nbsp;|&nbsp; "
             f"<b>未平倉:</b> {opens}"
         )
         summary.setStyleSheet("font-size: 13px; padding: 8px;")
         layout.addWidget(summary)
 
+        # ── 多空分離統計 ──────────────────────────────────────────
+        ln  = stats.get("long_trades", 0)
+        lwr = stats.get("long_win_rate", 0.0)
+        lpf = stats.get("long_profit_factor", 0.0)
+        sn  = stats.get("short_trades", 0)
+        swr = stats.get("short_win_rate", 0.0)
+        spf = stats.get("short_profit_factor", 0.0)
+
+        side_lbl = QLabel(
+            f"<span style='color:{config.COLOR_UP}'>"
+            f"<b>做多:</b> {ln} 筆 &nbsp; 勝率 {lwr:.1f}% &nbsp; PF {self._fmt_pf(lpf)}"
+            f"</span> &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"<span style='color:{config.COLOR_DOWN}'>"
+            f"<b>做空:</b> {sn} 筆 &nbsp; 勝率 {swr:.1f}% &nbsp; PF {self._fmt_pf(spf)}"
+            f"</span>"
+        )
+        side_lbl.setStyleSheet("font-size: 13px; padding: 4px 8px;")
+        layout.addWidget(side_lbl)
+
         if not trades:
             layout.addWidget(QLabel("（無已平倉交易）"))
             return
 
-        table = QTableWidget(len(trades), 5)
-        table.setHorizontalHeaderLabels(["#", "方向", "入場價", "出場價", "PnL%"])
+        # ── 交易明細表 ────────────────────────────────────────────
+        cols = ["#", "方向", "入場價", "出場價", "數量", "手續費", "淨利(USDT)", "餘額"]
+        table = QTableWidget(len(trades), len(cols))
+        table.setHorizontalHeaderLabels(cols)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
 
         for i, t in enumerate(trades):
             table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            dir_txt = "做多" if t["dir"] == "long" else "做空"
+
+            skipped = t.get("skipped", False)
+            dir_txt = ("做多" if t["dir"] == "long" else "做空")
+            if skipped:
+                dir_txt += " (跳過)"
             dir_item = QTableWidgetItem(dir_txt)
             dir_item.setForeground(
                 QtGui.QColor(config.COLOR_UP if t["dir"] == "long" else config.COLOR_DOWN)
@@ -112,14 +165,17 @@ class BacktestResultDialog(QDialog):
             table.setItem(i, 1, dir_item)
             table.setItem(i, 2, QTableWidgetItem(f"{t['entry']:,.4f}"))
             table.setItem(i, 3, QTableWidgetItem(f"{t['exit']:,.4f}"))
+            table.setItem(i, 4, QTableWidgetItem(f"{t.get('qty', 0):,.6f}"))
+            table.setItem(i, 5, QTableWidgetItem(f"{t.get('total_fee', 0):,.2f}"))
 
-            pv = t["pnl_pct"]
-            pnl_txt = f"+{pv:.2f}%" if pv >= 0 else f"{pv:.2f}%"
+            pv = t.get("net_pnl", 0.0)
+            pnl_txt = f"+{pv:,.2f}" if pv >= 0 else f"{pv:,.2f}"
             pnl_item = QTableWidgetItem(pnl_txt)
             pnl_item.setForeground(
                 QtGui.QColor(config.COLOR_UP if pv >= 0 else config.COLOR_DOWN)
             )
-            table.setItem(i, 4, pnl_item)
+            table.setItem(i, 6, pnl_item)
+            table.setItem(i, 7, QTableWidgetItem(f"{t.get('equity_after', 0):,.2f}"))
 
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(table)
@@ -277,6 +333,57 @@ class MainWindow(QMainWindow):
         self._run_btn.clicked.connect(self._on_run_strategy)
         tb.addWidget(self._run_btn)
 
+        # 回測範圍選擇
+        self._bt_range_combo = QComboBox()
+        for label in config.BACKTEST_RANGE_OPTIONS:
+            self._bt_range_combo.addItem(label)
+        self._bt_range_combo.setToolTip("回測資料範圍（點 ▶ 時自動載入不足的歷史）")
+        tb.addWidget(self._bt_range_combo)
+
+        tb.addSeparator()
+
+        # ── 回測參數 ────────────────────────────────────────────────────
+        _spin_style = (
+            "QSpinBox, QDoubleSpinBox { background:#1e222d; color:#d1d4dc;"
+            " border:1px solid #2a2e39; border-radius:3px; padding:2px 4px;"
+            " min-width:60px; }"
+        )
+
+        tb.addWidget(QLabel("資金 "))
+        self._bt_capital_spin = QDoubleSpinBox()
+        self._bt_capital_spin.setRange(100, 10_000_000)
+        self._bt_capital_spin.setValue(10_000)
+        self._bt_capital_spin.setDecimals(0)
+        self._bt_capital_spin.setSuffix(" U")
+        self._bt_capital_spin.setStyleSheet(_spin_style)
+        self._bt_capital_spin.setToolTip("初始資金 (USDT)")
+        tb.addWidget(self._bt_capital_spin)
+
+        tb.addWidget(QLabel("損失 "))
+        self._bt_loss_spin = QDoubleSpinBox()
+        self._bt_loss_spin.setRange(0.1, 50.0)
+        self._bt_loss_spin.setValue(2.0)
+        self._bt_loss_spin.setDecimals(1)
+        self._bt_loss_spin.setSuffix("%")
+        self._bt_loss_spin.setStyleSheet(_spin_style)
+        self._bt_loss_spin.setToolTip("每筆最高損失百分比")
+        tb.addWidget(self._bt_loss_spin)
+
+        tb.addWidget(QLabel("槓桿 "))
+        self._bt_leverage_spin = QSpinBox()
+        self._bt_leverage_spin.setRange(1, 125)
+        self._bt_leverage_spin.setValue(20)
+        self._bt_leverage_spin.setSuffix("x")
+        self._bt_leverage_spin.setStyleSheet(_spin_style)
+        self._bt_leverage_spin.setToolTip("槓桿倍數")
+        tb.addWidget(self._bt_leverage_spin)
+
+        tb.addWidget(QLabel("費率 "))
+        self._bt_fee_combo = QComboBox()
+        self._bt_fee_combo.addItems(["Taker", "Maker"])
+        self._bt_fee_combo.setToolTip("Maker=0.02%  Taker=0.05%")
+        tb.addWidget(self._bt_fee_combo)
+
         self._rt_btn = QPushButton("⚡ 即時")
         self._rt_btn.setCheckable(True)
         self._rt_btn.setToolTip("開啟後，每根 K 棒收盤自動標註")
@@ -426,6 +533,7 @@ class MainWindow(QMainWindow):
         self._ws_thread.more_agg_history_signal.connect(self._on_more_agg_history)
         self._ws_thread.exchange_info_signal.connect(self._on_exchange_info)
         self._ws_thread.status_signal.connect(self._on_status)
+        self._ws_thread.backtest_history_signal.connect(self._on_backtest_history)
         self._ws_thread.start()
 
         self._heatmap_timer.start()
@@ -492,9 +600,11 @@ class MainWindow(QMainWindow):
             self._cvd_calc.on_new_candle(kline.open_time)
             self._current_kline_open_time = kline.open_time
             self._fp_builder.set_current_open_time(kline.open_time)
-            # 更新 kline timestamps 供 footprint 對齊
+            # 更新 kline timestamps 供 footprint 對齊（並上限 KLINE_MAX_LOADED 防長時間記憶體增長）
             if not self._kline_timestamps or self._kline_timestamps[-1] != kline.open_time:
                 self._kline_timestamps.append(kline.open_time)
+                if len(self._kline_timestamps) > config.KLINE_MAX_LOADED:
+                    self._kline_timestamps = self._kline_timestamps[-config.KLINE_MAX_LOADED:]
                 self._fp_chart.set_kline_timestamps(self._kline_timestamps)
                 self._fp_builder.set_kline_open_times(self._kline_timestamps)
 
@@ -514,6 +624,9 @@ class MainWindow(QMainWindow):
             sig = self._strategy_engine.on_kline(kline, self._loaded_klines)
             if sig is not None:
                 self._strategy_signals.append(sig)
+                # 上限 2000 筆，防止長時間燒機時 set_strategy_markers O(N) 惡化
+                if len(self._strategy_signals) > 2000:
+                    self._strategy_signals = self._strategy_signals[-2000:]
                 self._kline_chart.set_strategy_markers(self._strategy_signals)
                 self._update_strategy_stats()
 
@@ -582,7 +695,8 @@ class MainWindow(QMainWindow):
             self._fp_builder.set_current_open_time(klines[-1].open_time)
 
             # 立即將歷史 CVD 曲線渲染到畫面上
-            self._cvd_chart.update_cvd(self._cvd_calc.get_series())
+            ot_map = self._kline_chart.get_open_time_index_map()
+            self._cvd_chart.update_cvd(self._cvd_calc.get_series(), ot_map)
 
     def _on_agg_history(self, payload_list: list) -> None:
         """
@@ -688,8 +802,9 @@ class MainWindow(QMainWindow):
                         live.levels[price] = lv
 
         fp_candles = self._fp_builder.get_candles()
-        self._fp_chart.update_candles(fp_candles)
-        self._stats_panel.update_data(fp_candles, self._cvd_calc.get_series())
+        ot_map = self._kline_chart.get_open_time_index_map()
+        self._fp_chart.update_candles(fp_candles, ot_map)
+        self._stats_panel.update_data(fp_candles, self._cvd_calc.get_series(), ot_map)
         self._status_lbl.setText(f"已連線：{self._symbol} {self._interval}")
 
     def _flush_updates(self) -> None:
@@ -697,16 +812,18 @@ class MainWindow(QMainWindow):
         if self._dirty_cvd or self._dirty_fp:
             cvd_series = self._cvd_calc.get_series()
             fp_candles = self._fp_builder.get_candles()
+            # 統一使用 KlineChart 的当前索引映射，避免 kline 截斷後各圖表 x 坐標漂移
+            ot_map = self._kline_chart.get_open_time_index_map()
 
             if self._dirty_cvd:
-                self._cvd_chart.update_cvd(cvd_series)
+                self._cvd_chart.update_cvd(cvd_series, ot_map)
                 self._dirty_cvd = False
 
             if self._dirty_fp:
-                self._fp_chart.update_candles(fp_candles)
+                self._fp_chart.update_candles(fp_candles, ot_map)
                 self._dirty_fp = False
 
-            self._stats_panel.update_data(fp_candles, cvd_series)
+            self._stats_panel.update_data(fp_candles, cvd_series, ot_map)
 
     def _on_status(self, msg: str) -> None:
         self._status_lbl.setText(msg)
@@ -796,13 +913,86 @@ class MainWindow(QMainWindow):
         """對目前已載入的歷史 K 棒執行回測，繪製標記並顯示統計。"""
         if not self._strategy_engine or not self._loaded_klines:
             return
+
+        # 取得使用者選取的回測範圍（K 棒數量）
+        range_label = self._bt_range_combo.currentText()
+        need = config.BACKTEST_RANGE_OPTIONS.get(range_label, 200)
+        have = len(self._loaded_klines)
+
+        if have < need:
+            # 資料不足 → 批量載入後才執行回測
+            self._run_btn.setEnabled(False)
+            self._run_btn.setText("載入中…")
+            if self._ws_thread:
+                self._ws_thread.request_backtest_history(need)
+            return
+
+        self._execute_backtest()
+
+    def _on_backtest_history(self, rows: list) -> None:
+        """批量歷史載入完成後的回調。"""
+        self._run_btn.setEnabled(True)
+        self._run_btn.setText("▶ 執行")
+
+        if not rows:
+            self._status_lbl.setText("回測歷史載入失敗")
+            return
+
+        from core.data_types import Kline as _Kline
+        klines = [
+            _Kline.from_rest(self._symbol, self._interval, row)
+            for row in rows
+        ]
+
+        # 合併：將現有即時 K 棒中較新的資料附加在歷史之後
+        if self._loaded_klines:
+            latest_hist_ot = klines[-1].open_time
+            newer = [k for k in self._loaded_klines if k.open_time > latest_hist_ot]
+            if newer:
+                klines.extend(newer)
+
+        self._loaded_klines = klines
+        self._kline_timestamps = [k.open_time for k in klines]
+
+        # 更新 KlineChart 以顯示完整歷史
+        self._kline_chart.set_history(klines)
+        self._fp_chart.set_kline_timestamps(self._kline_timestamps)
+        self._fp_builder.set_kline_open_times(self._kline_timestamps)
+
+        # 重新計算 CVD
+        self._cvd_calc.seed_history(klines[:-1])
+        self._cvd_calc.on_new_candle(klines[-1].open_time)
+        self._current_kline_open_time = klines[-1].open_time
+        ot_map = self._kline_chart.get_open_time_index_map()
+        self._cvd_chart.update_cvd(self._cvd_calc.get_series(), ot_map)
+
+        n = len(klines)
+        self._status_lbl.setText(f"已載入 {n} 根 K 棒，開始回測…")
+
+        # 自動接續回測
+        if self._strategy_engine:
+            self._execute_backtest()
+
+    def _execute_backtest(self) -> None:
+        """以 _loaded_klines 執行回測並顯示結果。"""
         self._strategy_signals = self._strategy_engine.on_history(self._loaded_klines)
         self._kline_chart.set_strategy_markers(self._strategy_signals)
-        stats = self._strategy_engine.compute_stats(self._strategy_signals)
-        self._show_strategy_stats_label(stats)
 
-        # 彈出回測結果對話框
-        dlg = BacktestResultDialog(stats, parent=self)
+        # 工具列簡易統計（百分比）
+        basic_stats = self._strategy_engine.compute_stats(self._strategy_signals)
+        self._show_strategy_stats_label(basic_stats)
+
+        # 完整模擬（資金/手續費/倉位）
+        from backtest.engine import BacktestConfig, simulate_trades
+        cfg = BacktestConfig(
+            initial_capital=self._bt_capital_spin.value(),
+            max_loss_pct=self._bt_loss_spin.value() / 100.0,
+            leverage=self._bt_leverage_spin.value(),
+            fee_mode=self._bt_fee_combo.currentText(),
+        )
+        sim_stats = simulate_trades(self._strategy_signals, cfg)
+
+        dlg = BacktestResultDialog(sim_stats, parent=self)
         dlg.exec()
 
     def _on_realtime_toggled(self, checked: bool) -> None:
@@ -833,11 +1023,14 @@ class MainWindow(QMainWindow):
         pf     = stats.get("profit_factor", 0.0)
         mcl    = stats.get("max_consec_loss", 0)
         mdd    = stats.get("max_drawdown", 0.0)
+        ln     = stats.get("long_trades", 0)
+        sn     = stats.get("short_trades", 0)
 
         pnl_sign = "+" if pnl >= 0 else ""
         pf_s = f"{pf:.2f}" if pf != float("inf") else "∞"
         txt = (f"{n} 筆  勝率 {wr:.1f}%  PnL {pnl_sign}{pnl:.2f}%"
-               f"  PF {pf_s}  連虧 {mcl}  回撤 {mdd:.2f}%")
+               f"  PF {pf_s}  連虧 {mcl}  回撤 {mdd:.2f}%"
+               f"  L{ln}/S{sn}")
         if opens:
             txt += f"  (+{opens} 未平倉)"
         self._strategy_stats_lbl.setText(txt)

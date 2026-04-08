@@ -161,6 +161,7 @@ class WickReversalStrategy(StrategyBase):
                             signals.append(StrategySignal(
                                 open_time=k.open_time, price=entry,
                                 signal_type="long_entry", label="L",
+                                stop_price=stop_price,
                             ))
                             in_position = True
                             pos_dir = "long"
@@ -177,6 +178,7 @@ class WickReversalStrategy(StrategyBase):
                             signals.append(StrategySignal(
                                 open_time=k.open_time, price=entry,
                                 signal_type="short_entry", label="S",
+                                stop_price=stop_price,
                             ))
                             in_position = True
                             pos_dir = "short"

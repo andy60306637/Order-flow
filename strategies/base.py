@@ -17,6 +17,7 @@ class StrategySignal:
     price:       float  # 訊號觸發價格（通常為收盤價）
     signal_type: str    # "long_entry" | "long_exit" | "short_entry" | "short_exit" | "info"
     label:       str = field(default="")  # 顯示在標記旁的文字
+    stop_price:  Optional[float] = field(default=None)  # 進場時的停損價（用於倉位計算）
 
 
 class StrategyBase(ABC):
@@ -106,6 +107,8 @@ class StrategyBase(ABC):
             return {"trades": 0, "win_rate": 0.0, "total_pnl": 0.0,
                     "profit_factor": 0.0, "max_consec_loss": 0,
                     "max_drawdown": 0.0,
+                    "long_trades": 0, "long_win_rate": 0.0, "long_profit_factor": 0.0,
+                    "short_trades": 0, "short_win_rate": 0.0, "short_profit_factor": 0.0,
                     "open_count": open_count, "trade_list": []}
 
         wins      = sum(1 for t in trades if t["pnl_pct"] > 0)
@@ -140,6 +143,19 @@ class StrategyBase(ABC):
             if dd > max_drawdown:
                 max_drawdown = dd
 
+        # ── 多空分離統計 ─────────────────────────────────────────
+        def _side_pf(side_trades):
+            sn = len(side_trades)
+            if sn == 0:
+                return 0, 0.0, 0.0
+            sw = sum(1 for t in side_trades if t["pnl_pct"] > 0)
+            sgp = sum(t["pnl_pct"] for t in side_trades if t["pnl_pct"] > 0)
+            sgl = abs(sum(t["pnl_pct"] for t in side_trades if t["pnl_pct"] < 0))
+            return sn, sw / sn * 100, (sgp / sgl if sgl > 0 else float("inf"))
+
+        long_n, long_wr, long_pf = _side_pf([t for t in trades if t["dir"] == "long"])
+        short_n, short_wr, short_pf = _side_pf([t for t in trades if t["dir"] == "short"])
+
         return {
             "trades":    n,
             "win_rate":  win_rate,
@@ -147,6 +163,12 @@ class StrategyBase(ABC):
             "profit_factor": profit_factor,
             "max_consec_loss": max_consec_loss,
             "max_drawdown": max_drawdown,
+            "long_trades": long_n,
+            "long_win_rate": long_wr,
+            "long_profit_factor": long_pf,
+            "short_trades": short_n,
+            "short_win_rate": short_wr,
+            "short_profit_factor": short_pf,
             "open_count": open_count,
             "trade_list": trades,
         }
