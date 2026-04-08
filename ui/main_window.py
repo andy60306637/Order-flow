@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QLabel,
     QToolBar, QFrame, QSizePolicy, QPushButton,
     QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSpinBox, QDoubleSpinBox,
+    QSpinBox, QDoubleSpinBox, QFileDialog, QMessageBox,
 )
 from PyQt6.QtGui import QAction, QColor
 from PyQt6 import QtGui
@@ -60,6 +60,7 @@ class BacktestResultDialog(QDialog):
 
     def __init__(self, stats: dict, parent=None) -> None:
         super().__init__(parent)
+        self._stats = stats
         self.setWindowTitle("回測結果")
         self.setMinimumSize(980, 580)
         self.setStyleSheet(
@@ -153,6 +154,19 @@ class BacktestResultDialog(QDialog):
             warn.setStyleSheet("color:#f0c040; font-size:12px; padding:2px 8px;")
             layout.addWidget(warn)
 
+        # ── 匯出按鈕 ────────────────────────────────────────────────────────────────────
+        _exp_btn = QPushButton("⬇ 匯出 Excel")
+        _exp_btn.setStyleSheet(
+            "QPushButton { background:#1e3a1e; color:#26a69a; border:1px solid #26a69a;"
+            " border-radius:3px; padding:3px 10px; }"
+            "QPushButton:hover { background:#1a4a2a; }"
+        )
+        _exp_btn.clicked.connect(self._export_excel)
+        _btn_row = QHBoxLayout()
+        _btn_row.addStretch()
+        _btn_row.addWidget(_exp_btn)
+        layout.addLayout(_btn_row)
+
         if not trades:
             layout.addWidget(QLabel("（無已平倉交易）"))
             return
@@ -203,6 +217,136 @@ class BacktestResultDialog(QDialog):
 
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(table)
+
+
+    def _export_excel(self) -> None:
+        """\u5c07\u56de\u6e2c\u6458\u8981\u8207\u4ea4\u6613\u660e\u7d30\u532f\u51fa\u70ba Excel \u6a94\u6848\u3002"""
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+            from openpyxl.utils import get_column_letter
+        except ImportError:
+            QMessageBox.warning(self, "\u7f3a\u5c11\u5957\u4ef6",
+                                "\u8acb\u5148\u5b89\u88dd openpyxl\uff1a\npip install openpyxl")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "\u532f\u51fa Excel", "backtest_result.xlsx",
+            "Excel \u6a94\u6848 (*.xlsx)"
+        )
+        if not path:
+            return
+
+        s = self._stats
+        h_font   = Font(bold=True, color="FFFFFF")
+        h_fill   = PatternFill("solid", fgColor="2962FF")
+        s_fill   = PatternFill("solid", fgColor="1e222d")
+        center   = Alignment(horizontal="center", vertical="center")
+
+        wb = openpyxl.Workbook()
+
+        # \u2500\u2500 Sheet 1: \u6458\u8981 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        ws1 = wb.active
+        ws1.title = "\u6458\u8981"
+
+        param_heads = ["\u8cc7\u91d1(U)", "\u69d3\u687f", "\u8cbb\u7387\u6a21\u5f0f", "\u8cbb\u7387%",
+                       "\u640d\u5931\u4e0a\u9650%", "\u6ed1\u50f9(bps)", "\u8cc7\u91d1\u8cbb\u7387/8h",
+                       "\u6700\u7d42\u9918\u984d", "\u5831\u916c\u7387%"]
+        for col, h in enumerate(param_heads, 1):
+            c = ws1.cell(row=1, column=col, value=h)
+            c.font, c.fill, c.alignment = h_font, h_fill, center
+
+        param_vals = [
+            s.get("initial_capital", 0),
+            s.get("leverage", 0),
+            s.get("fee_mode", ""),
+            round(s.get("fee_rate", 0) * 100, 4),
+            round(s.get("max_loss_pct", 0) * 100, 1),
+            s.get("slippage_bps", 0.0),
+            s.get("funding_rate", 0.0),
+            round(s.get("final_equity", 0.0), 2),
+            round(s.get("total_return_pct", 0.0), 2),
+        ]
+        for col, val in enumerate(param_vals, 1):
+            ws1.cell(row=2, column=col, value=val).alignment = center
+
+        def _pf(v):
+            return "\u221e" if v == float("inf") else round(v, 2)
+
+        sum_heads = ["\u7b56\u7565", "\u4ea4\u6613\u6578", "\u52dd\u7387%", "PF",
+                     "\u6de8\u5229(USDT)", "\u624b\u7e8c\u8cbb",
+                     "\u6700\u5927\u56de\u64a4%", "\u6700\u5927\u9023\u864f",
+                     "\u5e73\u5747\u7372\u5229", "\u5e73\u5747\u865f\u640d",
+                     "\u591a\u55aePF", "\u7a7a\u55aePF",
+                     "SL", "TP", "TS", "TD"]
+        for col, h in enumerate(sum_heads, 1):
+            c = ws1.cell(row=4, column=col, value=h)
+            c.font, c.fill, c.alignment = h_font, s_fill, center
+
+        sum_vals = [
+            s.get("strategy_name", ""),
+            s.get("trades", 0),
+            round(s.get("win_rate", 0.0), 1),
+            _pf(s.get("profit_factor", 0.0)),
+            round(s.get("total_net_pnl", 0.0), 2),
+            round(s.get("total_fees", 0.0), 2),
+            round(s.get("max_drawdown_pct", 0.0), 2),
+            s.get("max_consec_loss", 0),
+            round(s.get("avg_win", 0.0), 2),
+            round(s.get("avg_loss", 0.0), 2),
+            _pf(s.get("long_profit_factor", 0.0)),
+            _pf(s.get("short_profit_factor", 0.0)),
+            s.get("sl_count", 0),
+            s.get("tp_count", 0),
+            s.get("ts_count", 0),
+            s.get("td_count", 0),
+        ]
+        for col, val in enumerate(sum_vals, 1):
+            cell = ws1.cell(row=5, column=col, value=val)
+            cell.alignment = center
+            if col == 5:
+                net = s.get("total_net_pnl", 0.0)
+                cell.font = Font(color="26A69A" if net >= 0 else "EF5350")
+
+        for col in range(1, max(len(param_heads), len(sum_heads)) + 1):
+            ws1.column_dimensions[get_column_letter(col)].width = 15
+
+        # \u2500\u2500 Sheet 2: \u4ea4\u6613\u660e\u7d30 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        ws2 = wb.create_sheet("\u4ea4\u6613\u660e\u7d30")
+        trade_heads = ["#", "\u65b9\u5411", "\u5165\u5834\u50f9", "\u51fa\u5834\u985e\u578b",
+                       "\u51fa\u5834\u50f9", "\u6578\u91cf", "\u624b\u7e8c\u8cbb",
+                       "\u8cc7\u91d1\u8cbb", "\u6de8\u5229(USDT)", "\u9918\u984d"]
+        for col, h in enumerate(trade_heads, 1):
+            c = ws2.cell(row=1, column=col, value=h)
+            c.font, c.fill, c.alignment = h_font, h_fill, center
+
+        for i, t in enumerate(s.get("trade_list", []), 1):
+            dir_txt = "\u505a\u591a" if t["dir"] == "long" else "\u505a\u7a7a"
+            if t.get("skipped"):
+                dir_txt += "(\u8df3\u904e)"
+            pv = t.get("net_pnl", 0.0)
+            row_vals = [
+                i, dir_txt,
+                round(t.get("entry", 0), 4),
+                t.get("exit_label", ""),
+                round(t.get("exit", 0), 4),
+                round(t.get("qty", 0), 6),
+                round(t.get("total_fee", 0), 2),
+                round(t.get("funding_cost", 0), 2),
+                round(pv, 2),
+                round(t.get("equity_after", 0), 2),
+            ]
+            for col, val in enumerate(row_vals, 1):
+                cell = ws2.cell(row=i + 1, column=col, value=val)
+                cell.alignment = center
+                if col == 9:
+                    cell.font = Font(color="26A69A" if pv >= 0 else "EF5350")
+
+        for col in range(1, len(trade_heads) + 1):
+            ws2.column_dimensions[get_column_letter(col)].width = 14
+
+        wb.save(path)
+        QMessageBox.information(self, "\u532f\u51fa\u6210\u529f", f"\u5df2\u5132\u5b58\u81f3:\n{path}")
 
 
 # ═══════════════════════════════════════════════════════════════════

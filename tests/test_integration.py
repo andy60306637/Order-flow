@@ -81,6 +81,7 @@ class TestSameBarExecution(unittest.TestCase):
     def test_entry_fires_on_same_bar_as_signal(self):
         """突破 + delta 滿足的那根 K 棒，訊號的 open_time 應等於該棒。"""
         strat = WickReversalStrategy()
+        strat.delta_eff_threshold = 0.0   # 不受預設閾值影響
         bars = [_k0_long(0)]
         # bar 1: 突破 k0.high + delta > 0 → 應同棒進場
         bars.append(_k(1, 50020, 50060, 49960, 50055, tbv=80))
@@ -95,6 +96,7 @@ class TestSameBarExecution(unittest.TestCase):
     def test_td_exit_fires_on_same_bar_as_delta_reversal(self):
         """追蹤模式下 delta 反轉，TD 出場應在同棒以 close 成交。"""
         strat = WickReversalStrategy()
+        strat.delta_eff_threshold = 0.0   # 不受預設唃値影響
         k0 = _k0_long(0, base=50000, rng=100)
         k0_high = k0.high  # 50050
         stop = k0.low - 10  # 49940
