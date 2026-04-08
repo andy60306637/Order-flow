@@ -21,9 +21,9 @@ from typing import Optional, List
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QTabWidget,
-    QVBoxLayout, QHBoxLayout, QComboBox, QLabel,
+    QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QLabel,
     QToolBar, QFrame, QSizePolicy, QPushButton,
-    QDialog, QTableWidget, QTableWidgetItem, QHeaderView,
+    QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QSpinBox, QDoubleSpinBox,
 )
 from PyQt6.QtGui import QAction, QColor
@@ -61,7 +61,7 @@ class BacktestResultDialog(QDialog):
     def __init__(self, stats: dict, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("回測結果")
-        self.setMinimumSize(720, 520)
+        self.setMinimumSize(980, 580)
         self.setStyleSheet(
             f"QDialog {{ background: {config.COLOR_BG}; color: {config.COLOR_FG}; }}"
             f"QTableWidget {{ background: #1e222d; color: {config.COLOR_FG};"
@@ -72,94 +72,105 @@ class BacktestResultDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # ── 回測參數回顯 ──────────────────────────────────────────
+        # ── 回測參數回顯 ──────────────────────────────────────────────────────────────────────────────
         cap  = stats.get("initial_capital", 0)
         lev  = stats.get("leverage", 0)
         fm   = stats.get("fee_mode", "")
         fr   = stats.get("fee_rate", 0)
         mlp  = stats.get("max_loss_pct", 0)
         slip = stats.get("slippage_bps", 0.0)
+        fund = stats.get("funding_rate", 0.0)
+        feq  = stats.get("final_equity", 0.0)
+        ret  = stats.get("total_return_pct", 0.0)
+        ret_c = config.COLOR_UP if ret >= 0 else config.COLOR_DOWN
+        ret_s = f"+{ret:.2f}" if ret >= 0 else f"{ret:.2f}"
         cfg_lbl = QLabel(
-            f"<b>初始資金:</b> {cap:,.0f} USDT &nbsp;|&nbsp; "
+            f"<b>資金:</b> {cap:,.0f} U &nbsp;|&nbsp; "
             f"<b>槓桿:</b> {lev}x &nbsp;|&nbsp; "
             f"<b>費率:</b> {fm} ({fr*100:.2f}%) &nbsp;|&nbsp; "
-            f"<b>每筆最高損失:</b> {mlp*100:.1f}% &nbsp;|&nbsp; "
-            f"<b>滑價:</b> {slip:.1f} bps"
+            f"<b>損失上限:</b> {mlp*100:.1f}% &nbsp;|&nbsp; "
+            f"<b>滑價:</b> {slip:.1f} bps &nbsp;|&nbsp; "
+            f"<b>資金費率:</b> {fund:.4f}/8h &nbsp;|&nbsp; "
+            f"<b>最終餘額:</b> {feq:,.2f} U "
+            f"<span style='color:{ret_c}'>({ret_s}%)</span>"
         )
         cfg_lbl.setStyleSheet("font-size: 12px; padding: 4px 8px; color: #aaa;")
         layout.addWidget(cfg_lbl)
 
-        # ── 整體統計 ──────────────────────────────────────────────
-        n      = stats.get("trades", 0)
-        wr     = stats.get("win_rate", 0.0)
-        net    = stats.get("total_net_pnl", 0.0)
-        fees   = stats.get("total_fees", 0.0)
-        funding = stats.get("total_funding", 0.0)
-        pf     = stats.get("profit_factor", 0.0)
-        mcl    = stats.get("max_consec_loss", 0)
-        mdd    = stats.get("max_drawdown_pct", 0.0)
-        feq    = stats.get("final_equity", 0.0)
-        ret    = stats.get("total_return_pct", 0.0)
-        opens  = stats.get("open_count", 0)
-        trades = stats.get("trade_list", [])
+        # ── 摘要統計表（16 欄）──────────────────────────────────────────────────────────────────────
+        n        = stats.get("trades", 0)
+        wr       = stats.get("win_rate", 0.0)
+        net      = stats.get("total_net_pnl", 0.0)
+        fees     = stats.get("total_fees", 0.0)
+        pf       = stats.get("profit_factor", 0.0)
+        mcl      = stats.get("max_consec_loss", 0)
+        mdd      = stats.get("max_drawdown_pct", 0.0)
+        lpf      = stats.get("long_profit_factor", 0.0)
+        spf      = stats.get("short_profit_factor", 0.0)
+        avg_win  = stats.get("avg_win", 0.0)
+        avg_loss = stats.get("avg_loss", 0.0)
+        sl_c     = stats.get("sl_count", 0)
+        tp_c     = stats.get("tp_count", 0)
+        ts_c     = stats.get("ts_count", 0)
+        td_c     = stats.get("td_count", 0)
+        strat    = stats.get("strategy_name", "─")
+        opens    = stats.get("open_count", 0)
+        trades   = stats.get("trade_list", [])
 
-        net_c = config.COLOR_UP if net >= 0 else config.COLOR_DOWN
+        sum_headers = [
+            "策略", "交易數", "勝率", "PF", "淨利(USDT)", "手續費",
+            "最大回撤", "最大連虏", "平均獲利", "平均號損",
+            "多單 PF", "空單 PF", "SL", "TP", "TS", "TD",
+        ]
+        sum_table = QTableWidget(1, len(sum_headers))
+        sum_table.setHorizontalHeaderLabels(sum_headers)
+        sum_table.verticalHeader().setVisible(False)
+        sum_table.setMaximumHeight(58)
+        sum_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+
         net_s = f"+{net:,.2f}" if net >= 0 else f"{net:,.2f}"
-        ret_c = config.COLOR_UP if ret >= 0 else config.COLOR_DOWN
-        ret_s = f"+{ret:.2f}" if ret >= 0 else f"{ret:.2f}"
+        row_data = [
+            strat, str(n), f"{wr:.1f}%", self._fmt_pf(pf),
+            net_s, f"{fees:,.2f}", f"{mdd:.2f}%", str(mcl),
+            f"+{avg_win:,.2f}" if avg_win > 0 else "─",
+            f"-{avg_loss:,.2f}" if avg_loss > 0 else "─",
+            self._fmt_pf(lpf), self._fmt_pf(spf),
+            str(sl_c), str(tp_c), str(ts_c), str(td_c),
+        ]
+        for col, val in enumerate(row_data):
+            item = QTableWidgetItem(val)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if col == 4:
+                item.setForeground(QtGui.QColor(
+                    config.COLOR_UP if net >= 0 else config.COLOR_DOWN
+                ))
+            sum_table.setItem(0, col, item)
+        sum_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(sum_table)
 
-        summary = QLabel(
-            f"<b>交易次數:</b> {n} &nbsp;|&nbsp; "
-            f"<b>勝率:</b> {wr:.1f}% &nbsp;|&nbsp; "
-            f"<b>淨損益:</b> <span style='color:{net_c}'>{net_s} USDT</span> &nbsp;|&nbsp; "
-            f"<b>報酬率:</b> <span style='color:{ret_c}'>{ret_s}%</span> &nbsp;|&nbsp; "
-            f"<b>PF:</b> {self._fmt_pf(pf)} &nbsp;|&nbsp; "
-            f"<b>手續費:</b> {fees:,.2f} &nbsp;|&nbsp; "
-            f"<b>資金費:</b> {funding:,.2f}<br>"
-            f"<b>最大連虧:</b> {mcl} &nbsp;|&nbsp; "
-            f"<b>最大回撤:</b> {mdd:.2f}% &nbsp;|&nbsp; "
-            f"<b>最終餘額:</b> {feq:,.2f} USDT &nbsp;|&nbsp; "
-            f"<b>未平倉:</b> {opens}"
-        )
-        summary.setStyleSheet("font-size: 13px; padding: 8px;")
-        layout.addWidget(summary)
-
-        # ── 多空分離統計 ──────────────────────────────────────────
-        ln  = stats.get("long_trades", 0)
-        lwr = stats.get("long_win_rate", 0.0)
-        lpf = stats.get("long_profit_factor", 0.0)
-        sn  = stats.get("short_trades", 0)
-        swr = stats.get("short_win_rate", 0.0)
-        spf = stats.get("short_profit_factor", 0.0)
-
-        side_lbl = QLabel(
-            f"<span style='color:{config.COLOR_UP}'>"
-            f"<b>做多:</b> {ln} 筆 &nbsp; 勝率 {lwr:.1f}% &nbsp; PF {self._fmt_pf(lpf)}"
-            f"</span> &nbsp;&nbsp;|&nbsp;&nbsp; "
-            f"<span style='color:{config.COLOR_DOWN}'>"
-            f"<b>做空:</b> {sn} 筆 &nbsp; 勝率 {swr:.1f}% &nbsp; PF {self._fmt_pf(spf)}"
-            f"</span>"
-        )
-        side_lbl.setStyleSheet("font-size: 13px; padding: 4px 8px;")
-        layout.addWidget(side_lbl)
+        if opens:
+            warn = QLabel(f"  ⚠ 未平倉: {opens} 筆")
+            warn.setStyleSheet("color:#f0c040; font-size:12px; padding:2px 8px;")
+            layout.addWidget(warn)
 
         if not trades:
             layout.addWidget(QLabel("（無已平倉交易）"))
             return
 
-        # ── 交易明細表 ────────────────────────────────────────────
-        cols = ["#", "方向", "入場價", "出場價", "數量", "手續費", "資金費", "淨利(USDT)", "餘額"]
+        # ── 交易明細表 ──────────────────────────────────────────────────────────────────────
+        cols = ["#", "方向", "入場價", "出場類型", "出場價", "數量", "手續費", "資金費", "淨利(USDT)", "餘額"]
         table = QTableWidget(len(trades), len(cols))
         table.setHorizontalHeaderLabels(cols)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
 
+        _label_colors = {"SL": "#ef5350", "TP": "#26a69a", "TS": "#ff9800", "TD": "#9c27b0"}
         for i, t in enumerate(trades):
             table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
 
             skipped = t.get("skipped", False)
-            dir_txt = ("做多" if t["dir"] == "long" else "做空")
+            dir_txt = "做多" if t["dir"] == "long" else "做空"
             if skipped:
                 dir_txt += " (跳過)"
             dir_item = QTableWidgetItem(dir_txt)
@@ -168,10 +179,18 @@ class BacktestResultDialog(QDialog):
             )
             table.setItem(i, 1, dir_item)
             table.setItem(i, 2, QTableWidgetItem(f"{t['entry']:,.4f}"))
-            table.setItem(i, 3, QTableWidgetItem(f"{t['exit']:,.4f}"))
-            table.setItem(i, 4, QTableWidgetItem(f"{t.get('qty', 0):,.6f}"))
-            table.setItem(i, 5, QTableWidgetItem(f"{t.get('total_fee', 0):,.2f}"))
-            table.setItem(i, 6, QTableWidgetItem(f"{t.get('funding_cost', 0):,.2f}"))
+
+            exit_lbl = t.get("exit_label", "")
+            lbl_item = QTableWidgetItem(exit_lbl)
+            lbl_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if exit_lbl in _label_colors:
+                lbl_item.setForeground(QtGui.QColor(_label_colors[exit_lbl]))
+            table.setItem(i, 3, lbl_item)
+
+            table.setItem(i, 4, QTableWidgetItem(f"{t['exit']:,.4f}"))
+            table.setItem(i, 5, QTableWidgetItem(f"{t.get('qty', 0):,.6f}"))
+            table.setItem(i, 6, QTableWidgetItem(f"{t.get('total_fee', 0):,.2f}"))
+            table.setItem(i, 7, QTableWidgetItem(f"{t.get('funding_cost', 0):,.2f}"))
 
             pv = t.get("net_pnl", 0.0)
             pnl_txt = f"+{pv:,.2f}" if pv >= 0 else f"{pv:,.2f}"
@@ -179,11 +198,100 @@ class BacktestResultDialog(QDialog):
             pnl_item.setForeground(
                 QtGui.QColor(config.COLOR_UP if pv >= 0 else config.COLOR_DOWN)
             )
-            table.setItem(i, 7, pnl_item)
-            table.setItem(i, 8, QTableWidgetItem(f"{t.get('equity_after', 0):,.2f}"))
+            table.setItem(i, 8, pnl_item)
+            table.setItem(i, 9, QTableWidgetItem(f"{t.get('equity_after', 0):,.2f}"))
 
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(table)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 回測參數設定對話框
+# ═══════════════════════════════════════════════════════════════════
+
+class BacktestConfigDialog(QDialog):
+    """回測參數設定子頁面（可重複呼叫，非強制 modal）。"""
+
+    _SPIN_STYLE = (
+        "QDoubleSpinBox, QSpinBox, QComboBox {"
+        " background:#1e222d; color:#d1d4dc;"
+        " border:1px solid #2a2e39; border-radius:3px;"
+        " padding:2px 6px; min-width:120px; }"
+    )
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("回測參數設定")
+        self.setMinimumWidth(340)
+        self.setStyleSheet(
+            f"QDialog {{ background: {config.COLOR_BG}; color: {config.COLOR_FG}; }}"
+            "QLabel { font-size: 13px; }"
+        )
+
+        form = QFormLayout(self)
+        form.setContentsMargins(20, 16, 20, 16)
+        form.setVerticalSpacing(10)
+
+        self.capital_spin = QDoubleSpinBox()
+        self.capital_spin.setRange(100, 10_000_000)
+        self.capital_spin.setValue(10_000)
+        self.capital_spin.setDecimals(0)
+        self.capital_spin.setSuffix(" USDT")
+        self.capital_spin.setStyleSheet(self._SPIN_STYLE)
+        form.addRow("初始資金:", self.capital_spin)
+
+        self.loss_spin = QDoubleSpinBox()
+        self.loss_spin.setRange(0.1, 50.0)
+        self.loss_spin.setValue(2.0)
+        self.loss_spin.setDecimals(1)
+        self.loss_spin.setSuffix(" %")
+        self.loss_spin.setStyleSheet(self._SPIN_STYLE)
+        form.addRow("每筆最高損失:", self.loss_spin)
+
+        self.leverage_spin = QSpinBox()
+        self.leverage_spin.setRange(1, 125)
+        self.leverage_spin.setValue(20)
+        self.leverage_spin.setSuffix(" x")
+        self.leverage_spin.setStyleSheet(self._SPIN_STYLE)
+        form.addRow("槓桿:", self.leverage_spin)
+
+        self.fee_combo = QComboBox()
+        self.fee_combo.addItems(["Taker", "Maker"])
+        self.fee_combo.setToolTip("Maker=0.02%  Taker=0.05%")
+        self.fee_combo.setStyleSheet(self._SPIN_STYLE)
+        form.addRow("費率模式:", self.fee_combo)
+
+        self.slippage_spin = QDoubleSpinBox()
+        self.slippage_spin.setRange(0.0, 50.0)
+        self.slippage_spin.setValue(0.0)
+        self.slippage_spin.setDecimals(1)
+        self.slippage_spin.setSuffix(" bps")
+        self.slippage_spin.setToolTip("滞dge (1 bps = 0.01%)")
+        self.slippage_spin.setStyleSheet(self._SPIN_STYLE)
+        form.addRow("滑價:", self.slippage_spin)
+
+        self.funding_spin = QDoubleSpinBox()
+        self.funding_spin.setRange(0.0, 1.0)
+        self.funding_spin.setValue(0.0)
+        self.funding_spin.setDecimals(4)
+        self.funding_spin.setSingleStep(0.0001)
+        self.funding_spin.setSuffix(" /8h")
+        self.funding_spin.setToolTip("資金費率 (0.01% = 0.0001)；正値多付空收")
+        self.funding_spin.setStyleSheet(self._SPIN_STYLE)
+        form.addRow("資金費率:", self.funding_spin)
+
+        self.maint_spin = QDoubleSpinBox()
+        self.maint_spin.setRange(0.001, 0.5)
+        self.maint_spin.setValue(0.005)
+        self.maint_spin.setDecimals(3)
+        self.maint_spin.setSingleStep(0.001)
+        self.maint_spin.setToolTip("維持保證金率 (0.5% = 0.005)")
+        self.maint_spin.setStyleSheet(self._SPIN_STYLE)
+        form.addRow("維持保證金率:", self.maint_spin)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btn_box.rejected.connect(self.hide)
+        form.addRow(btn_box)
 
 
 class MainWindow(QMainWindow):
@@ -220,6 +328,7 @@ class MainWindow(QMainWindow):
         # ── UI ────────────────────────────────────────────────────────────────
         self._build_ui()
         self._build_toolbar()
+        self._bt_config_dlg = BacktestConfigDialog(self)
 
         # ── Heatmap timer ─────────────────────────────────────────────────────
         self._heatmap_timer = QTimer(self)
@@ -347,57 +456,11 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        # ── 回測參數 ────────────────────────────────────────────────────
-        _spin_style = (
-            "QSpinBox, QDoubleSpinBox { background:#1e222d; color:#d1d4dc;"
-            " border:1px solid #2a2e39; border-radius:3px; padding:2px 4px;"
-            " min-width:60px; }"
-        )
-
-        tb.addWidget(QLabel("資金 "))
-        self._bt_capital_spin = QDoubleSpinBox()
-        self._bt_capital_spin.setRange(100, 10_000_000)
-        self._bt_capital_spin.setValue(10_000)
-        self._bt_capital_spin.setDecimals(0)
-        self._bt_capital_spin.setSuffix(" U")
-        self._bt_capital_spin.setStyleSheet(_spin_style)
-        self._bt_capital_spin.setToolTip("初始資金 (USDT)")
-        tb.addWidget(self._bt_capital_spin)
-
-        tb.addWidget(QLabel("損失 "))
-        self._bt_loss_spin = QDoubleSpinBox()
-        self._bt_loss_spin.setRange(0.1, 50.0)
-        self._bt_loss_spin.setValue(2.0)
-        self._bt_loss_spin.setDecimals(1)
-        self._bt_loss_spin.setSuffix("%")
-        self._bt_loss_spin.setStyleSheet(_spin_style)
-        self._bt_loss_spin.setToolTip("每筆最高損失百分比")
-        tb.addWidget(self._bt_loss_spin)
-
-        tb.addWidget(QLabel("槓桿 "))
-        self._bt_leverage_spin = QSpinBox()
-        self._bt_leverage_spin.setRange(1, 125)
-        self._bt_leverage_spin.setValue(20)
-        self._bt_leverage_spin.setSuffix("x")
-        self._bt_leverage_spin.setStyleSheet(_spin_style)
-        self._bt_leverage_spin.setToolTip("槓桿倍數")
-        tb.addWidget(self._bt_leverage_spin)
-
-        tb.addWidget(QLabel("費率 "))
-        self._bt_fee_combo = QComboBox()
-        self._bt_fee_combo.addItems(["Taker", "Maker"])
-        self._bt_fee_combo.setToolTip("Maker=0.02%  Taker=0.05%")
-        tb.addWidget(self._bt_fee_combo)
-
-        tb.addWidget(QLabel("滑價 "))
-        self._bt_slippage_spin = QDoubleSpinBox()
-        self._bt_slippage_spin.setRange(0.0, 50.0)
-        self._bt_slippage_spin.setValue(0.0)
-        self._bt_slippage_spin.setDecimals(1)
-        self._bt_slippage_spin.setSuffix(" bps")
-        self._bt_slippage_spin.setStyleSheet(_spin_style)
-        self._bt_slippage_spin.setToolTip("滑價 (1 bps = 0.01%)")
-        tb.addWidget(self._bt_slippage_spin)
+        self._bt_config_btn = QPushButton("⚙ 設定")
+        self._bt_config_btn.setToolTip("開啟回測參數設定")
+        self._bt_config_btn.setStyleSheet(_btn_style)
+        self._bt_config_btn.clicked.connect(self._on_open_bt_config)
+        tb.addWidget(self._bt_config_btn)
 
         self._rt_btn = QPushButton("⚡ 即時")
         self._rt_btn.setCheckable(True)
@@ -1000,13 +1063,16 @@ class MainWindow(QMainWindow):
         # 完整模擬（資金/手續費/倉位）
         from backtest.engine import BacktestConfig, simulate_trades
         cfg = BacktestConfig(
-            initial_capital=self._bt_capital_spin.value(),
-            max_loss_pct=self._bt_loss_spin.value() / 100.0,
-            leverage=self._bt_leverage_spin.value(),
-            fee_mode=self._bt_fee_combo.currentText(),
-            slippage_bps=self._bt_slippage_spin.value(),
+            initial_capital=self._bt_config_dlg.capital_spin.value(),
+            max_loss_pct=self._bt_config_dlg.loss_spin.value() / 100.0,
+            leverage=self._bt_config_dlg.leverage_spin.value(),
+            fee_mode=self._bt_config_dlg.fee_combo.currentText(),
+            slippage_bps=self._bt_config_dlg.slippage_spin.value(),
+            funding_rate=self._bt_config_dlg.funding_spin.value(),
+            maint_margin=self._bt_config_dlg.maint_spin.value(),
         )
         sim_stats = simulate_trades(self._strategy_signals, cfg)
+        sim_stats["strategy_name"] = getattr(self._strategy_engine, "name", "策略")
 
         dlg = BacktestResultDialog(sim_stats, parent=self)
         dlg.exec()
@@ -1021,6 +1087,12 @@ class MainWindow(QMainWindow):
         self._strategy_signals = []
         self._strategy_stats_lbl.setVisible(False)
         self._strategy_stats_lbl.setText("")
+
+    def _on_open_bt_config(self) -> None:
+        """開啟回測參數設定子頁面。"""
+        self._bt_config_dlg.show()
+        self._bt_config_dlg.raise_()
+        self._bt_config_dlg.activateWindow()
 
     def _update_strategy_stats(self) -> None:
         """根據目前 _strategy_signals 計算並顯示統計 label。"""

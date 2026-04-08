@@ -120,6 +120,7 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
             "funding_cost": funding_cost,
             "gross_pnl": gross_pnl, "net_pnl": net_pnl,
             "equity_after": equity,
+            "exit_label": rt.get("exit_label", ""),
             "skipped": False, "skip_reason": "",
             "liquidated": liquidated,
         })
@@ -161,7 +162,8 @@ def _pair_signals(signals: List[StrategySignal]):
             if open_long is not None:
                 trades.append({"dir": "long", "entry": open_long,
                                "exit": fp, "stop": long_stop,
-                               "entry_time": long_time, "exit_time": sig.open_time})
+                               "entry_time": long_time, "exit_time": sig.open_time,
+                               "exit_label": sig.label})
                 open_long = None
         elif sig.signal_type == "short_entry":
             if open_long is not None:
@@ -177,7 +179,8 @@ def _pair_signals(signals: List[StrategySignal]):
             if open_short is not None:
                 trades.append({"dir": "short", "entry": open_short,
                                "exit": fp, "stop": short_stop,
-                               "entry_time": short_time, "exit_time": sig.open_time})
+                               "entry_time": short_time, "exit_time": sig.open_time,
+                               "exit_label": sig.label})
                 open_short = None
 
     if open_long is not None:
@@ -244,6 +247,8 @@ def _build_stats(
         "profit_factor": 0.0,
         "max_consec_loss": 0, "max_drawdown_pct": 0.0,
         "total_funding": 0.0,
+        "avg_win": 0.0, "avg_loss": 0.0,
+        "sl_count": 0, "tp_count": 0, "ts_count": 0, "td_count": 0,
         "long_trades": 0, "long_win_rate": 0.0, "long_profit_factor": 0.0,
         "short_trades": 0, "short_win_rate": 0.0, "short_profit_factor": 0.0,
         "open_count": open_count,
@@ -295,6 +300,16 @@ def _build_stats(
     ln, lwr, lpf = _side([t for t in active if t["dir"] == "long"])
     sn, swr, spf = _side([t for t in active if t["dir"] == "short"])
 
+    wins_pnl = [t["net_pnl"] for t in active if t["net_pnl"] > 0]
+    loss_pnl = [abs(t["net_pnl"]) for t in active if t["net_pnl"] < 0]
+    avg_win  = sum(wins_pnl) / len(wins_pnl) if wins_pnl else 0.0
+    avg_loss = sum(loss_pnl) / len(loss_pnl) if loss_pnl else 0.0
+
+    sl_count = sum(1 for t in active if t.get("exit_label") == "SL")
+    tp_count = sum(1 for t in active if t.get("exit_label") == "TP")
+    ts_count = sum(1 for t in active if t.get("exit_label") == "TS")
+    td_count = sum(1 for t in active if t.get("exit_label") == "TD")
+
     return {
         "initial_capital": cfg.initial_capital,
         "final_equity": final_equity,
@@ -313,6 +328,9 @@ def _build_stats(
         "profit_factor": pf,
         "max_consec_loss": max_cl,
         "max_drawdown_pct": max_dd,
+        "avg_win": avg_win, "avg_loss": avg_loss,
+        "sl_count": sl_count, "tp_count": tp_count,
+        "ts_count": ts_count, "td_count": td_count,
         "long_trades": ln, "long_win_rate": lwr, "long_profit_factor": lpf,
         "short_trades": sn, "short_win_rate": swr, "short_profit_factor": spf,
         "open_count": open_count,
