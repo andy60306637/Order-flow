@@ -116,12 +116,22 @@ class CvdChart(pg.PlotWidget):
             self._bars_neg.show()
         self._redraw()
 
-    def update_cvd(self, series: List[Tuple[int, float]]) -> None:
-        """series: [(open_time_ms, cvd), ...] 依 kline index 排列"""
+    def update_cvd(self, series: List[Tuple[int, float]], ot_map: dict = None) -> None:
+        """series: [(open_time_ms, cvd), ...] 依 kline index 排列
+        ot_map: {open_time_ms: kline_chart_index}，由 KlineChart.get_open_time_index_map() 提供。
+        傳入後以 kline chart 的索引定位，避免 kline 截斷後 x 位移對齊失敗。
+        """
         if not series:
             return
-        self._x = list(range(len(series)))
-        self._y = [v for _, v in series]
+        if ot_map is not None:
+            pairs = [(ot_map[ot], v) for ot, v in series if ot in ot_map]
+            if not pairs:
+                return
+            self._x = [x for x, _ in pairs]
+            self._y = [v for _, v in pairs]
+        else:
+            self._x = list(range(len(series)))
+            self._y = [v for _, v in series]
         self._redraw()
 
     def _redraw(self) -> None:
@@ -247,11 +257,15 @@ class StatsItem(pg.GraphicsObject):
 
     # ── 公開 API ─────────────────────────────────────────────────────────────
 
-    def set_data(self, candles: list, cvd_series: List[Tuple[int, float]]) -> None:
+    def set_data(self, candles: list, cvd_series: List[Tuple[int, float]], ot_map: dict = None) -> None:
         prev_n = len(self._candles)
         self._candles = candles
         self._cvd_map = {ot: v for ot, v in cvd_series}
-        self._ot_to_idx = {ot: i for i, (ot, _) in enumerate(cvd_series)}
+        if ot_map is not None:
+            # 使用 kline chart 的 canonical index，避免 kline 截斷後位移
+            self._ot_to_idx = {ot: ot_map[ot] for ot in self._cvd_map if ot in ot_map}
+        else:
+            self._ot_to_idx = {ot: i for i, (ot, _) in enumerate(cvd_series)}
         if len(candles) != prev_n:
             self.prepareGeometryChange()
             self.informViewBoundsChanged()
@@ -380,8 +394,9 @@ class StatsPanel(pg.PlotWidget):
         self,
         candles: list,
         cvd_series: List[Tuple[int, float]],
+        ot_map: dict = None,
     ) -> None:
-        self._item.set_data(candles, cvd_series)
+        self._item.set_data(candles, cvd_series, ot_map)
 
     def link_x(self, other_plot: pg.PlotItem) -> None:
         self.getPlotItem().setXLink(other_plot)

@@ -745,9 +745,15 @@ class FootprintChart(pg.PlotWidget):
         """Store kline open_time → index mapping for x-axis alignment."""
         self._kline_ts_to_idx = {ts: i for i, ts in enumerate(timestamps)}
 
-    def update_candles(self, candles: List[FootprintCandle]) -> None:
-        x_positions = [self._kline_ts_to_idx.get(int(c.open_time), i)
-                       for i, c in enumerate(candles)]
+    def update_candles(self, candles: List[FootprintCandle], ot_map: dict = None) -> None:
+        # ot_map 優先（由 KlineChart.get_open_time_index_map() 提供），
+        # 確保 footprint x 座標與 kline chart 完全一致，避免截斷後錯位。
+        if ot_map is not None:
+            x_positions = [ot_map.get(int(c.open_time), i)
+                           for i, c in enumerate(candles)]
+        else:
+            x_positions = [self._kline_ts_to_idx.get(int(c.open_time), i)
+                           for i, c in enumerate(candles)]
         notify = self._needs_auto_range and bool(candles)
         self._fp_item.set_candles(candles, x_positions, notify_bounds=notify)
         self._time_axis.set_times(candles, x_positions)

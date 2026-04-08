@@ -39,6 +39,7 @@ class WsWorkerThread(QThread):
     more_agg_history_signal = pyqtSignal(list)   # 往前翻頁附帶的 aggTrades
     exchange_info_signal    = pyqtSignal(dict)   # {symbol: tick_size} 動態 tick size
     status_signal           = pyqtSignal(str)    # 狀態文字
+    backtest_history_signal = pyqtSignal(list)   # 回測專用批量 K 線
 
     def __init__(
         self,
@@ -70,6 +71,16 @@ class WsWorkerThread(QThread):
             self._loading_more = True
             asyncio.run_coroutine_threadsafe(
                 self._load_more_history(end_time_ms), self._loop
+            )
+
+    def request_backtest_history(self, total_candles: int) -> None:
+        """
+        從主執行緒請求批量歷史 K 線（回測專用）。
+        自動分頁直到累計 total_candles 根，透過 backtest_history_signal 回傳。
+        """
+        if self._loop and not self._loop.is_closed():
+            asyncio.run_coroutine_threadsafe(
+                self._fetch_backtest_history(total_candles), self._loop
             )
 
     def stop(self) -> None:
@@ -281,6 +292,47 @@ class WsWorkerThread(QThread):
             self.more_history_signal.emit([])
         finally:
             self._loading_more = False
+
+    async def _fetch_backtest_history(self, total_candles: int) -> None:
+        """
+        分頁拉取最近 total_candles 根 K 線。
+        每頁最多 KLINE_HISTORY_LIMIT（1500），自動向前翻頁。
+        完成後透過 backtest_history_signal 一次送回全部資料。
+        """
+        all_rows: list = []
+        end_time: int = 0  # 0 = 最新
+        remaining = total_candles
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                while remaining > 0 and self._running:
+                    self.status_signal.emit(
+                        f"載入回測資料… 已取得 {len(all_rows)}/{total_candles}"
+                    )
+                    rows = await self._fetch_history(session, end_time_ms=end_time)
+                    if not rows:
+                        break
+
+                    if all_rows:
+                        # 去除與已有資料重疊
+                        cutoff = all_rows[0][0]  # 最舊的 open_time
+                        rows = [r for r in rows if r[0] < cutoff]
+                    if not rows:
+                        break
+
+                    all_rows = rows + all_rows
+                    remaining = total_candles - len(all_rows)
+                    # 下一頁 endTime = 最舊的 open_time - 1
+                    end_time = int(all_rows[0][0]) - 1
+
+                # 只保留最近 total_candles 根
+                if len(all_rows) > total_candles:
+                    all_rows = all_rows[-total_candles:]
+
+                self.backtest_history_signal.emit(all_rows)
+        except Exception as exc:
+            logger.error("fetch_backtest_history error: %s", exc)
+            self.backtest_history_signal.emit([])
 
     async def _fetch_ob_snapshot(self, session: aiohttp.ClientSession) -> dict:
         url = (
