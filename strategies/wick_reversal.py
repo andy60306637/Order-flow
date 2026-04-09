@@ -46,7 +46,7 @@ class WickReversalStrategy(StrategyBase):
     # ── 做空進場檢驗 ────────────────────────────────────────────────────────────
     short_delta_eff_threshold: float = 0.6   # 做空 Delta Eff 閾值（0~1）
     short_vol_sma_period:      int   = 20    # 做空成交量 SMA 窗期；0=不過濾
-    short_vol_sma_mult:        float = 1.2   # 做空成交量門標倍率（volume > SMA * mult）
+    short_vol_sma_mult:        float = 1.2  # 做空成交量門標倍率（volume > SMA * mult）
 
     # ─────────────────────────────────────────────────────────────────────────
     def on_history(self, klines: List[Kline]) -> List[StrategySignal]:
