@@ -379,17 +379,21 @@ def compute_subset_stats(trades: list) -> dict:
         else:
             cur_cl = 0
 
-    # 累計 PnL 回撤
-    cum = 0.0
-    peak = 0.0
+    # ── 最大回撤 ──────────────────────────────────────────────────
+    # 以第一筆交易的 equity_after - net_pnl 還原子集起始資金，
+    # 和 _build_stats 保持一致的計算基準（全集時精確吻合）。
+    base_eq = active[0]["equity_after"] - active[0]["net_pnl"]
+    eq = base_eq
+    peak = base_eq
     max_dd = 0.0
     for t in active:
-        cum += t["net_pnl"]
-        if cum > peak:
-            peak = cum
-        dd = peak - cum
-        if peak > 0 and dd / peak * 100 > max_dd:
-            max_dd = dd / peak * 100
+        eq += t["net_pnl"]
+        if eq > peak:
+            peak = eq
+        if peak > 0:
+            dd_pct = (peak - eq) / peak * 100
+            if dd_pct > max_dd:
+                max_dd = dd_pct
 
     wins_pnl = [t["net_pnl"] for t in active if t["net_pnl"] > 0]
     loss_pnl = [abs(t["net_pnl"]) for t in active if t["net_pnl"] < 0]
