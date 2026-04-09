@@ -23,6 +23,7 @@ import websockets
 from PyQt6.QtCore import QThread, pyqtSignal
 
 import config
+from core import kline_cache
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class WsWorkerThread(QThread):
     exchange_info_signal    = pyqtSignal(dict)   # {symbol: tick_size} 動態 tick size
     status_signal           = pyqtSignal(str)    # 狀態文字
     backtest_history_signal = pyqtSignal(list)   # 回測專用批量 K 線
+    cache_ready_signal      = pyqtSignal(int)    # 快取儲存完成（傳回列數）
 
     def __init__(
         self,
@@ -73,14 +75,18 @@ class WsWorkerThread(QThread):
                 self._load_more_history(end_time_ms), self._loop
             )
 
-    def request_backtest_history(self, total_candles: int) -> None:
+    def request_backtest_history(self, total_candles: int, cache_only: bool = False) -> None:
         """
         從主執行緒請求批量歷史 K 線（回測專用）。
-        自動分頁直到累計 total_candles 根，透過 backtest_history_signal 回傳。
+        自動分頁直到累計 total_candles 根。
+
+        cache_only=False（預設）：下載後透過 backtest_history_signal 回傳，並寫入本機快取。
+        cache_only=True         ：只下載并寫入快取，完成後透過 cache_ready_signal 回傳列數。
         """
         if self._loop and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(
-                self._fetch_backtest_history(total_candles), self._loop
+                self._fetch_backtest_history(total_candles, cache_only=cache_only),
+                self._loop,
             )
 
     def stop(self) -> None:
@@ -294,12 +300,15 @@ class WsWorkerThread(QThread):
         finally:
             self._loading_more = False
 
-    async def _fetch_backtest_history(self, total_candles: int) -> None:
+    async def _fetch_backtest_history(self, total_candles: int, cache_only: bool = False) -> None:
         """
         分頁拉取最近 total_candles 根 K 線。
         每頁最多 KLINE_HISTORY_LIMIT（1500），自動向前翻頁。
         單頁失敗時最多重試 5 次（指數退避），避免網路抖動或 rate-limit 導致提前中斷。
-        完成後透過 backtest_history_signal 一次送回全部資料。
+        下載完成後：
+          - 自動合併寫入本機快取（data/klines/{SYMBOL}_{interval}.npy）
+          - cache_only=False：透過 backtest_history_signal 回傳全部資料
+          - cache_only=True ：僅寫快取，透過 cache_ready_signal 回傳列數
         """
         MAX_RETRIES = 5
         RETRY_BASE_DELAY = 1.0   # 秒，每次重試翻倍
@@ -360,13 +369,41 @@ class WsWorkerThread(QThread):
                 if len(all_rows) > total_candles:
                     all_rows = all_rows[-total_candles:]
 
-                self.status_signal.emit(
-                    f"回測資料載入完成，共 {len(all_rows):,} 根 K 棒"
-                )
-                self.backtest_history_signal.emit(all_rows)
+                # ── 寫入本機快取 ──────────────────────────────────────────
+                if all_rows:
+                    try:
+                        merged = kline_cache.merge_and_save(
+                            self._symbol.upper(), self._interval, all_rows
+                        )
+                        cache_info = kline_cache.info(self._symbol.upper(), self._interval)
+                        size_str = (
+                            f"，快取 {cache_info['count']:,} 根"
+                            f" ({cache_info['size_mb']:.1f} MB)"
+                            if cache_info else ""
+                        )
+                        self.status_signal.emit(
+                            f"回測資料載入完成，共 {len(all_rows):,} 根 K 棒{size_str}"
+                        )
+                    except Exception as exc:
+                        logger.warning("kline_cache merge_and_save failed: %s", exc)
+                        self.status_signal.emit(
+                            f"回測資料載入完成，共 {len(all_rows):,} 根 K 棒"
+                        )
+                else:
+                    self.status_signal.emit(
+                        f"回測資料載入完成，共 {len(all_rows):,} 根 K 棒"
+                    )
+
+                if cache_only:
+                    self.cache_ready_signal.emit(len(all_rows))
+                else:
+                    self.backtest_history_signal.emit(all_rows)
         except Exception as exc:
             logger.error("fetch_backtest_history error: %s", exc)
-            self.backtest_history_signal.emit([])
+            if cache_only:
+                self.cache_ready_signal.emit(0)
+            else:
+                self.backtest_history_signal.emit([])
 
     async def _fetch_ob_snapshot(self, session: aiohttp.ClientSession) -> dict:
         url = (

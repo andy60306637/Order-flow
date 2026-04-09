@@ -36,6 +36,7 @@ from core.cvd_calculator import CvdCalculator
 from core.footprint_builder import FootprintBuilder
 from core.ws_client import WsWorkerThread
 from core.history_processor import HistoryProcessorThread
+from core import kline_cache
 from strategies import STRATEGY_REGISTRY
 from strategies.base import StrategyBase, StrategySignal
 from ui.order_book_widget import OrderBookWidget
@@ -634,6 +635,7 @@ class MainWindow(QMainWindow):
             chart.crosshair_left.connect(self._hide_all_crosshairs)
 
         self._start_stream()
+        self._refresh_cache_label()
 
     # ══════════════════════════════════════════════════════════════
     # UI 建構
@@ -729,6 +731,16 @@ class MainWindow(QMainWindow):
             self._bt_range_combo.addItem(label)
         self._bt_range_combo.setToolTip("回測資料範圍（點 ▶ 時自動載入不足的歷史）")
         tb.addWidget(self._bt_range_combo)
+
+        self._download_btn = QPushButton("💾 預載")
+        self._download_btn.setToolTip("下載並儲存所選範圍的 K 線至本機，下次回測可直接讀取")
+        self._download_btn.setStyleSheet(_btn_style)
+        self._download_btn.clicked.connect(self._on_download_cache)
+        tb.addWidget(self._download_btn)
+
+        self._cache_lbl = QLabel()
+        self._cache_lbl.setStyleSheet("color:#4fc3f7; font-size:10px; padding-left:4px;")
+        tb.addWidget(self._cache_lbl)
 
         tb.addSeparator()
 
@@ -888,6 +900,7 @@ class MainWindow(QMainWindow):
         self._ws_thread.exchange_info_signal.connect(self._on_exchange_info)
         self._ws_thread.status_signal.connect(self._on_status)
         self._ws_thread.backtest_history_signal.connect(self._on_backtest_history)
+        self._ws_thread.cache_ready_signal.connect(self._on_cache_ready)
         self._ws_thread.start()
 
         self._heatmap_timer.start()
@@ -1225,12 +1238,14 @@ class MainWindow(QMainWindow):
         if sym == self._symbol:
             return
         self._symbol = sym
+        self._refresh_cache_label()
         self._start_stream()
 
     def _on_interval_changed(self, iv: str) -> None:
         if iv == self._interval:
             return
         self._interval = iv
+        self._refresh_cache_label()
         self._start_stream()
 
     def _on_fp_mode_changed(self, mode: str) -> None:
@@ -1274,7 +1289,14 @@ class MainWindow(QMainWindow):
         have = len(self._loaded_klines)
 
         if have < need:
-            # 資料不足 → 批量載入後才執行回測
+            # 內存不足 → 先檢查本機快取
+            cached = kline_cache.load(self._symbol, self._interval)
+            if len(cached) >= need:
+                self._status_lbl.setText("從本機快取載入資料…")
+                self._load_from_cache(cached, need)
+                return
+
+            # 快取不足 → 批量網路載入
             self._run_btn.setEnabled(False)
             self._run_btn.setText("載入中…")
             if self._ws_thread:
@@ -1361,6 +1383,82 @@ class MainWindow(QMainWindow):
 
         dlg = BacktestResultDialog(sim_stats, parent=self)
         dlg.exec()
+
+    # ── 本機快取 ──────────────────────────────────────────────────────────────
+
+    def _load_from_cache(self, cached_rows: list, need: int) -> None:
+        """以快取列表直接建立 _loaded_klines 並執行回測。"""
+        rows = cached_rows[-need:]  # 取最近 need 根
+        from core.data_types import Kline as _Kline
+        klines = [
+            _Kline.from_rest(self._symbol, self._interval, row)
+            for row in rows
+        ]
+
+        # 合併較新的即時 K 棒
+        if self._loaded_klines:
+            latest_hist_ot = klines[-1].open_time
+            newer = [k for k in self._loaded_klines if k.open_time > latest_hist_ot]
+            if newer:
+                klines.extend(newer)
+
+        self._loaded_klines = klines
+        self._kline_timestamps = [k.open_time for k in klines]
+
+        n = len(klines)
+        self._status_lbl.setText(f"已從快取載入 {n:,} 根 K 棒，開始回測…")
+
+        large_backtest = n > config.BACKTEST_NO_CHART_BARS
+        if not large_backtest:
+            self._kline_chart.set_history(klines)
+            self._fp_chart.set_kline_timestamps(self._kline_timestamps)
+            self._fp_builder.set_kline_open_times(self._kline_timestamps)
+            self._cvd_calc.seed_history(klines[:-1])
+            self._cvd_calc.on_new_candle(klines[-1].open_time)
+            self._current_kline_open_time = klines[-1].open_time
+            ot_map = self._kline_chart.get_open_time_index_map()
+            self._cvd_chart.update_cvd(self._cvd_calc.get_series(), ot_map)
+
+        if self._strategy_engine:
+            self._execute_backtest()
+
+    def _on_download_cache(self) -> None:
+        """「💾 預載」按鈕：只下載並儲存到本機快取，不執行回測。"""
+        range_label = self._bt_range_combo.currentText()
+        need = config.BACKTEST_RANGE_OPTIONS.get(range_label, 200)
+        if self._ws_thread:
+            self._download_btn.setEnabled(False)
+            self._download_btn.setText("下載中…")
+            self._status_lbl.setText(f"正在下載並儲存 {range_label} 快取…")
+            self._ws_thread.request_backtest_history(need, cache_only=True)
+
+    def _on_cache_ready(self, count: int) -> None:
+        """cache_only 下載完成後的回調。"""
+        self._download_btn.setEnabled(True)
+        self._download_btn.setText("💾 預載")
+        if count:
+            info = kline_cache.info(self._symbol, self._interval)
+            if info:
+                total = info["count"]
+                size  = info["size_mb"]
+                self._cache_lbl.setText(f"📁 {total:,}根 {size:.0f}MB")
+                self._status_lbl.setText(
+                    f"快取已儲存：{total:,} 根 K 棒 ({size:.1f} MB)"
+                )
+            else:
+                self._status_lbl.setText(f"快取已儲存：{count:,} 根")
+        else:
+            self._status_lbl.setText("快取下載失敗，請稍後再試")
+
+    def _refresh_cache_label(self) -> None:
+        """更新工具列快取資訊 label（切換幣對/interval 時呼叫）。"""
+        info = kline_cache.info(self._symbol, self._interval)
+        if info:
+            self._cache_lbl.setText(f"📁 {info['count']:,}根 {info['size_mb']:.0f}MB")
+        else:
+            self._cache_lbl.setText("")
+
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _on_realtime_toggled(self, checked: bool) -> None:
         """⚡ 即時按鈕 toggle：開啟後每根收盤 K 棒自動標注。"""
