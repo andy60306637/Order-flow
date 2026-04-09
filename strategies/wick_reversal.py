@@ -47,6 +47,8 @@ class WickReversalStrategy(StrategyBase):
     short_delta_eff_threshold: float = 0.6   # 做空 Delta Eff 閾值（0~1）
     short_vol_sma_period:      int   = 20    # 做空成交量 SMA 窗期；0=不過濾
     short_vol_sma_mult:        float = 1.2  # 做空成交量門標倍率（volume > SMA * mult）
+    # ── Trailing Delta 出場確認 ────────────────────────────────────────────────
+    td_consec_bars:            int   = 2     # 連續幾根反向 delta 才觸發 TD 出場
 
     # ─────────────────────────────────────────────────────────────────────────
     def on_history(self, klines: List[Kline]) -> List[StrategySignal]:
@@ -65,6 +67,7 @@ class WickReversalStrategy(StrategyBase):
         stop_price  = 0.0
         target_price = 0.0
         trailing    = False
+        td_consec   = 0       # 連續反向 delta 計數
 
         for i in range(n):
             k = klines[i]
@@ -107,18 +110,23 @@ class WickReversalStrategy(StrategyBase):
                         ))
                         exited = True
                     elif trailing:
-                        # 追蹤模式：delta 轉負 → 停利出場
+                        # 追蹤模式：連續 td_consec_bars 根 delta 轉負 → 停利出場
                         if _kline_delta(k) <= 0:
-                            signals.append(StrategySignal(
-                                open_time=k.open_time, price=k.close,
-                                signal_type="long_exit", label="TD",
-                            ))
-                            exited = True
+                            td_consec += 1
+                            if td_consec >= self.td_consec_bars:
+                                signals.append(StrategySignal(
+                                    open_time=k.open_time, price=k.close,
+                                    signal_type="long_exit", label="TD",
+                                ))
+                                exited = True
+                        else:
+                            td_consec = 0
                     elif k.high >= target_price:
                         # 觸及 1:1 停利位 → 檢查 delta 決定是否追蹤
                         if _kline_delta(k) > 0:
                             trailing = True
                             stop_price = target_price   # 停損上移至 1:1
+                            td_consec = 0               # 重置計數器
                         else:
                             signals.append(StrategySignal(
                                 open_time=k.open_time, price=target_price,
@@ -134,18 +142,23 @@ class WickReversalStrategy(StrategyBase):
                         ))
                         exited = True
                     elif trailing:
-                        # 追蹤模式：delta 轉正 → 停利出場
+                        # 追蹤模式：連續 td_consec_bars 根 delta 轉正 → 停利出場
                         if _kline_delta(k) >= 0:
-                            signals.append(StrategySignal(
-                                open_time=k.open_time, price=k.close,
-                                signal_type="short_exit", label="TD",
-                            ))
-                            exited = True
+                            td_consec += 1
+                            if td_consec >= self.td_consec_bars:
+                                signals.append(StrategySignal(
+                                    open_time=k.open_time, price=k.close,
+                                    signal_type="short_exit", label="TD",
+                                ))
+                                exited = True
+                        else:
+                            td_consec = 0
                     elif k.low <= target_price:
                         # 觸及 1:1 停利位 → 檢查 delta 決定是否追蹤
                         if _kline_delta(k) < 0:
                             trailing = True
                             stop_price = target_price   # 停損下移至 1:1
+                            td_consec = 0               # 重置計數器
                         else:
                             signals.append(StrategySignal(
                                 open_time=k.open_time, price=target_price,
@@ -157,6 +170,7 @@ class WickReversalStrategy(StrategyBase):
                     in_position = False
                     pos_dir = ""
                     trailing = False
+                    td_consec = 0
                     # 出場後繼續往下檢查是否有新 k0（同根）
                 else:
                     continue   # 仍在持倉，跳過其餘邏輯

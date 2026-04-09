@@ -110,16 +110,18 @@ class TestSameBarExecution(unittest.TestCase):
         bars.append(_k(1, 50020, 50060, 49960, 50055, tbv=80))
         # bar 2: 觸及 target + delta > 0 → 進入追蹤模式
         bars.append(_k(2, k0_high, target + 10, 49980, target + 5, tbv=80))
-        # bar 3: delta ≤ 0，low > 追蹤止損 → TD 出場，同棒 close 成交
+        # bar 3: delta ≤ 0，第 1 根反向 → 累積計數，尚未出場
         bars.append(_k(3, target + 3, target + 5, target + 1, target + 2, tbv=20))
+        # bar 4: delta ≤ 0，第 2 根反向 → 滿足 td_consec_bars=2，TD 出場
+        bars.append(_k(4, target + 2, target + 4, target + 1, target + 2, tbv=20))
 
         signals = strat.on_history(bars)
         td_exits = [s for s in signals if s.label == "TD"]
 
         self.assertEqual(len(td_exits), 1)
-        self.assertEqual(td_exits[0].open_time, bars[3].open_time,
-                         "TD exit 應在 delta 反轉的同棒發出")
-        self.assertEqual(td_exits[0].price, bars[3].close,
+        self.assertEqual(td_exits[0].open_time, bars[4].open_time,
+                         "TD exit 應在第 2 根連續反向 delta 的同棒發出")
+        self.assertEqual(td_exits[0].price, bars[4].close,
                          "TD exit 成交價應為同棒收盤價")
 
 
