@@ -115,10 +115,12 @@ class BacktestResultDialog(QDialog):
         ret  = stats.get("total_return_pct", 0.0)
         ret_c = config.COLOR_UP if ret >= 0 else config.COLOR_DOWN
         ret_s = f"+{ret:.2f}" if ret >= 0 else f"{ret:.2f}"
+        # 費率展示：模式 + 實際費率％
+        fee_display = f"{fm} ({fr*100:.4f}%)" if fm not in ("Maker", "Taker") else f"{fm} ({fr*100:.2f}%)"
         cfg_lbl = QLabel(
             f"<b>資金:</b> {cap:,.0f} U &nbsp;|&nbsp; "
             f"<b>槓桿:</b> {lev}x &nbsp;|&nbsp; "
-            f"<b>費率:</b> {fm} ({fr*100:.2f}%) &nbsp;|&nbsp; "
+            f"<b>費率:</b> {fee_display} &nbsp;|&nbsp; "
             f"<b>損失上限:</b> {mlp*100:.1f}% &nbsp;|&nbsp; "
             f"<b>滑價:</b> {slip:.1f} bps &nbsp;|&nbsp; "
             f"<b>資金費率:</b> {fund:.4f}/8h &nbsp;|&nbsp; "
@@ -515,8 +517,14 @@ class BacktestConfigDialog(QDialog):
         form.addRow("槓桿:", self.leverage_spin)
 
         self.fee_combo = QComboBox()
-        self.fee_combo.addItems(["Taker", "Maker"])
-        self.fee_combo.setToolTip("Maker=0.02%  Taker=0.05%")
+        self.fee_combo.addItems(["Taker", "Maker", "100% Maker", "70M/30T", "50M/50T"])
+        self.fee_combo.setToolTip(
+            "Taker=0.05%  Maker=0.02%\n"
+            "成本情境測試:\n"
+            "  100% Maker = 0.02%\n"
+            "  70M/30T = 0.029%\n"
+            "  50M/50T = 0.035%"
+        )
         self.fee_combo.setStyleSheet(self._SPIN_STYLE)
         form.addRow("費率模式:", self.fee_combo)
 

@@ -15,7 +15,13 @@ from typing import List, Optional
 from strategies.base import StrategySignal
 
 # ── 費率常數 ────────────────────────────────────────────────────────────────
-FEE_RATES = {"Maker": 0.0002, "Taker": 0.0005}
+FEE_RATES = {
+    "Maker":         0.0002,
+    "Taker":         0.0005,
+    "100% Maker":    0.0002,              # 成本情境：全 Maker
+    "70M/30T":       0.0002*0.7 + 0.0005*0.3,   # 成本情境：70% Maker / 30% Taker
+    "50M/50T":       0.0002*0.5 + 0.0005*0.5,   # 成本情境：50% Maker / 50% Taker
+}
 
 
 @dataclass
