@@ -36,10 +36,17 @@ class WickReversalStrategy(StrategyBase):
     name = "Wick Reversal 1m"
 
     # ── 可調參數 ──────────────────────────────────────────────────────────────
-    zoom_bars:        int   = 5     # k0 後觀察窗口（根）
-    sl_offset:        float = 10.0   # 固定停損位移 (USDT)
-    rr_ratio:         float = 1.0    # 盈虧比
-    delta_eff_threshold: float = 0.6 # Delta Efficiency 閾值（0~1）；0 = 與原版相同
+    zoom_bars:                 int   = 5     # k0 後觀察窗口（根）
+    sl_offset:                 float = 10.0   # 固定停損位移 (USDT)
+    rr_ratio:                  float = 1.0    # 盈虧比
+    # ── 做多進場檢驗 ────────────────────────────────────────────────────────────
+    long_delta_eff_threshold:  float = 0.6   # 做多 Delta Eff 閾值（0~1）
+    long_vol_sma_period:       int   = 20    # 做多成交量 SMA 窗期；0=不過濾
+    long_vol_sma_mult:         float = 1.2   # 做多成交量門標倍率（volume > SMA * mult）
+    # ── 做空進場檢驗 ────────────────────────────────────────────────────────────
+    short_delta_eff_threshold: float = 0.6   # 做空 Delta Eff 閾值（0~1）
+    short_vol_sma_period:      int   = 20    # 做空成交量 SMA 窗期；0=不過濾
+    short_vol_sma_mult:        float = 1.2   # 做空成交量門標倍率（volume > SMA * mult）
 
     # ─────────────────────────────────────────────────────────────────────────
     def on_history(self, klines: List[Kline]) -> List[StrategySignal]:
@@ -157,13 +164,22 @@ class WickReversalStrategy(StrategyBase):
             # ══════════════════════════════════════════════════════════════════
             # Step 2：有 k0 且在 zoom 窗口 → 檢查防守線 / 進場條件
             # ══════════════════════════════════════════════════════════════════
+            # ── 按方向計算成交量 SMA 過濾標誌 ───────────────────────────────────────
+            def _vol_ok_for(period: int, mult: float) -> bool:
+                if period <= 0 or i < period:
+                    return True
+                _s = i - period + 1
+                _sma = sum(klines[j].volume for j in range(_s, i + 1)) / period
+                return k.volume > _sma * mult
             if k0 is not None and i > k0_idx:
                 bars_after = i - k0_idx
                 if bars_after <= self.zoom_bars:
                     if k0_dir == "long":
                         if k.low < k0.low:
                             k0 = None          # 防守線被破，失效
-                        elif k.high >= k0.high and _kline_delta_eff(k) > self.delta_eff_threshold:
+                        elif (k.high >= k0.high
+                                and _kline_delta_eff(k) > self.long_delta_eff_threshold
+                                and _vol_ok_for(self.long_vol_sma_period, self.long_vol_sma_mult)):
                             entry = k0.high
                             stop_price = k0.low - self.sl_offset
                             risk = entry - stop_price
@@ -180,7 +196,9 @@ class WickReversalStrategy(StrategyBase):
                     else:  # short
                         if k.high > k0.high:
                             k0 = None          # 防守線被破，失效
-                        elif k.low <= k0.low and _kline_delta_eff(k) < -self.delta_eff_threshold:
+                        elif (k.low <= k0.low
+                                and _kline_delta_eff(k) < -self.short_delta_eff_threshold
+                                and _vol_ok_for(self.short_vol_sma_period, self.short_vol_sma_mult)):
                             entry = k0.low
                             stop_price = k0.high + self.sl_offset
                             risk = stop_price - entry
