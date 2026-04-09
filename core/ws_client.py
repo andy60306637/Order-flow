@@ -243,9 +243,10 @@ class WsWorkerThread(QThread):
         if end_time_ms > 0:
             url += f"&endTime={end_time_ms}"
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status == 200:
                     return await r.json()
+                logger.warning("History fetch HTTP %d", r.status)
         except Exception as exc:
             logger.error("History fetch error: %s", exc)
         return []
@@ -297,8 +298,12 @@ class WsWorkerThread(QThread):
         """
         分頁拉取最近 total_candles 根 K 線。
         每頁最多 KLINE_HISTORY_LIMIT（1500），自動向前翻頁。
+        單頁失敗時最多重試 5 次（指數退避），避免網路抖動或 rate-limit 導致提前中斷。
         完成後透過 backtest_history_signal 一次送回全部資料。
         """
+        MAX_RETRIES = 5
+        RETRY_BASE_DELAY = 1.0   # 秒，每次重試翻倍
+
         all_rows: list = []
         end_time: int = 0  # 0 = 最新
         remaining = total_candles
@@ -307,28 +312,57 @@ class WsWorkerThread(QThread):
             async with aiohttp.ClientSession() as session:
                 while remaining > 0 and self._running:
                     self.status_signal.emit(
-                        f"載入回測資料… 已取得 {len(all_rows)}/{total_candles}"
+                        f"載入回測資料… 已取得 {len(all_rows):,}/{total_candles:,}"
                     )
-                    rows = await self._fetch_history(session, end_time_ms=end_time)
+
+                    # ── 帶重試的單頁取得 ─────────────────────────────────
+                    rows = []
+                    for attempt in range(MAX_RETRIES):
+                        rows = await self._fetch_history(session, end_time_ms=end_time)
+                        if rows:
+                            break
+                        wait = RETRY_BASE_DELAY * (2 ** attempt)
+                        logger.warning(
+                            "Backtest history page empty (attempt %d/%d), "
+                            "retrying in %.1fs …",
+                            attempt + 1, MAX_RETRIES, wait,
+                        )
+                        self.status_signal.emit(
+                            f"載入回測資料… 第 {attempt+1} 次重試 "
+                            f"(已取得 {len(all_rows):,}/{total_candles:,})"
+                        )
+                        await asyncio.sleep(wait)
+
                     if not rows:
+                        # 重試全部失敗 → 中止並回傳已取得部分
+                        logger.error(
+                            "Backtest history fetch failed after %d retries "
+                            "(got %d/%d candles). Emitting partial data.",
+                            MAX_RETRIES, len(all_rows), total_candles,
+                        )
+                        self.status_signal.emit(
+                            f"⚠ 部分回測資料載入失敗，已取得 {len(all_rows):,} 根"
+                        )
                         break
 
                     if all_rows:
-                        # 去除與已有資料重疊
-                        cutoff = all_rows[0][0]  # 最舊的 open_time
+                        cutoff = all_rows[0][0]
                         rows = [r for r in rows if r[0] < cutoff]
                     if not rows:
+                        # 已到達最早可用資料
                         break
 
                     all_rows = rows + all_rows
                     remaining = total_candles - len(all_rows)
-                    # 下一頁 endTime = 最舊的 open_time - 1
                     end_time = int(all_rows[0][0]) - 1
 
                 # 只保留最近 total_candles 根
                 if len(all_rows) > total_candles:
                     all_rows = all_rows[-total_candles:]
 
+                self.status_signal.emit(
+                    f"回測資料載入完成，共 {len(all_rows):,} 根 K 棒"
+                )
                 self.backtest_history_signal.emit(all_rows)
         except Exception as exc:
             logger.error("fetch_backtest_history error: %s", exc)
