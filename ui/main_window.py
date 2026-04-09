@@ -518,16 +518,32 @@ class BacktestConfigDialog(QDialog):
         form.addRow("槓桿:", self.leverage_spin)
 
         self.fee_combo = QComboBox()
-        self.fee_combo.addItems(["Taker", "Maker", "100% Maker", "70M/30T", "50M/50T"])
+        self.fee_combo.addItems(["Taker", "Maker", "100% Maker", "70M/30T", "50M/50T", "自訂"])
         self.fee_combo.setToolTip(
             "Taker=0.05%  Maker=0.02%\n"
             "成本情境測試:\n"
             "  100% Maker = 0.02%\n"
             "  70M/30T = 0.029%\n"
-            "  50M/50T = 0.035%"
+            "  50M/50T = 0.035%\n"
+            "自訂：直接輸入費率（%）"
         )
         self.fee_combo.setStyleSheet(self._SPIN_STYLE)
         form.addRow("費率模式:", self.fee_combo)
+
+        self.custom_fee_spin = QDoubleSpinBox()
+        self.custom_fee_spin.setRange(0.0, 1.0)
+        self.custom_fee_spin.setValue(0.05)
+        self.custom_fee_spin.setDecimals(4)
+        self.custom_fee_spin.setSingleStep(0.001)
+        self.custom_fee_spin.setSuffix(" %")
+        self.custom_fee_spin.setToolTip("自訂手續費率（例：0.05 = 0.05%）")
+        self.custom_fee_spin.setStyleSheet(self._SPIN_STYLE)
+        self._custom_fee_row_label = QLabel("自訂費率:")
+        form.addRow(self._custom_fee_row_label, self.custom_fee_spin)
+        self._custom_fee_row_label.setVisible(False)
+        self.custom_fee_spin.setVisible(False)
+
+        self.fee_combo.currentTextChanged.connect(self._on_fee_mode_changed)
 
         self.slippage_spin = QDoubleSpinBox()
         self.slippage_spin.setRange(0.0, 50.0)
@@ -569,6 +585,11 @@ class BacktestConfigDialog(QDialog):
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btn_box.rejected.connect(self.hide)
         form.addRow(btn_box)
+
+    def _on_fee_mode_changed(self, mode: str) -> None:
+        visible = (mode == "自訂")
+        self._custom_fee_row_label.setVisible(visible)
+        self.custom_fee_spin.setVisible(visible)
 
 
 class MainWindow(QMainWindow):
@@ -1373,6 +1394,7 @@ class MainWindow(QMainWindow):
             max_loss_pct=self._bt_config_dlg.loss_spin.value() / 100.0,
             leverage=self._bt_config_dlg.leverage_spin.value(),
             fee_mode=self._bt_config_dlg.fee_combo.currentText(),
+            custom_fee_rate=self._bt_config_dlg.custom_fee_spin.value() / 100.0,
             slippage_bps=self._bt_config_dlg.slippage_spin.value(),
             funding_rate=self._bt_config_dlg.funding_spin.value(),
             maint_margin=self._bt_config_dlg.maint_spin.value(),

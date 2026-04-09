@@ -27,14 +27,22 @@ FEE_RATES = {
 @dataclass
 class BacktestConfig:
     """回測參數。"""
-    initial_capital: float = 10_000.0   # USDT
-    max_loss_pct:    float = 0.02       # 每筆最高損失比例（0.02 = 2%）
-    leverage:        int   = 20
-    fee_mode:        str   = "Taker"    # "Maker" | "Taker"
-    slippage_bps:    float = 0.0        # 滑價 bps（1 bps = 0.01% = 0.0001）
-    funding_rate:    float = 0.0        # 資金費率 (0.01% per 8h)；0 = 不計
-    maint_margin:    float = 0.005       # 維持保證金率 (0.5%)
-    compound:        bool  = True        # True=複利（動態 equity），False=固定初始資金
+    initial_capital:  float = 10_000.0   # USDT
+    max_loss_pct:     float = 0.02       # 每筆最高損失比例（0.02 = 2%）
+    leverage:         int   = 20
+    fee_mode:         str   = "Taker"    # "Maker" | "Taker" | 其他預設模式 | "自訂"
+    custom_fee_rate:  float = 0.0        # 僅 fee_mode=="自訂" 時使用（0.0005 = 0.05%）
+    slippage_bps:     float = 0.0        # 滑價 bps（1 bps = 0.01% = 0.0001）
+    funding_rate:     float = 0.0        # 資金費率 (0.01% per 8h)；0 = 不計
+    maint_margin:     float = 0.005       # 維持保證金率 (0.5%)
+    compound:         bool  = True        # True=複利（動態 equity），False=固定初始資金
+
+
+def _resolve_fee_rate(cfg: BacktestConfig) -> float:
+    """依 fee_mode 解析實際費率；'自訂' 時直接使用 custom_fee_rate。"""
+    if cfg.fee_mode == "自訂":
+        return max(cfg.custom_fee_rate, 0.0)
+    return FEE_RATES.get(cfg.fee_mode, FEE_RATES["Taker"])
 
 
 FUNDING_INTERVAL_MS = 8 * 3600 * 1000   # 8 小時 (ms)
@@ -54,7 +62,7 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
       - 多空分離統計
       - trade_list（每筆交易明細）
     """
-    fee_rate = FEE_RATES[cfg.fee_mode]
+    fee_rate = _resolve_fee_rate(cfg)
     equity = cfg.initial_capital
 
     raw_trades, open_count = _pair_signals(signals)
@@ -254,7 +262,7 @@ def _build_stats(
         "total_return_pct": 0.0,
         "leverage": cfg.leverage,
         "fee_mode": cfg.fee_mode,
-        "fee_rate": FEE_RATES[cfg.fee_mode],
+        "fee_rate": _resolve_fee_rate(cfg),
         "max_loss_pct": cfg.max_loss_pct,
         "trades": 0, "win_rate": 0.0,
         "total_net_pnl": 0.0, "total_fees": 0.0,
@@ -330,7 +338,7 @@ def _build_stats(
         "total_return_pct": (final_equity - cfg.initial_capital) / cfg.initial_capital * 100,
         "leverage": cfg.leverage,
         "fee_mode": cfg.fee_mode,
-        "fee_rate": FEE_RATES[cfg.fee_mode],
+        "fee_rate": _resolve_fee_rate(cfg),
         "max_loss_pct": cfg.max_loss_pct,
         "slippage_bps": cfg.slippage_bps,
         "funding_rate": cfg.funding_rate,
