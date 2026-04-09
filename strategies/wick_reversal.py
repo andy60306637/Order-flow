@@ -39,7 +39,7 @@ class WickReversalStrategy(StrategyBase):
     zoom_bars:        int   = 5     # k0 後觀察窗口（根）
     sl_offset:        float = 10.0   # 固定停損位移 (USDT)
     rr_ratio:         float = 1.0    # 盈虧比
-    delta_eff_threshold: float = 0.8 # Delta Efficiency 閾值（0~1）；0 = 與原版相同
+    delta_eff_threshold: float = 0.5 # Delta Efficiency 閾值（0~1）；0 = 與原版相同
 
     # ─────────────────────────────────────────────────────────────────────────
     def on_history(self, klines: List[Kline]) -> List[StrategySignal]:

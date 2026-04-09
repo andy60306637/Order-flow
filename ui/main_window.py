@@ -433,6 +433,15 @@ class BacktestConfigDialog(QDialog):
         self.maint_spin.setStyleSheet(self._SPIN_STYLE)
         form.addRow("維持保證金率:", self.maint_spin)
 
+        self.compound_combo = QComboBox()
+        self.compound_combo.addItems(["複利（動態資金）", "固定（初始資金）"])
+        self.compound_combo.setToolTip(
+            "複利：每筆依當前資產計算倉位 (equity) — PnL 複利\n"
+            "固定：每筆依初始資金計算倉位，不受盈虧影響"
+        )
+        self.compound_combo.setStyleSheet(self._SPIN_STYLE)
+        form.addRow("倉位模式:", self.compound_combo)
+
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btn_box.rejected.connect(self.hide)
         form.addRow(btn_box)
@@ -1214,6 +1223,7 @@ class MainWindow(QMainWindow):
             slippage_bps=self._bt_config_dlg.slippage_spin.value(),
             funding_rate=self._bt_config_dlg.funding_spin.value(),
             maint_margin=self._bt_config_dlg.maint_spin.value(),
+            compound=self._bt_config_dlg.compound_combo.currentIndex() == 0,
         )
         sim_stats = simulate_trades(self._strategy_signals, cfg)
         sim_stats["strategy_name"] = getattr(self._strategy_engine, "name", "策略")

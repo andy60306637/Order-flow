@@ -28,6 +28,7 @@ class BacktestConfig:
     slippage_bps:    float = 0.0        # 滑價 bps（1 bps = 0.01% = 0.0001）
     funding_rate:    float = 0.0        # 資金費率 (0.01% per 8h)；0 = 不計
     maint_margin:    float = 0.005       # 維持保證金率 (0.5%)
+    compound:        bool  = True        # True=複利（動態 equity），False=固定初始資金
 
 
 FUNDING_INTERVAL_MS = 8 * 3600 * 1000   # 8 小時 (ms)
@@ -71,7 +72,10 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
                 entry_p *= (1 - slip)   # 做空進場更低
                 exit_p  *= (1 + slip)   # 做空平倉更高
 
-        qty = _calc_qty(equity, entry_p, stop_p, d, cfg.max_loss_pct, cfg.leverage)
+        qty = _calc_qty(
+            equity if cfg.compound else cfg.initial_capital,
+            entry_p, stop_p, d, cfg.max_loss_pct, cfg.leverage
+        )
         if qty is None:
             trade_list.append({
                 "dir": d, "entry": entry_p, "exit": exit_p,
