@@ -55,6 +55,7 @@ class WsWorkerThread(QThread):
         self._running  = True
         self._resync_requested  = False
         self._loading_more      = False   # 防止並發的 load-more 請求
+        self._rate_limit_wait: float = 0  # 429 Retry-After 秒數（_fetch_history 設定）
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -239,6 +240,7 @@ class WsWorkerThread(QThread):
         """
         拉取最新（或 end_time_ms 之前）的歷史 K 線。
         end_time_ms > 0 時，Binance 回傳 open_time <= end_time_ms 的最後 limit 根。
+        429 時：設定 self._rate_limit_wait（秒）並回傳 []。
         """
         url = (
             f"{config.REST_BASE}/fapi/v1/klines"
@@ -252,7 +254,15 @@ class WsWorkerThread(QThread):
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status == 200:
                     return await r.json()
-                logger.warning("History fetch HTTP %d", r.status)
+                if r.status == 429:
+                    retry_after = float(r.headers.get("Retry-After", 60))
+                    self._rate_limit_wait = max(retry_after, 5.0)  # 至少等 5s
+                    logger.warning(
+                        "History fetch HTTP 429 — rate limited, retry after %.0fs",
+                        self._rate_limit_wait,
+                    )
+                else:
+                    logger.warning("History fetch HTTP %d", r.status)
         except Exception as exc:
             logger.error("History fetch error: %s", exc)
         return []
@@ -302,77 +312,125 @@ class WsWorkerThread(QThread):
 
     async def _fetch_backtest_history(self, total_candles: int, cache_only: bool = False) -> None:
         """
-        分頁拉取最近 total_candles 根 K 線。
-        每頁最多 KLINE_HISTORY_LIMIT（1500），自動向前翻頁。
-        單頁失敗時最多重試 5 次（指數退避），避免網路抖動或 rate-limit 導致提前中斷。
-        下載完成後：
+        分頁拉取最近 total_candles 根 K 線，支援從本機快取續傳。
+
+        啟動策略：
+          1. 先讀取本機快取（若有），以快取最舊的 open_time 作為下載起點，
+             僅下載快取中尚缺少的更早資料（避免重複下載）。
+          2. 每成功頁面後等待 PAGE_DELAY 秒，減少 429 機率。
+          3. 遇到 429：等待 Retry-After 秒（最少 60s），不消耗重試次數。
+          4. 遇到空頁（非限流）：最多重試 MAX_RETRIES 次（指數退避）。
+
+        完成後：
           - 自動合併寫入本機快取（data/klines/{SYMBOL}_{interval}.npy）
           - cache_only=False：透過 backtest_history_signal 回傳全部資料
           - cache_only=True ：僅寫快取，透過 cache_ready_signal 回傳列數
         """
-        MAX_RETRIES = 5
-        RETRY_BASE_DELAY = 1.0   # 秒，每次重試翻倍
+        MAX_RETRIES  = 5
+        RETRY_BASE   = 2.0   # 空頁重試：2s, 4s, 8s, 16s, 32s
+        PAGE_DELAY   = 0.4   # 每頁成功後稍候，避免觸發限流
+        RL_MIN_WAIT  = 60.0  # 429 最少等待秒數（即使 Retry-After < 此值）
 
-        all_rows: list = []
-        end_time: int = 0  # 0 = 最新
-        remaining = total_candles
+        # ── 從快取續傳：直接以快取作為已取得部分 ──────────────────────────
+        existing = kline_cache.load(self._symbol.upper(), self._interval)
+        if existing:
+            logger.info(
+                "Resuming from cache: %d existing rows, oldest=%s",
+                len(existing),
+                existing[0][0],
+            )
+
+        all_rows: list = list(existing)   # 快取作為基底（可能為空）
+        # 從快取最舊的 open_time 繼續往更早下載；0 = 從最新開始
+        end_time: int = (int(existing[0][0]) - 1) if existing else 0
+        remaining = total_candles - len(all_rows)
+
+        # 快取已充足：直接走快取路徑，不發網路請求
+        if remaining <= 0:
+            all_rows = all_rows[-total_candles:]
+            self.status_signal.emit(
+                f"快取已有足夠資料（{len(all_rows):,} 根），直接使用"
+            )
+            if cache_only:
+                self.cache_ready_signal.emit(len(all_rows))
+            else:
+                self.backtest_history_signal.emit(all_rows)
+            return
 
         try:
             async with aiohttp.ClientSession() as session:
+                error_count = 0   # 連續非限流空頁計數
+
                 while remaining > 0 and self._running:
                     self.status_signal.emit(
                         f"載入回測資料… 已取得 {len(all_rows):,}/{total_candles:,}"
                     )
 
-                    # ── 帶重試的單頁取得 ─────────────────────────────────
-                    rows = []
-                    for attempt in range(MAX_RETRIES):
-                        rows = await self._fetch_history(session, end_time_ms=end_time)
-                        if rows:
+                    # ── 單頁請求（可能觸發 429 設定 _rate_limit_wait）────────
+                    self._rate_limit_wait = 0
+                    rows = await self._fetch_history(session, end_time_ms=end_time)
+
+                    # ── 429 限流：等 Retry-After，不消耗重試次數 ────────────
+                    if not rows and self._rate_limit_wait > 0:
+                        wait = max(self._rate_limit_wait, RL_MIN_WAIT)
+                        self._rate_limit_wait = 0
+                        self.status_signal.emit(
+                            f"⏳ 限流中，等待 {wait:.0f}s 後繼續"
+                            f"（已取得 {len(all_rows):,}/{total_candles:,}）"
+                        )
+                        await asyncio.sleep(wait)
+                        continue   # 重新請求同一頁，不計入 error_count
+
+                    # ── 空頁（網路/服務器問題）：指數退避重試 ─────────────
+                    if not rows:
+                        error_count += 1
+                        if error_count > MAX_RETRIES:
+                            logger.error(
+                                "Backtest history fetch failed after %d retries "
+                                "(got %d/%d candles). Emitting partial data.",
+                                MAX_RETRIES, len(all_rows), total_candles,
+                            )
+                            self.status_signal.emit(
+                                f"⚠ 部分回測資料載入失敗，已取得 {len(all_rows):,} 根"
+                            )
                             break
-                        wait = RETRY_BASE_DELAY * (2 ** attempt)
+                        wait = RETRY_BASE * (2 ** (error_count - 1))
                         logger.warning(
                             "Backtest history page empty (attempt %d/%d), "
                             "retrying in %.1fs …",
-                            attempt + 1, MAX_RETRIES, wait,
+                            error_count, MAX_RETRIES, wait,
                         )
                         self.status_signal.emit(
-                            f"載入回測資料… 第 {attempt+1} 次重試 "
+                            f"載入回測資料… 第 {error_count} 次重試 "
                             f"(已取得 {len(all_rows):,}/{total_candles:,})"
                         )
                         await asyncio.sleep(wait)
+                        continue
 
-                    if not rows:
-                        # 重試全部失敗 → 中止並回傳已取得部分
-                        logger.error(
-                            "Backtest history fetch failed after %d retries "
-                            "(got %d/%d candles). Emitting partial data.",
-                            MAX_RETRIES, len(all_rows), total_candles,
-                        )
-                        self.status_signal.emit(
-                            f"⚠ 部分回測資料載入失敗，已取得 {len(all_rows):,} 根"
-                        )
-                        break
+                    # ── 成功取得一頁 ─────────────────────────────────────
+                    error_count = 0  # 重置連續錯誤計數
 
                     if all_rows:
                         cutoff = all_rows[0][0]
-                        rows = [r for r in rows if r[0] < cutoff]
+                        rows   = [r for r in rows if r[0] < cutoff]
                     if not rows:
                         # 已到達最早可用資料
                         break
 
-                    all_rows = rows + all_rows
+                    all_rows  = rows + all_rows
                     remaining = total_candles - len(all_rows)
-                    end_time = int(all_rows[0][0]) - 1
+                    end_time  = int(all_rows[0][0]) - 1
+
+                    await asyncio.sleep(PAGE_DELAY)  # 限流預防
 
                 # 只保留最近 total_candles 根
                 if len(all_rows) > total_candles:
                     all_rows = all_rows[-total_candles:]
 
-                # ── 寫入本機快取 ──────────────────────────────────────────
+                # ── 寫入本機快取 ────────────────────────────────────────
                 if all_rows:
                     try:
-                        merged = kline_cache.merge_and_save(
+                        kline_cache.merge_and_save(
                             self._symbol.upper(), self._interval, all_rows
                         )
                         cache_info = kline_cache.info(self._symbol.upper(), self._interval)
