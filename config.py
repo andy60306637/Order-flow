@@ -39,19 +39,24 @@ WS_BASE   = "wss://fstream.binance.com"
 REST_BASE = "https://fapi.binance.com"
 
 # ── 歷史 K 線 ──────────────────────────────────────────────────────────────────
-KLINE_HISTORY_LIMIT = 1500    # Binance REST 單次最大回傳量
-KLINE_MAX_LOADED    = 45000   # _loaded_klines 最大長度（支援 30d×1440 根）
+KLINE_HISTORY_LIMIT = 1500     # Binance REST 單次最大回傳量
+KLINE_MAX_LOADED    = 129600   # _loaded_klines 最大長度（支援 90d×1440 根）
 
 # 回測天數選項（格式：UI 標籤 → 1m K 棒數）
 BACKTEST_RANGE_OPTIONS = {
-    "200根":   200,
-    "1 天":   1440,
-    "2 天":   2880,
-    "3 天":   4320,
-    "10 天": 14400,
-    "20 天": 28800,
-    "30 天": 43200,
+    "200根":    200,
+    "1 天":    1440,
+    "2 天":    2880,
+    "3 天":    4320,
+    "10 天":  14400,
+    "20 天":  28800,
+    "30 天":  43200,
+    "60 天":  86400,
+    "90 天": 129600,
 }
+
+# 超過此 K 棒數的回測不更新圖表（避免大量資料渲染卡頓）
+BACKTEST_NO_CHART_BARS = 43200   # > 30 天
 
 # ── Heatmap ────────────────────────────────────────────────────────────────────
 HEATMAP_TIME_SLOTS   = 300    # 保留幾個 OB 快照（x 軸）

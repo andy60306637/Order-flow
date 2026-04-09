@@ -1185,17 +1185,21 @@ class MainWindow(QMainWindow):
         self._loaded_klines = klines
         self._kline_timestamps = [k.open_time for k in klines]
 
-        # 更新 KlineChart 以顯示完整歷史
-        self._kline_chart.set_history(klines)
-        self._fp_chart.set_kline_timestamps(self._kline_timestamps)
-        self._fp_builder.set_kline_open_times(self._kline_timestamps)
+        # 大回測（> 30d）不更新圖表，避免渲染大量資料
+        large_backtest = len(klines) > config.BACKTEST_NO_CHART_BARS
 
-        # 重新計算 CVD
-        self._cvd_calc.seed_history(klines[:-1])
-        self._cvd_calc.on_new_candle(klines[-1].open_time)
-        self._current_kline_open_time = klines[-1].open_time
-        ot_map = self._kline_chart.get_open_time_index_map()
-        self._cvd_chart.update_cvd(self._cvd_calc.get_series(), ot_map)
+        if not large_backtest:
+            # 更新 KlineChart 以顯示完整歷史
+            self._kline_chart.set_history(klines)
+            self._fp_chart.set_kline_timestamps(self._kline_timestamps)
+            self._fp_builder.set_kline_open_times(self._kline_timestamps)
+
+            # 重新計算 CVD
+            self._cvd_calc.seed_history(klines[:-1])
+            self._cvd_calc.on_new_candle(klines[-1].open_time)
+            self._current_kline_open_time = klines[-1].open_time
+            ot_map = self._kline_chart.get_open_time_index_map()
+            self._cvd_chart.update_cvd(self._cvd_calc.get_series(), ot_map)
 
         n = len(klines)
         self._status_lbl.setText(f"已載入 {n} 根 K 棒，開始回測…")
@@ -1207,7 +1211,11 @@ class MainWindow(QMainWindow):
     def _execute_backtest(self) -> None:
         """以 _loaded_klines 執行回測並顯示結果。"""
         self._strategy_signals = self._strategy_engine.on_history(self._loaded_klines)
-        self._kline_chart.set_strategy_markers(self._strategy_signals)
+
+        # 大回測（> 30d）不繪製圖表標記
+        large_backtest = len(self._loaded_klines) > config.BACKTEST_NO_CHART_BARS
+        if not large_backtest:
+            self._kline_chart.set_strategy_markers(self._strategy_signals)
 
         # 工具列簡易統計（百分比）
         basic_stats = self._strategy_engine.compute_stats(self._strategy_signals)
