@@ -1324,7 +1324,7 @@ class MainWindow(QMainWindow):
                 self._ws_thread.request_backtest_history(need)
             return
 
-        self._execute_backtest()
+        self._execute_backtest(klines=self._loaded_klines[-need:])
 
     def _on_backtest_history(self, rows: list) -> None:
         """批量歷史載入完成後的回調。"""
@@ -1374,12 +1374,13 @@ class MainWindow(QMainWindow):
         if self._strategy_engine:
             self._execute_backtest()
 
-    def _execute_backtest(self) -> None:
-        """以 _loaded_klines 執行回測並顯示結果。"""
-        self._strategy_signals = self._strategy_engine.on_history(self._loaded_klines)
+    def _execute_backtest(self, klines: list | None = None) -> None:
+        """執行回測並顯示結果。klines 為 None 時使用 self._loaded_klines。"""
+        bt_klines = klines if klines is not None else self._loaded_klines
+        self._strategy_signals = self._strategy_engine.on_history(bt_klines)
 
         # 大回測（> 30d）不繪製圖表標記
-        large_backtest = len(self._loaded_klines) > config.BACKTEST_NO_CHART_BARS
+        large_backtest = len(bt_klines) > config.BACKTEST_NO_CHART_BARS
         if not large_backtest:
             self._kline_chart.set_strategy_markers(self._strategy_signals)
 
