@@ -79,6 +79,8 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
         if qty is None:
             trade_list.append({
                 "dir": d, "entry": entry_p, "exit": exit_p,
+                "entry_time": rt.get("entry_time", 0),
+                "exit_time": rt.get("exit_time", 0),
                 "qty": 0.0, "total_fee": 0.0,
                 "gross_pnl": 0.0, "net_pnl": 0.0,
                 "equity_after": equity,
@@ -120,6 +122,8 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
 
         trade_list.append({
             "dir": d, "entry": entry_p, "exit": exit_p,
+            "entry_time": rt.get("entry_time", 0),
+            "exit_time": rt.get("exit_time", 0),
             "qty": qty, "total_fee": total_fee,
             "funding_cost": funding_cost,
             "gross_pnl": gross_pnl, "net_pnl": net_pnl,
@@ -339,4 +343,80 @@ def _build_stats(
         "short_trades": sn, "short_win_rate": swr, "short_profit_factor": spf,
         "open_count": open_count,
         "trade_list": trade_list,
+    }
+
+
+def compute_subset_stats(trades: list) -> dict:
+    """從交易子集計算顯示統計（不重新模擬權益曲線）。"""
+    active = [t for t in trades if not t.get("skipped")]
+    n = len(active)
+    empty = {
+        "trades": 0, "win_rate": 0.0,
+        "total_net_pnl": 0.0, "total_fees": 0.0,
+        "profit_factor": 0.0, "max_consec_loss": 0,
+        "max_drawdown_pct": 0.0,
+        "avg_win": 0.0, "avg_loss": 0.0,
+        "sl_count": 0, "tp_count": 0, "ts_count": 0, "td_count": 0,
+        "long_trades": 0, "long_profit_factor": 0.0,
+        "short_trades": 0, "short_profit_factor": 0.0,
+    }
+    if n == 0:
+        return empty
+
+    wins = sum(1 for t in active if t["net_pnl"] > 0)
+    total_net = sum(t["net_pnl"] for t in active)
+    total_fees = sum(t["total_fee"] for t in active)
+
+    gp = sum(t["net_pnl"] for t in active if t["net_pnl"] > 0)
+    gl = abs(sum(t["net_pnl"] for t in active if t["net_pnl"] < 0))
+    pf = gp / gl if gl > 0 else float("inf")
+
+    max_cl = cur_cl = 0
+    for t in active:
+        if t["net_pnl"] < 0:
+            cur_cl += 1
+            max_cl = max(max_cl, cur_cl)
+        else:
+            cur_cl = 0
+
+    # 累計 PnL 回撤
+    cum = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for t in active:
+        cum += t["net_pnl"]
+        if cum > peak:
+            peak = cum
+        dd = peak - cum
+        if peak > 0 and dd / peak * 100 > max_dd:
+            max_dd = dd / peak * 100
+
+    wins_pnl = [t["net_pnl"] for t in active if t["net_pnl"] > 0]
+    loss_pnl = [abs(t["net_pnl"]) for t in active if t["net_pnl"] < 0]
+    avg_win = sum(wins_pnl) / len(wins_pnl) if wins_pnl else 0.0
+    avg_loss = sum(loss_pnl) / len(loss_pnl) if loss_pnl else 0.0
+
+    def _side(side_trades):
+        sn = len(side_trades)
+        if sn == 0:
+            return 0, 0.0
+        sp = sum(t["net_pnl"] for t in side_trades if t["net_pnl"] > 0)
+        sl = abs(sum(t["net_pnl"] for t in side_trades if t["net_pnl"] < 0))
+        return sn, (sp / sl if sl > 0 else float("inf"))
+
+    ln, lpf = _side([t for t in active if t["dir"] == "long"])
+    sn, spf = _side([t for t in active if t["dir"] == "short"])
+
+    return {
+        "trades": n, "win_rate": wins / n * 100,
+        "total_net_pnl": total_net, "total_fees": total_fees,
+        "profit_factor": pf, "max_consec_loss": max_cl,
+        "max_drawdown_pct": max_dd,
+        "avg_win": avg_win, "avg_loss": avg_loss,
+        "sl_count": sum(1 for t in active if t.get("exit_label") == "SL"),
+        "tp_count": sum(1 for t in active if t.get("exit_label") == "TP"),
+        "ts_count": sum(1 for t in active if t.get("exit_label") == "TS"),
+        "td_count": sum(1 for t in active if t.get("exit_label") == "TD"),
+        "long_trades": ln, "long_profit_factor": lpf,
+        "short_trades": sn, "short_profit_factor": spf,
     }

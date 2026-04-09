@@ -52,17 +52,47 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════
 
 class BacktestResultDialog(QDialog):
-    """顯示策略回測統計摘要與逐筆交易明細（含資金/手續費/多空分離）。"""
+    """顯示策略回測統計摘要與逐筆交易明細（含市場時區/月份篩選）。"""
+
+    # UTC 小時區間（h_start <= hour < h_end）
+    SESSIONS = {
+        "全時間": None,
+        "亞洲盤": (0, 8),
+        "倫敦盤": (8, 16),
+        "紐約盤": (13, 21),
+    }
 
     @staticmethod
     def _fmt_pf(v: float) -> str:
         return "∞" if v == float("inf") else f"{v:.2f}"
 
+    @staticmethod
+    def _trade_month(t: dict) -> str:
+        from datetime import datetime
+        ts = t.get("entry_time", 0)
+        if not ts:
+            return ""
+        dt = datetime.fromtimestamp(ts / 1000, tz=config.DISPLAY_TZ)
+        return f"{dt.year}-{dt.month:02d}"
+
+    @staticmethod
+    def _in_session(t: dict, h_range) -> bool:
+        from datetime import datetime, timezone
+        ts = t.get("entry_time", 0)
+        if not ts:
+            return True
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        h = dt.hour
+        h_start, h_end = h_range
+        return h_start <= h < h_end if h_start < h_end else (h >= h_start or h < h_end)
+
+    # ─────────────────────────────────────────────────────────────────
     def __init__(self, stats: dict, parent=None) -> None:
         super().__init__(parent)
         self._stats = stats
+        self._full_trade_list = stats.get("trade_list", [])
         self.setWindowTitle("回測結果")
-        self.setMinimumSize(980, 580)
+        self.setMinimumSize(1020, 620)
         self.setStyleSheet(
             f"QDialog {{ background: {config.COLOR_BG}; color: {config.COLOR_FG}; }}"
             f"QTableWidget {{ background: #1e222d; color: {config.COLOR_FG};"
@@ -73,7 +103,7 @@ class BacktestResultDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # ── 回測參數回顯 ──────────────────────────────────────────────────────────────────────────────
+        # ── 回測參數回顯 ─────────────────────────────────────────────
         cap  = stats.get("initial_capital", 0)
         lev  = stats.get("leverage", 0)
         fm   = stats.get("fee_mode", "")
@@ -98,63 +128,51 @@ class BacktestResultDialog(QDialog):
         cfg_lbl.setStyleSheet("font-size: 12px; padding: 4px 8px; color: #aaa;")
         layout.addWidget(cfg_lbl)
 
-        # ── 摘要統計表（16 欄）──────────────────────────────────────────────────────────────────────
-        n        = stats.get("trades", 0)
-        wr       = stats.get("win_rate", 0.0)
-        net      = stats.get("total_net_pnl", 0.0)
-        fees     = stats.get("total_fees", 0.0)
-        pf       = stats.get("profit_factor", 0.0)
-        mcl      = stats.get("max_consec_loss", 0)
-        mdd      = stats.get("max_drawdown_pct", 0.0)
-        lpf      = stats.get("long_profit_factor", 0.0)
-        spf      = stats.get("short_profit_factor", 0.0)
-        avg_win  = stats.get("avg_win", 0.0)
-        avg_loss = stats.get("avg_loss", 0.0)
-        sl_c     = stats.get("sl_count", 0)
-        tp_c     = stats.get("tp_count", 0)
-        ts_c     = stats.get("ts_count", 0)
-        td_c     = stats.get("td_count", 0)
-        strat    = stats.get("strategy_name", "─")
-        opens    = stats.get("open_count", 0)
-        trades   = stats.get("trade_list", [])
+        # ── 過濾列：市場時區 + 月份 ──────────────────────────────────
+        _filter_style = (
+            "QComboBox { background: #1e222d; color: #d1d4dc; border: 1px solid #363a45;"
+            " border-radius: 3px; padding: 2px 6px; min-width: 90px; }"
+            "QLabel { color: #aaa; font-size: 12px; }"
+        )
+        filter_w = QWidget()
+        filter_w.setStyleSheet(_filter_style)
+        filter_row = QHBoxLayout(filter_w)
+        filter_row.setContentsMargins(4, 2, 4, 2)
+        filter_row.addWidget(QLabel("市場時區:"))
+        self._session_combo = QComboBox()
+        for s in self.SESSIONS:
+            self._session_combo.addItem(s)
+        filter_row.addWidget(self._session_combo)
+        filter_row.addSpacing(16)
+        filter_row.addWidget(QLabel("月份:"))
+        self._month_combo = QComboBox()
+        self._populate_month_combo()
+        filter_row.addWidget(self._month_combo)
+        filter_row.addStretch()
+        layout.addWidget(filter_w)
 
-        sum_headers = [
+        # ── 摘要統計表（16 欄）────────────────────────────────────────
+        self._sum_headers = [
             "策略", "交易數", "勝率", "PF", "淨利(USDT)", "手續費",
-            "最大回撤", "最大連虏", "平均獲利", "平均號損",
+            "最大回撤", "最大連虧", "平均獲利", "平均虧損",
             "多單 PF", "空單 PF", "SL", "TP", "TS", "TD",
         ]
-        sum_table = QTableWidget(1, len(sum_headers))
-        sum_table.setHorizontalHeaderLabels(sum_headers)
-        sum_table.verticalHeader().setVisible(False)
-        sum_table.setMaximumHeight(58)
-        sum_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._sum_table = QTableWidget(1, len(self._sum_headers))
+        self._sum_table.setHorizontalHeaderLabels(self._sum_headers)
+        self._sum_table.verticalHeader().setVisible(False)
+        self._sum_table.setMaximumHeight(58)
+        self._sum_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._sum_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        layout.addWidget(self._sum_table)
 
-        net_s = f"+{net:,.2f}" if net >= 0 else f"{net:,.2f}"
-        row_data = [
-            strat, str(n), f"{wr:.1f}%", self._fmt_pf(pf),
-            net_s, f"{fees:,.2f}", f"{mdd:.2f}%", str(mcl),
-            f"+{avg_win:,.2f}" if avg_win > 0 else "─",
-            f"-{avg_loss:,.2f}" if avg_loss > 0 else "─",
-            self._fmt_pf(lpf), self._fmt_pf(spf),
-            str(sl_c), str(tp_c), str(ts_c), str(td_c),
-        ]
-        for col, val in enumerate(row_data):
-            item = QTableWidgetItem(val)
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if col == 4:
-                item.setForeground(QtGui.QColor(
-                    config.COLOR_UP if net >= 0 else config.COLOR_DOWN
-                ))
-            sum_table.setItem(0, col, item)
-        sum_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(sum_table)
+        self._warn_lbl = QLabel()
+        self._warn_lbl.setStyleSheet("color:#f0c040; font-size:12px; padding:2px 8px;")
+        self._warn_lbl.setVisible(False)
+        layout.addWidget(self._warn_lbl)
 
-        if opens:
-            warn = QLabel(f"  ⚠ 未平倉: {opens} 筆")
-            warn.setStyleSheet("color:#f0c040; font-size:12px; padding:2px 8px;")
-            layout.addWidget(warn)
-
-        # ── 匯出按鈕 ────────────────────────────────────────────────────────────────────
+        # ── 匯出按鈕 ─────────────────────────────────────────────────
         _exp_btn = QPushButton("⬇ 匯出 Excel")
         _exp_btn.setStyleSheet(
             "QPushButton { background:#1e3a1e; color:#26a69a; border:1px solid #26a69a;"
@@ -167,44 +185,140 @@ class BacktestResultDialog(QDialog):
         _btn_row.addWidget(_exp_btn)
         layout.addLayout(_btn_row)
 
-        if not trades:
-            layout.addWidget(QLabel("（無已平倉交易）"))
+        # ── 交易明細表 ────────────────────────────────────────────────
+        self._trade_cols = [
+            "#", "方向", "入場時間", "入場價", "出場類型",
+            "出場價", "數量", "手續費", "資金費", "淨利(USDT)", "餘額",
+        ]
+        self._trade_table = QTableWidget(0, len(self._trade_cols))
+        self._trade_table.setHorizontalHeaderLabels(self._trade_cols)
+        self._trade_table.verticalHeader().setVisible(False)
+        self._trade_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._trade_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self._trade_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        layout.addWidget(self._trade_table)
+
+        # ── 連接篩選信號 + 初次填充 ──────────────────────────────────
+        self._session_combo.currentIndexChanged.connect(self._apply_filter)
+        self._month_combo.currentIndexChanged.connect(self._apply_filter)
+        self._apply_filter()
+
+    # ── 過濾邏輯 ─────────────────────────────────────────────────────
+    def _populate_month_combo(self) -> None:
+        months = sorted(set(
+            self._trade_month(t)
+            for t in self._full_trade_list
+            if not t.get("skipped") and self._trade_month(t)
+        ))
+        self._month_combo.addItem("全部月份")
+        for m in months:
+            self._month_combo.addItem(m)
+
+    def _filtered_trades(self) -> list:
+        trades = self._full_trade_list
+        sess_range = self.SESSIONS.get(self._session_combo.currentText())
+        if sess_range:
+            trades = [t for t in trades if self._in_session(t, sess_range)]
+        month = self._month_combo.currentText()
+        if month != "全部月份":
+            trades = [t for t in trades if self._trade_month(t) == month]
+        return trades
+
+    def _apply_filter(self) -> None:
+        trades = self._filtered_trades()
+        from backtest.engine import compute_subset_stats
+        sub = compute_subset_stats(trades)
+        sub["strategy_name"] = self._stats.get("strategy_name", "─")
+        opens = self._stats.get("open_count", 0)
+        self._refresh_summary(sub, opens)
+        self._refresh_trades(trades)
+
+    # ── 摘要表重新整理 ───────────────────────────────────────────────
+    def _refresh_summary(self, s: dict, opens: int = 0) -> None:
+        n    = s.get("trades", 0)
+        net  = s.get("total_net_pnl", 0.0)
+        net_s = f"+{net:,.2f}" if net >= 0 else f"{net:,.2f}"
+        row_data = [
+            s.get("strategy_name", "─"),
+            str(n),
+            f"{s.get('win_rate', 0.0):.1f}%",
+            self._fmt_pf(s.get("profit_factor", 0.0)),
+            net_s,
+            f"{s.get('total_fees', 0.0):,.2f}",
+            f"{s.get('max_drawdown_pct', 0.0):.2f}%",
+            str(s.get("max_consec_loss", 0)),
+            f"+{s.get('avg_win', 0.0):,.2f}" if s.get("avg_win", 0) > 0 else "─",
+            f"-{s.get('avg_loss', 0.0):,.2f}" if s.get("avg_loss", 0) > 0 else "─",
+            self._fmt_pf(s.get("long_profit_factor", 0.0)),
+            self._fmt_pf(s.get("short_profit_factor", 0.0)),
+            str(s.get("sl_count", 0)),
+            str(s.get("tp_count", 0)),
+            str(s.get("ts_count", 0)),
+            str(s.get("td_count", 0)),
+        ]
+        for col, val in enumerate(row_data):
+            item = QTableWidgetItem(val)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if col == 4:
+                item.setForeground(QtGui.QColor(
+                    config.COLOR_UP if net >= 0 else config.COLOR_DOWN
+                ))
+            self._sum_table.setItem(0, col, item)
+
+        if opens:
+            self._warn_lbl.setText(f"  ⚠ 未平倉: {opens} 筆")
+            self._warn_lbl.setVisible(True)
+        else:
+            self._warn_lbl.setVisible(False)
+
+    # ── 明細表重新整理 ───────────────────────────────────────────────
+    def _refresh_trades(self, trades: list) -> None:
+        from datetime import datetime
+        active = [t for t in trades if not t.get("skipped")]
+        self._trade_table.setRowCount(len(active))
+        if not active:
             return
 
-        # ── 交易明細表 ──────────────────────────────────────────────────────────────────────
-        cols = ["#", "方向", "入場價", "出場類型", "出場價", "數量", "手續費", "資金費", "淨利(USDT)", "餘額"]
-        table = QTableWidget(len(trades), len(cols))
-        table.setHorizontalHeaderLabels(cols)
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        _label_colors = {
+            "SL": "#ef5350", "TP": "#26a69a",
+            "TS": "#ff9800", "TD": "#9c27b0",
+        }
+        for i, t in enumerate(active):
+            self._trade_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
 
-        _label_colors = {"SL": "#ef5350", "TP": "#26a69a", "TS": "#ff9800", "TD": "#9c27b0"}
-        for i, t in enumerate(trades):
-            table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-
-            skipped = t.get("skipped", False)
             dir_txt = "做多" if t["dir"] == "long" else "做空"
-            if skipped:
-                dir_txt += " (跳過)"
             dir_item = QTableWidgetItem(dir_txt)
             dir_item.setForeground(
                 QtGui.QColor(config.COLOR_UP if t["dir"] == "long" else config.COLOR_DOWN)
             )
-            table.setItem(i, 1, dir_item)
-            table.setItem(i, 2, QTableWidgetItem(f"{t['entry']:,.4f}"))
+            self._trade_table.setItem(i, 1, dir_item)
+
+            # 入場時間（DISPLAY_TZ）
+            ets = t.get("entry_time", 0)
+            if ets:
+                dt = datetime.fromtimestamp(ets / 1000, tz=config.DISPLAY_TZ)
+                time_str = dt.strftime("%m-%d %H:%M")
+            else:
+                time_str = "─"
+            self._trade_table.setItem(i, 2, QTableWidgetItem(time_str))
+
+            self._trade_table.setItem(i, 3, QTableWidgetItem(f"{t['entry']:,.4f}"))
 
             exit_lbl = t.get("exit_label", "")
             lbl_item = QTableWidgetItem(exit_lbl)
             lbl_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if exit_lbl in _label_colors:
                 lbl_item.setForeground(QtGui.QColor(_label_colors[exit_lbl]))
-            table.setItem(i, 3, lbl_item)
+            self._trade_table.setItem(i, 4, lbl_item)
 
-            table.setItem(i, 4, QTableWidgetItem(f"{t['exit']:,.4f}"))
-            table.setItem(i, 5, QTableWidgetItem(f"{t.get('qty', 0):,.6f}"))
-            table.setItem(i, 6, QTableWidgetItem(f"{t.get('total_fee', 0):,.2f}"))
-            table.setItem(i, 7, QTableWidgetItem(f"{t.get('funding_cost', 0):,.2f}"))
+            self._trade_table.setItem(i, 5, QTableWidgetItem(f"{t['exit']:,.4f}"))
+            self._trade_table.setItem(i, 6, QTableWidgetItem(f"{t.get('qty', 0):,.6f}"))
+            self._trade_table.setItem(i, 7, QTableWidgetItem(f"{t.get('total_fee', 0):,.2f}"))
+            self._trade_table.setItem(i, 8, QTableWidgetItem(f"{t.get('funding_cost', 0):,.2f}"))
 
             pv = t.get("net_pnl", 0.0)
             pnl_txt = f"+{pv:,.2f}" if pv >= 0 else f"{pv:,.2f}"
@@ -212,27 +326,24 @@ class BacktestResultDialog(QDialog):
             pnl_item.setForeground(
                 QtGui.QColor(config.COLOR_UP if pv >= 0 else config.COLOR_DOWN)
             )
-            table.setItem(i, 8, pnl_item)
-            table.setItem(i, 9, QTableWidgetItem(f"{t.get('equity_after', 0):,.2f}"))
+            self._trade_table.setItem(i, 9, pnl_item)
+            self._trade_table.setItem(i, 10, QTableWidgetItem(f"{t.get('equity_after', 0):,.2f}"))
 
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(table)
-
-
+    # ── Excel 匯出 ───────────────────────────────────────────────────
     def _export_excel(self) -> None:
-        """\u5c07\u56de\u6e2c\u6458\u8981\u8207\u4ea4\u6613\u660e\u7d30\u532f\u51fa\u70ba Excel \u6a94\u6848\u3002"""
+        """將回測摘要與交易明細匯出為 Excel 檔案。"""
         try:
             import openpyxl
             from openpyxl.styles import Font, PatternFill, Alignment
             from openpyxl.utils import get_column_letter
         except ImportError:
-            QMessageBox.warning(self, "\u7f3a\u5c11\u5957\u4ef6",
-                                "\u8acb\u5148\u5b89\u88dd openpyxl\uff1a\npip install openpyxl")
+            QMessageBox.warning(self, "缺少套件",
+                                "請先安裝 openpyxl：\npip install openpyxl")
             return
 
         path, _ = QFileDialog.getSaveFileName(
-            self, "\u532f\u51fa Excel", "backtest_result.xlsx",
-            "Excel \u6a94\u6848 (*.xlsx)"
+            self, "匯出 Excel", "backtest_result.xlsx",
+            "Excel 檔案 (*.xlsx)"
         )
         if not path:
             return
@@ -245,13 +356,13 @@ class BacktestResultDialog(QDialog):
 
         wb = openpyxl.Workbook()
 
-        # \u2500\u2500 Sheet 1: \u6458\u8981 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # ── Sheet 1: 摘要 ──────────────────────────────────────────
         ws1 = wb.active
-        ws1.title = "\u6458\u8981"
+        ws1.title = "摘要"
 
-        param_heads = ["\u8cc7\u91d1(U)", "\u69d3\u687f", "\u8cbb\u7387\u6a21\u5f0f", "\u8cbb\u7387%",
-                       "\u640d\u5931\u4e0a\u9650%", "\u6ed1\u50f9(bps)", "\u8cc7\u91d1\u8cbb\u7387/8h",
-                       "\u6700\u7d42\u9918\u984d", "\u5831\u916c\u7387%"]
+        param_heads = ["資金(U)", "槓桿", "費率模式", "費率%",
+                       "損失上限%", "滑價(bps)", "資金費率/8h",
+                       "最終餘額", "報酬率%"]
         for col, h in enumerate(param_heads, 1):
             c = ws1.cell(row=1, column=col, value=h)
             c.font, c.fill, c.alignment = h_font, h_fill, center
@@ -271,13 +382,13 @@ class BacktestResultDialog(QDialog):
             ws1.cell(row=2, column=col, value=val).alignment = center
 
         def _pf(v):
-            return "\u221e" if v == float("inf") else round(v, 2)
+            return "∞" if v == float("inf") else round(v, 2)
 
-        sum_heads = ["\u7b56\u7565", "\u4ea4\u6613\u6578", "\u52dd\u7387%", "PF",
-                     "\u6de8\u5229(USDT)", "\u624b\u7e8c\u8cbb",
-                     "\u6700\u5927\u56de\u64a4%", "\u6700\u5927\u9023\u864f",
-                     "\u5e73\u5747\u7372\u5229", "\u5e73\u5747\u865f\u640d",
-                     "\u591a\u55aePF", "\u7a7a\u55aePF",
+        sum_heads = ["策略", "交易數", "勝率%", "PF",
+                     "淨利(USDT)", "手續費",
+                     "最大回撤%", "最大連虧",
+                     "平均獲利", "平均虧損",
+                     "多單PF", "空單PF",
                      "SL", "TP", "TS", "TD"]
         for col, h in enumerate(sum_heads, 1):
             c = ws1.cell(row=4, column=col, value=h)
@@ -311,22 +422,26 @@ class BacktestResultDialog(QDialog):
         for col in range(1, max(len(param_heads), len(sum_heads)) + 1):
             ws1.column_dimensions[get_column_letter(col)].width = 15
 
-        # \u2500\u2500 Sheet 2: \u4ea4\u6613\u660e\u7d30 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-        ws2 = wb.create_sheet("\u4ea4\u6613\u660e\u7d30")
-        trade_heads = ["#", "\u65b9\u5411", "\u5165\u5834\u50f9", "\u51fa\u5834\u985e\u578b",
-                       "\u51fa\u5834\u50f9", "\u6578\u91cf", "\u624b\u7e8c\u8cbb",
-                       "\u8cc7\u91d1\u8cbb", "\u6de8\u5229(USDT)", "\u9918\u984d"]
+        # ── Sheet 2: 交易明細（當前篩選）─────────────────────────────
+        ws2 = wb.create_sheet("交易明細")
+        trade_heads = ["#", "方向", "入場時間", "入場價", "出場類型",
+                       "出場價", "數量", "手續費",
+                       "資金費", "淨利(USDT)", "餘額"]
         for col, h in enumerate(trade_heads, 1):
             c = ws2.cell(row=1, column=col, value=h)
             c.font, c.fill, c.alignment = h_font, h_fill, center
 
-        for i, t in enumerate(s.get("trade_list", []), 1):
-            dir_txt = "\u505a\u591a" if t["dir"] == "long" else "\u505a\u7a7a"
-            if t.get("skipped"):
-                dir_txt += "(\u8df3\u904e)"
+        from datetime import datetime as _dt
+        filtered = self._filtered_trades()
+        active = [t for t in filtered if not t.get("skipped")]
+        for i, t in enumerate(active, 1):
+            dir_txt = "做多" if t["dir"] == "long" else "做空"
             pv = t.get("net_pnl", 0.0)
+            ets = t.get("entry_time", 0)
+            time_str = _dt.fromtimestamp(ets / 1000, tz=config.DISPLAY_TZ).strftime(
+                "%Y-%m-%d %H:%M") if ets else "─"
             row_vals = [
-                i, dir_txt,
+                i, dir_txt, time_str,
                 round(t.get("entry", 0), 4),
                 t.get("exit_label", ""),
                 round(t.get("exit", 0), 4),
@@ -339,14 +454,14 @@ class BacktestResultDialog(QDialog):
             for col, val in enumerate(row_vals, 1):
                 cell = ws2.cell(row=i + 1, column=col, value=val)
                 cell.alignment = center
-                if col == 9:
+                if col == 10:
                     cell.font = Font(color="26A69A" if pv >= 0 else "EF5350")
 
         for col in range(1, len(trade_heads) + 1):
             ws2.column_dimensions[get_column_letter(col)].width = 14
 
         wb.save(path)
-        QMessageBox.information(self, "\u532f\u51fa\u6210\u529f", f"\u5df2\u5132\u5b58\u81f3:\n{path}")
+        QMessageBox.information(self, "匯出成功", f"已儲存至:\n{path}")
 
 
 # ═══════════════════════════════════════════════════════════════════
