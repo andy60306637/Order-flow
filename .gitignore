@@ -24,3 +24,10 @@ env/
 # OS
 Thumbs.db
 .DS_Store
+
+# 本機資料快取（不進版控）
+data/
+tick_data/
+*.xlsx
+*.npy
+*.npz

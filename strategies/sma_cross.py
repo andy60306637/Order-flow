@@ -13,10 +13,10 @@ SMA 黃金/死亡交叉策略。
 """
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from core.data_types import Kline
-from strategies.base import StrategyBase, StrategySignal
+from strategies.base import StrategyBase, StrategySignal, TickBarMap
 from strategies import register
 
 
@@ -26,7 +26,8 @@ class SmaCrossStrategy(StrategyBase):
     fast = 10
     slow = 30
 
-    def on_history(self, klines: List[Kline]) -> List[StrategySignal]:
+    def on_history(self, klines: List[Kline],
+                   tick_map: Optional[TickBarMap] = None) -> List[StrategySignal]:
         closes = [k.close for k in klines]
         n = len(closes)
         if n < self.slow + 1:

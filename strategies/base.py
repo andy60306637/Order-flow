@@ -5,9 +5,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+import numpy as np
 
 from core.data_types import Kline
+
+# tick bar map type：open_time_ms → ndarray(N, 4) [time, price, qty, is_buyer_maker]
+TickBarMap = Dict[int, np.ndarray]
 
 
 @dataclass
@@ -28,10 +33,15 @@ class StrategyBase(ABC):
 
     # ──────────────────────────────────────────────────────────────────────────
     @abstractmethod
-    def on_history(self, klines: List[Kline]) -> List[StrategySignal]:
+    def on_history(self, klines: List[Kline],
+                   tick_map: Optional[TickBarMap] = None) -> List[StrategySignal]:
         """
         對歷史 K 棒序列計算所有訊號。
         klines[0] 最舊，klines[-1] 最新（已收盤或進行中）。
+
+        tick_map: 可選的逐 tick 資料，key=kline.open_time，
+                  value=ndarray (N,4) [trade_time, price, qty, is_buyer_maker]。
+                  提供時策略應使用 tick 級模擬消除 look-ahead bias。
         """
 
     # ──────────────────────────────────────────────────────────────────────────
