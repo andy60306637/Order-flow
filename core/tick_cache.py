@@ -222,6 +222,9 @@ def build_bar_map(ticks: np.ndarray,
                   kline_times: list[tuple[int, int]]) -> dict[int, np.ndarray]:
     """將 ticks 分群到對應的 K 棒區間。
 
+    使用 np.searchsorted 達到 O(K log N) 而非舊版的 O(N×K)。
+    ticks 必須已按 trade_time (col 0) 升序排列。
+
     Args:
         ticks:       shape (N, 4) 已排序的 tick 陣列
         kline_times: list of (open_time_ms, close_time_ms)
@@ -234,10 +237,10 @@ def build_bar_map(ticks: np.ndarray,
     result: dict[int, np.ndarray] = {}
     times = ticks[:, 0]
     for ot, ct in kline_times:
-        mask = (times >= ot) & (times <= ct)
-        bar_ticks = ticks[mask]
-        if len(bar_ticks) > 0:
-            result[ot] = bar_ticks
+        lo = int(np.searchsorted(times, ot,     side="left"))
+        hi = int(np.searchsorted(times, ct + 1, side="left"))
+        if lo < hi:
+            result[ot] = ticks[lo:hi]
     return result
 
 
