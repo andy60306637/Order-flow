@@ -1,0 +1,3 @@
+# Worker (CLI strategy executor) dependencies
+-r base.txt
+ccxt>=4.0.0

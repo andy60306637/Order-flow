@@ -1,8 +1,9 @@
 """
-歷史 aggTrade 資料處理執行緒。
+歷史 aggTrade 資料處理模組。
 
-在獨立 QThread 中執行大量歷史成交資料的 Footprint 建構，
-避免阻塞主執行緒（UI）。
+提供兩個介面：
+  process_footprint_history()  — 純函式，零框架依賴。可在任何 runtime 中使用。
+  HistoryProcessorThread       — QThread 向後相容包裝器（Desktop UI 用）。
 
 最佳化：使用 bisect 二分搜尋取代線性掃描，
 將 K 棒歸屬查找由 O(N·M) 降為 O(N·log M)。
@@ -13,89 +14,119 @@ import bisect
 import logging
 from typing import List
 
-from PyQt6.QtCore import QThread, pyqtSignal
-
-from core.data_types import Trade, Kline
+from core.data_types import Trade, Kline, FootprintCandle
 from core.footprint_builder import FootprintBuilder
 
 logger = logging.getLogger(__name__)
 
 
-class HistoryProcessorThread(QThread):
+# ═════════════════════════════════════════════════════════════════════════════
+# 純函式：零框架依賴
+# ═════════════════════════════════════════════════════════════════════════════
+
+def process_footprint_history(
+    payload: dict,
+    tick_size: float,
+    history_klines: List[Kline],
+) -> List[FootprintCandle]:
     """
-    背景執行緒：處理歷史 aggTrades，建構 Footprint K 棒後發送結果。
+    處理歷史 aggTrades，建構 Footprint K 棒。
 
-    輸入（constructor）：
-      payload        — WsWorkerThread.agg_history_signal 的 payload 字典
-      tick_size      — 價格分桶大小
-      history_klines — 最近 N 根歷史 Kline 物件（供 OHLCV 更新）
+    純函式版本，可直接呼叫或透過 asyncio.to_thread() 在背景執行。
+    取代原 HistoryProcessorThread.run() 的核心邏輯。
 
-    輸出 signal：
-      result_signal(list)  — 完成後發送 List[FootprintCandle] 到主執行緒
-      status_signal(str)   — 進度文字
+    Args:
+        payload: {"trades": [aggTrade dicts], "klines": [(open_t, close_t), ...]}
+        tick_size: 價格分桶大小
+        history_klines: 歷史 Kline 物件列表（供 OHLCV 更新）
+
+    Returns:
+        建構完成的 FootprintCandle 列表
     """
+    trades = payload.get("trades", [])
+    k_ranges = payload.get("klines", [])   # [(open_t, close_t), ...]
 
-    result_signal = pyqtSignal(list)   # List[FootprintCandle]
-    status_signal = pyqtSignal(str)
+    if not trades or not k_ranges:
+        return []
 
-    def __init__(
-        self,
-        payload: dict,
-        tick_size: float,
-        history_klines: List[Kline],
-        parent=None,
-    ) -> None:
-        super().__init__(parent)
-        self._payload        = payload
-        self._tick_size      = tick_size
-        self._history_klines = history_klines
+    fp = FootprintBuilder()
+    fp.reset(tick_size)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    def run(self) -> None:
-        trades = self._payload.get("trades", [])
-        k_ranges = self._payload.get("klines", [])   # [(open_t, close_t), ...]
+    open_times  = [ot for ot, _  in k_ranges]
+    close_times = [ct for _,  ct in k_ranges]
 
-        if not trades or not k_ranges:
-            self.result_signal.emit([])
-            return
+    n_trades = len(trades)
+    logger.info(
+        "process_footprint_history: %d trades across %d klines",
+        n_trades, len(k_ranges),
+    )
 
-        fp = FootprintBuilder()
-        fp.reset(self._tick_size)
+    for raw in trades:
+        t_ms = int(raw["T"])
 
-        # 建立 bisect 用的有序陣列
-        # open_times 已由 WsWorkerThread 按時間順序組成，無需額外排序
-        open_times  = [ot for ot, _  in k_ranges]
-        close_times = [ct for _,  ct in k_ranges]
+        # 二分搜尋：找最後一個 open_time <= t_ms
+        idx = bisect.bisect_right(open_times, t_ms) - 1
+        if idx < 0 or t_ms > close_times[idx]:
+            continue
 
-        n_trades = len(trades)
-        logger.info(
-            "HistoryProcessor: processing %d trades across %d klines",
-            n_trades, len(k_ranges),
+        bucket_open = open_times[idx]
+        trade = Trade(
+            symbol="",
+            price=float(raw["p"]),
+            qty=float(raw["q"]),
+            is_buyer_maker=bool(raw["m"]),
+            trade_time=t_ms,
         )
-        self.status_signal.emit(f"Footprint 回填 {n_trades} 筆成交中…")
+        fp.update_trade(trade, open_time=bucket_open)
 
-        for raw in trades:
-            t_ms = int(raw["T"])
+    # 用歷史 Kline 補齊 OHLCV
+    for k in history_klines:
+        fp.update_kline(k)
 
-            # 二分搜尋：找最後一個 open_time <= t_ms
-            idx = bisect.bisect_right(open_times, t_ms) - 1
-            if idx < 0 or t_ms > close_times[idx]:
-                continue
+    candles = fp.get_candles()
+    logger.info("process_footprint_history: built %d footprint candles", len(candles))
+    return candles
 
-            bucket_open = open_times[idx]
-            trade = Trade(
-                symbol="",
-                price=float(raw["p"]),
-                qty=float(raw["q"]),
-                is_buyer_maker=bool(raw["m"]),
-                trade_time=t_ms,
+
+# ═════════════════════════════════════════════════════════════════════════════
+# QThread 向後相容包裝器
+# ═════════════════════════════════════════════════════════════════════════════
+
+try:
+    from PyQt6.QtCore import QThread, pyqtSignal
+
+    class HistoryProcessorThread(QThread):
+        """
+        QThread 包裝器，委派核心邏輯給 process_footprint_history()。
+        API 與舊版完全相容，MainWindow 無需修改。
+        """
+
+        result_signal = pyqtSignal(list)   # List[FootprintCandle]
+        status_signal = pyqtSignal(str)
+
+        def __init__(
+            self,
+            payload: dict,
+            tick_size: float,
+            history_klines: List[Kline],
+            parent=None,
+        ) -> None:
+            super().__init__(parent)
+            self._payload        = payload
+            self._tick_size      = tick_size
+            self._history_klines = history_klines
+
+        def run(self) -> None:
+            self.status_signal.emit(
+                f"Footprint 回填 {len(self._payload.get('trades', []))} 筆成交中…"
             )
-            fp.update_trade(trade, open_time=bucket_open)
+            candles = process_footprint_history(
+                self._payload,
+                self._tick_size,
+                self._history_klines,
+            )
+            self.result_signal.emit(candles)
 
-        # 用歷史 Kline 補齊 OHLCV
-        for k in self._history_klines:
-            fp.update_kline(k)
-
-        candles = fp.get_candles()
-        logger.info("HistoryProcessor: built %d footprint candles", len(candles))
-        self.result_signal.emit(candles)
+except ImportError:
+    # 無 PyQt6 環境（Server / Worker）：不提供 HistoryProcessorThread
+    pass

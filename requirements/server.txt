@@ -1,0 +1,4 @@
+# Server (FastAPI) dependencies
+-r base.txt
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0

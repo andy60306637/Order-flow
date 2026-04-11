@@ -50,12 +50,30 @@ def _load_ticks_from_zip_dir(tick_dir: Path, symbol: str) -> np.ndarray:
     return ticks
 
 
-def _build_1m_klines_from_ticks(symbol: str, ticks: np.ndarray) -> list[Kline]:
+_INTERVAL_MS: dict[str, int] = {
+    "1m":  60_000,
+    "3m":  3  * 60_000,
+    "5m":  5  * 60_000,
+    "15m": 15 * 60_000,
+    "30m": 30 * 60_000,
+    "1h":  60 * 60_000,
+    "4h":  4  * 60 * 60_000,
+}
+
+
+def _build_klines_from_ticks(
+    symbol: str,
+    ticks: np.ndarray,
+    interval: str = "1m",
+) -> list[Kline]:
+    """Aggregate raw tick data into OHLCV klines of any supported interval."""
     if len(ticks) == 0:
         return []
+    bar_ms = _INTERVAL_MS.get(interval)
+    if bar_ms is None:
+        raise ValueError(f"unsupported interval '{interval}'. choose from: {list(_INTERVAL_MS)}")
 
-    minute_ms = 60_000
-    buckets = (ticks[:, 0].astype(np.int64) // minute_ms) * minute_ms
+    buckets = (ticks[:, 0].astype(np.int64) // bar_ms) * bar_ms
     open_times, starts = np.unique(buckets, return_index=True)
 
     klines: list[Kline] = []
@@ -69,9 +87,9 @@ def _build_1m_klines_from_ticks(symbol: str, ticks: np.ndarray) -> list[Kline]:
         klines.append(
             Kline(
                 symbol=symbol.upper(),
-                interval="1m",
+                interval=interval,
                 open_time=int(open_time),
-                close_time=int(open_time + minute_ms - 1),
+                close_time=int(open_time + bar_ms - 1),
                 open=float(prices[0]),
                 high=float(np.max(prices)),
                 low=float(np.min(prices)),
@@ -82,6 +100,11 @@ def _build_1m_klines_from_ticks(symbol: str, ticks: np.ndarray) -> list[Kline]:
             )
         )
     return klines
+
+
+def _build_1m_klines_from_ticks(symbol: str, ticks: np.ndarray) -> list[Kline]:
+    """Backward-compatible wrapper for 1m kline building."""
+    return _build_klines_from_ticks(symbol, ticks, interval="1m")
 
 
 def _monthly_breakdown(trade_list: list[dict]) -> list[str]:
@@ -113,6 +136,9 @@ def main() -> None:
     )
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--strategy", default="Wick Reversal 1m v4")
+    parser.add_argument("--interval", default="1m",
+                        choices=list(_INTERVAL_MS),
+                        help="bar interval for kline reconstruction (default: 1m)")
     parser.add_argument("--tick-dir", default="tick_data")
     parser.add_argument("--initial-capital", type=float, default=1650.0)
     parser.add_argument("--max-loss-pct", type=float, default=0.02)
@@ -130,7 +156,7 @@ def main() -> None:
         raise SystemExit(f"unknown strategy: {args.strategy}. available: {names}")
 
     ticks = _load_ticks_from_zip_dir(Path(args.tick_dir), args.symbol)
-    klines = _build_1m_klines_from_ticks(args.symbol, ticks)
+    klines = _build_klines_from_ticks(args.symbol, ticks, interval=args.interval)
     tick_map = build_bar_map(ticks, [(k.open_time, k.close_time) for k in klines])
 
     strategy = strategy_cls()
@@ -152,7 +178,7 @@ def main() -> None:
     last_bar = datetime.fromtimestamp(klines[-1].open_time / 1000, tz=timezone.utc)
 
     print(f"strategy={args.strategy}")
-    print(f"symbol={args.symbol.upper()}")
+    print(f"symbol={args.symbol.upper()}  interval={args.interval}")
     print(f"tick_source={Path(args.tick_dir).resolve()}")
     print(f"bars={len(klines)} tick_coverage={len(tick_map)}/{len(klines)}")
     print(f"range_utc={first_bar} -> {last_bar}")

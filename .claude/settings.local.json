@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc:*)",
+      "Bash(python:*)",
+      "Bash(tee /tmp/opt_result.txt)",
+      "Bash(echo \"EXIT_CODE=$?\")"
+    ]
+  }
+}

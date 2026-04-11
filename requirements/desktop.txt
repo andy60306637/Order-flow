@@ -1,0 +1,4 @@
+# Desktop (PyQt6 UI) dependencies
+-r base.txt
+PyQt6>=6.4.0
+pyqtgraph>=0.13.3
