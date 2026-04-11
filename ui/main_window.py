@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Optional, List
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QTabWidget,
     QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QLabel,
@@ -36,7 +37,7 @@ from core.cvd_calculator import CvdCalculator
 from core.footprint_builder import FootprintBuilder
 from core.ws_client import WsWorkerThread
 from core.history_processor import HistoryProcessorThread
-from core import kline_cache
+from core import kline_cache, tick_cache
 from strategies import STRATEGY_REGISTRY
 from strategies.base import StrategyBase, StrategySignal
 from ui.order_book_widget import OrderBookWidget
@@ -46,6 +47,58 @@ from ui.heatmap_widget import HeatmapWidget
 from ui.footprint_widget import FootprintChart
 
 logger = logging.getLogger(__name__)
+
+_INTERVAL_MS_MAP = {
+    "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
+    "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+    "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
+    "3d": 259_200_000, "1w": 604_800_000,
+}
+
+
+def _interval_ms(interval: str) -> int:
+    return _INTERVAL_MS_MAP.get(interval, 60_000)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tick 匯入執行緒（背景解析 CSV/ZIP 並寫入快取）
+# ─────────────────────────────────────────────────────────────────────────────
+class TickImportThread(QThread):
+    """將 data.binance.vision aggTrades CSV/ZIP 檔案匯入到本機 tick 快取。"""
+    progress_signal = pyqtSignal(str)       # 狀態訊息
+    done_signal     = pyqtSignal(int, str)  # (total_count, error_message)
+
+    def __init__(self, symbol: str, interval: str,
+                 paths: list, parent=None) -> None:
+        super().__init__(parent)
+        self._symbol   = symbol
+        self._interval = interval
+        self._paths    = paths
+
+    def run(self) -> None:
+        from core import tick_cache as _tc
+        total = 0
+        for idx, raw_path in enumerate(self._paths, 1):
+            p = Path(raw_path)
+            self.progress_signal.emit(
+                f"匯入 {p.name}… ({idx}/{len(self._paths)})"
+            )
+            try:
+                if p.suffix.lower() == ".zip":
+                    arr = _tc.from_zip_file(p)
+                else:
+                    arr = _tc.from_csv_file(p)
+                if len(arr) == 0:
+                    continue
+                st = int(arr[:, 0].min())
+                et = int(arr[:, 0].max())
+                total = _tc.merge_and_save_array(
+                    self._symbol, self._interval, arr, st, et
+                )
+            except Exception as exc:
+                self.done_signal.emit(0, f"{p.name}: {exc}")
+                return
+        self.done_signal.emit(total, "")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -623,9 +676,11 @@ class MainWindow(QMainWindow):
         self._strategy_engine: Optional[StrategyBase] = None
         self._strategy_realtime: bool = False
         self._strategy_signals: List[StrategySignal] = []
+        self._tick_import_thread: Optional[TickImportThread] = None
         # ── UI ────────────────────────────────────────────────────────────────
         self._build_ui()
         self._build_toolbar()
+        self._refresh_tick_label()
         self._bt_config_dlg = BacktestConfigDialog(self)
 
         # ── Heatmap timer ─────────────────────────────────────────────────────
@@ -758,6 +813,31 @@ class MainWindow(QMainWindow):
         self._download_btn.setStyleSheet(_btn_style)
         self._download_btn.clicked.connect(self._on_download_cache)
         tb.addWidget(self._download_btn)
+
+        tb.addSeparator()
+
+        # ── 回測資料模式 ────────────────────────────────────────────────────
+        self._bt_mode_combo = QComboBox()
+        self._bt_mode_combo.addItems(["📊 Bar 模式", "🎯 Tick 模式"])
+        self._bt_mode_combo.setToolTip(
+            "Bar 模式：用 K 棒收盤值判斷（快速，適合長週期）\n"
+            "Tick 模式：用匯入的 aggTrades 逐 tick 模擬（無 look-ahead，適合精確驗證）"
+        )
+        self._bt_mode_combo.currentIndexChanged.connect(self._on_bt_mode_changed)
+        tb.addWidget(self._bt_mode_combo)
+
+        self._import_tick_btn = QPushButton("📂 匯入 Tick")
+        self._import_tick_btn.setToolTip(
+            "匯入從 data.binance.vision 下載的 aggTrades CSV/ZIP\n"
+            "可一次選取多個月份檔案，自動合併至本機快取"
+        )
+        self._import_tick_btn.setStyleSheet(_btn_style)
+        self._import_tick_btn.clicked.connect(self._on_import_ticks)
+        tb.addWidget(self._import_tick_btn)
+
+        self._tick_lbl = QLabel()
+        self._tick_lbl.setStyleSheet("color:#80cbc4; font-size:10px; padding-left:4px;")
+        tb.addWidget(self._tick_lbl)
 
         self._cache_lbl = QLabel()
         self._cache_lbl.setStyleSheet("color:#4fc3f7; font-size:10px; padding-left:4px;")
@@ -1377,7 +1457,34 @@ class MainWindow(QMainWindow):
     def _execute_backtest(self, klines: list | None = None) -> None:
         """執行回測並顯示結果。klines 為 None 時使用 self._loaded_klines。"""
         bt_klines = klines if klines is not None else self._loaded_klines
-        self._strategy_signals = self._strategy_engine.on_history(bt_klines)
+
+        # ── 依模式決定是否載入 tick_map ────────────────────────────────
+        tick_map = None
+        use_tick_mode = self._bt_mode_combo.currentIndex() == 1
+        if use_tick_mode and bt_klines:
+            start_ms = bt_klines[0].open_time
+            end_ms   = bt_klines[-1].open_time + _interval_ms(self._interval)
+            ticks = tick_cache.load_range(self._symbol, self._interval,
+                                         start_ms, end_ms)
+            if len(ticks) > 0:
+                kline_times = [
+                    (k.open_time, k.open_time + _interval_ms(self._interval) - 1)
+                    for k in bt_klines
+                ]
+                tick_map = tick_cache.build_bar_map(ticks, kline_times)
+                coverage = len(tick_map) / len(bt_klines) * 100
+                self._status_lbl.setText(
+                    f"🎯 Tick 模式：覆蓋 {len(tick_map):,}/{len(bt_klines):,} 根 "
+                    f"({coverage:.0f}%)，開始回測…"
+                )
+            else:
+                self._status_lbl.setText(
+                    "⚠ Tick 模式：無快取資料，請先匹入 aggTrades 檔案（點「📂 匯入 Tick」）"
+                )
+
+        self._strategy_signals = self._strategy_engine.on_history(
+            bt_klines, tick_map=tick_map,
+        )
 
         # 大回測（> 30d）不繪製圖表標記
         large_backtest = len(bt_klines) > config.BACKTEST_NO_CHART_BARS
@@ -1472,6 +1579,69 @@ class MainWindow(QMainWindow):
                 self._status_lbl.setText(f"快取已儲存：{count:,} 根")
         else:
             self._status_lbl.setText("快取下載失敗，請稍後再試")
+
+    def _on_bt_mode_changed(self, index: int) -> None:
+        """切換 Bar/Tick 模式：更新 tick 快取標籤。"""
+        self._refresh_tick_label()
+
+    def _on_import_ticks(self) -> None:
+        """「📂 匯入 Tick」按鈕：開啟檔案對話框，背景匯入 aggTrades CSV/ZIP。"""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "選擇 aggTrades 檔案（data.binance.vision）",
+            "",
+            "Binance aggTrades (*.csv *.zip);;所有檔案 (*)",
+        )
+        if not paths:
+            return
+
+        # 若上一次匯入仍在執行，等待結束
+        if self._tick_import_thread and self._tick_import_thread.isRunning():
+            self._tick_import_thread.wait(500)
+
+        self._import_tick_btn.setEnabled(False)
+        self._import_tick_btn.setText("匯入中…")
+        self._tick_lbl.setText("🔄 匯入中…")
+
+        self._tick_import_thread = TickImportThread(
+            self._symbol, self._interval, paths, parent=self
+        )
+        self._tick_import_thread.progress_signal.connect(self._on_tick_import_progress)
+        self._tick_import_thread.done_signal.connect(self._on_tick_import_done)
+        self._tick_import_thread.start()
+
+    def _on_tick_import_progress(self, msg: str) -> None:
+        self._status_lbl.setText(msg)
+
+    def _on_tick_import_done(self, count: int, err: str) -> None:
+        self._import_tick_btn.setEnabled(True)
+        self._import_tick_btn.setText("📂 匯入 Tick")
+        if err:
+            self._status_lbl.setText(f"❌ 匯入失敗：{err}")
+            self._tick_lbl.setText("❌ 匯入失敗")
+        elif count:
+            ti = tick_cache.info(self._symbol, self._interval)
+            self._refresh_tick_label()
+            self._status_lbl.setText(
+                f"✓ 匯入完成，快取共 {count:,} 筆"
+                + (f" ({ti['size_mb']:.1f} MB)" if ti else "")
+            )
+        else:
+            self._status_lbl.setText("⚠ 匯入完成，但未解析到任何資料（請確認檔案格式）")
+            self._tick_lbl.setText("⚠ 無資料")
+
+    def _refresh_tick_label(self) -> None:
+        """更新 tick 快取狀態標籤。"""
+        ti = tick_cache.info(self._symbol, self._interval)
+        if ti:
+            from datetime import datetime, timezone
+            s = datetime.fromtimestamp(ti["start_ms"] / 1000, tz=timezone.utc).strftime("%y-%m-%d")
+            e = datetime.fromtimestamp(ti["end_ms"]   / 1000, tz=timezone.utc).strftime("%y-%m-%d")
+            self._tick_lbl.setText(
+                f"🎯 {ti['count']:,} 筆 | {s}~{e} | {ti['size_mb']:.0f}MB"
+            )
+        else:
+            self._tick_lbl.setText("🎯 無 Tick 快取")
 
     def _refresh_cache_label(self) -> None:
         """更新工具列快取資訊 label（切換幣對/interval 時呼叫）。"""
