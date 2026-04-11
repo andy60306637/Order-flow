@@ -1398,27 +1398,66 @@ class MainWindow(QMainWindow):
         if not self._strategy_engine or not self._loaded_klines:
             return
 
-        # 取得使用者選取的回測範圍（K 棒數量）
-        range_label = self._bt_range_combo.currentText()
-        need = config.BACKTEST_RANGE_OPTIONS.get(range_label, 200)
-        have = len(self._loaded_klines)
+        use_tick = self._bt_mode_combo.currentIndex() == 1
 
-        if have < need:
-            # 內存不足 → 先檢查本機快取
-            cached = kline_cache.load(self._symbol, self._interval)
-            if len(cached) >= need:
-                self._status_lbl.setText("從本機快取載入資料…")
-                self._load_from_cache(cached, need)
+        if use_tick:
+            # ── Tick 模式：以 tick 快取的時間範圍裁切 K 棒 ────────────────
+            ti = tick_cache.info(self._symbol)
+            if not ti:
+                self._status_lbl.setText(
+                    "⚠ Tick 模式：無 Tick 快取，請先匯入 aggTrades 檔案"
+                )
+                return
+            tick_start = ti["start_ms"]
+            tick_end   = ti["end_ms"]
+            interval_ms = _interval_ms(self._interval)
+            # 篩選 open_time 落在 tick 快取範圍內的 K 棒
+            bt_klines = [
+                k for k in self._loaded_klines
+                if k.open_time >= tick_start
+                and k.open_time + interval_ms <= tick_end + interval_ms
+            ]
+            if not bt_klines:
+                # 記憶體中的 K 棒不覆蓋 tick 範圍 → 嘗試從 kline 快取補
+                cached = kline_cache.load(self._symbol, self._interval)
+                if cached:
+                    from core.data_types import Kline as _Kline
+                    all_k = [
+                        _Kline.from_rest(self._symbol, self._interval, r)
+                        for r in cached
+                    ]
+                    bt_klines = [
+                        k for k in all_k
+                        if k.open_time >= tick_start
+                        and k.open_time + interval_ms <= tick_end + interval_ms
+                    ]
+                if not bt_klines:
+                    self._status_lbl.setText(
+                        "⚠ Tick 模式：K 棒資料未覆蓋 Tick 快取範圍，"
+                        "請先在 Bar 模式下預載對應時段的 K 棒"
+                    )
+                    return
+            self._execute_backtest(klines=bt_klines)
+        else:
+            # ── Bar 模式：原始邏輯 ──────────────────────────────────────
+            range_label = self._bt_range_combo.currentText()
+            need = config.BACKTEST_RANGE_OPTIONS.get(range_label, 200)
+            have = len(self._loaded_klines)
+
+            if have < need:
+                cached = kline_cache.load(self._symbol, self._interval)
+                if len(cached) >= need:
+                    self._status_lbl.setText("從本機快取載入資料…")
+                    self._load_from_cache(cached, need)
+                    return
+
+                self._run_btn.setEnabled(False)
+                self._run_btn.setText("載入中…")
+                if self._ws_thread:
+                    self._ws_thread.request_backtest_history(need)
                 return
 
-            # 快取不足 → 批量網路載入
-            self._run_btn.setEnabled(False)
-            self._run_btn.setText("載入中…")
-            if self._ws_thread:
-                self._ws_thread.request_backtest_history(need)
-            return
-
-        self._execute_backtest(klines=self._loaded_klines[-need:])
+            self._execute_backtest(klines=self._loaded_klines[-need:])
 
     def _on_backtest_history(self, rows: list) -> None:
         """批量歷史載入完成後的回調。"""
@@ -1492,8 +1531,9 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self._status_lbl.setText(
-                    "⚠ Tick 模式：無快取資料，請先匹入 aggTrades 檔案（點「📂 匯入 Tick」）"
+                    "⚠ Tick 模式：無快取資料，請先匯入 aggTrades 檔案（點「📂 匯入 Tick」）"
                 )
+                return
 
         self._strategy_signals = self._strategy_engine.on_history(
             bt_klines, tick_map=tick_map,
@@ -1594,15 +1634,20 @@ class MainWindow(QMainWindow):
             self._status_lbl.setText("快取下載失敗，請稍後再試")
 
     def _on_bt_mode_changed(self, index: int) -> None:
-        """切換 Bar/Tick 模式：更新 tick 快取標籤。"""
+        """切換 Bar/Tick 模式：更新範圍下拉選單與 UI 元件可見性。"""
+        is_tick = index == 1
+        # 預載按鈕僅 Bar 模式有意義
+        self._download_btn.setVisible(not is_tick)
+        self._rebuild_range_combo()
         self._refresh_tick_label()
 
     def _on_import_ticks(self) -> None:
         """「📂 匯入 Tick」按鈕：開啟檔案對話框，背景匯入 aggTrades CSV/ZIP。"""
+        default_dir = str(Path(__file__).resolve().parent.parent / "tick_data")
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "選擇 aggTrades 檔案（data.binance.vision）",
-            "",
+            default_dir,
             "Binance aggTrades (*.csv *.zip);;所有檔案 (*)",
         )
         if not paths:
@@ -1637,6 +1682,7 @@ class MainWindow(QMainWindow):
         elif count:
             ti = tick_cache.info(self._symbol)
             self._refresh_tick_label()
+            self._rebuild_range_combo()
             self._status_lbl.setText(
                 f"✓ 匯入完成，快取共 {count:,} 筆"
                 + (f" ({ti['size_mb']:.1f} MB)" if ti else "")
@@ -1658,12 +1704,42 @@ class MainWindow(QMainWindow):
         else:
             self._tick_lbl.setText("🎯 無 Tick 快取")
 
+    def _rebuild_range_combo(self) -> None:
+        """依目前模式重建回測範圍下拉選單。
+
+        Bar 模式：使用 config.BACKTEST_RANGE_OPTIONS（200根 ~ 5年）。
+        Tick 模式：依 tick 快取中實際的天數範圍動態產生選項。
+        """
+        self._bt_range_combo.blockSignals(True)
+        self._bt_range_combo.clear()
+
+        if self._bt_mode_combo.currentIndex() == 0:
+            # ── Bar 模式 ──────────────────────────────────────────────────
+            for label in config.BACKTEST_RANGE_OPTIONS:
+                self._bt_range_combo.addItem(label)
+        else:
+            # ── Tick 模式 ─────────────────────────────────────────────────
+            ti = tick_cache.info(self._symbol)
+            if ti:
+                span_days = max(1, (ti["end_ms"] - ti["start_ms"]) / 86_400_000)
+                from datetime import datetime, timezone
+                s = datetime.fromtimestamp(ti["start_ms"] / 1000, tz=timezone.utc).strftime("%m/%d")
+                e = datetime.fromtimestamp(ti["end_ms"]   / 1000, tz=timezone.utc).strftime("%m/%d")
+                self._bt_range_combo.addItem(
+                    f"全部 ({s}~{e}, {span_days:.0f}天)"
+                )
+            else:
+                self._bt_range_combo.addItem("⚠ 無 Tick 資料")
+
+        self._bt_range_combo.blockSignals(False)
+
     def _on_import_ticks_folder(self) -> None:
         """「📁 資料夾」按鈕：選取資料夾，自動尋找內部所有 CSV/ZIP 並匯入。"""
+        default_dir = str(Path(__file__).resolve().parent.parent / "tick_data")
         folder = QFileDialog.getExistingDirectory(
             self,
             "選取包含 aggTrades 檔案的資料夾（data.binance.vision）",
-            "",
+            default_dir,
         )
         if not folder:
             return
@@ -1698,6 +1774,7 @@ class MainWindow(QMainWindow):
         elif count:
             ti = tick_cache.info(self._symbol)
             self._refresh_tick_label()
+            self._rebuild_range_combo()
             self._status_lbl.setText(
                 f"✓ 資料夾匯入完成，快取共 {count:,} 筆"
                 + (f" ({ti['size_mb']:.1f} MB)" if ti else "")
@@ -1729,6 +1806,7 @@ class MainWindow(QMainWindow):
         try:
             path.unlink(missing_ok=True)
             self._refresh_tick_label()
+            self._rebuild_range_combo()
             self._status_lbl.setText(f"✓ Tick 快取已刪除（釋放 {size_mb:.1f} MB）")
         except Exception as exc:
             self._status_lbl.setText(f"❌ 刪除失敗：{exc}")
