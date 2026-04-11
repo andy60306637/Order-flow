@@ -25,8 +25,10 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QLabel,
     QToolBar, QFrame, QSizePolicy, QPushButton,
     QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSpinBox, QDoubleSpinBox, QFileDialog, QMessageBox,
+    QSpinBox, QDoubleSpinBox, QFileDialog, QMessageBox, QDateTimeEdit,
 )
+from PyQt6.QtCore import QDateTime
+
 from PyQt6.QtGui import QAction, QColor
 from PyQt6 import QtGui
 
@@ -183,7 +185,29 @@ class BacktestResultDialog(QDialog):
         cfg_lbl.setStyleSheet("font-size: 12px; padding: 4px 8px; color: #aaa;")
         layout.addWidget(cfg_lbl)
 
-        # ── 過濾列：市場時區 + 月份 ──────────────────────────────────
+        # ── 回測區間 + Tick 覆蓋率 ──────────────────────────────────────
+        from datetime import datetime as _dt2, timezone as _tz2
+        start_ms = stats.get("backtest_start_ms", 0)
+        end_ms   = stats.get("backtest_end_ms", 0)
+        tick_cov = stats.get("tick_coverage_pct")   # None = Bar 模式
+        fallback = stats.get("fallback_bar_count", 0)
+
+        def _fmt_ts(ms: int) -> str:
+            if not ms:
+                return "─"
+            return _dt2.fromtimestamp(ms / 1000, tz=config.DISPLAY_TZ).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+
+        meta_parts = [f"<b>區間:</b> {_fmt_ts(start_ms)} ~ {_fmt_ts(end_ms)}"]
+        if tick_cov is not None:
+            meta_parts.append(f"<b>Tick 覆蓋:</b> {tick_cov:.1f}%")
+            meta_parts.append(f"<b>無 Tick 棒:</b> {fallback}")
+        meta_lbl = QLabel(" &nbsp;|&nbsp; ".join(meta_parts))
+        meta_lbl.setStyleSheet("font-size: 12px; padding: 2px 8px; color: #80cbc4;")
+        layout.addWidget(meta_lbl)
+
+
         _filter_style = (
             "QComboBox { background: #1e222d; color: #d1d4dc; border: 1px solid #363a45;"
             " border-radius: 3px; padding: 2px 6px; min-width: 90px; }"
@@ -417,7 +441,8 @@ class BacktestResultDialog(QDialog):
 
         param_heads = ["資金(U)", "槓桿", "費率模式", "費率%",
                        "損失上限%", "滑價(bps)", "資金費率/8h",
-                       "最終餘額", "報酬率%"]
+                       "最終餘額", "報酬率%",
+                       "回測起始", "回測結束", "Tick覆蓋%", "無Tick棒數"]
         for col, h in enumerate(param_heads, 1):
             c = ws1.cell(row=1, column=col, value=h)
             c.font, c.fill, c.alignment = h_font, h_fill, center
@@ -432,6 +457,19 @@ class BacktestResultDialog(QDialog):
             s.get("funding_rate", 0.0),
             round(s.get("final_equity", 0.0), 2),
             round(s.get("total_return_pct", 0.0), 2),
+        ]
+        # 回測區間與 Tick 統計
+        from datetime import datetime as _dt3, timezone as _tz3
+        def _fmt_ts_excel(ms: int) -> str:
+            if not ms:
+                return "─"
+            return _dt3.fromtimestamp(ms / 1000, tz=_tz3.utc).strftime("%Y-%m-%d %H:%M")
+
+        param_vals += [
+            _fmt_ts_excel(s.get("backtest_start_ms", 0)),
+            _fmt_ts_excel(s.get("backtest_end_ms", 0)),
+            round(s["tick_coverage_pct"], 1) if s.get("tick_coverage_pct") is not None else "─",
+            s.get("fallback_bar_count", 0),
         ]
         for col, val in enumerate(param_vals, 1):
             ws1.cell(row=2, column=col, value=val).alignment = center
@@ -644,6 +682,56 @@ class BacktestConfigDialog(QDialog):
         self.custom_fee_spin.setVisible(visible)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Bar 模式自訂回測區間對話框
+# ═══════════════════════════════════════════════════════════════════
+
+class BarDateRangeDialog(QDialog):
+    """Bar 模式自訂回測起訖時間選擇器。"""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("自訂回測區間")
+        self.setFixedWidth(340)
+        self.setStyleSheet(
+            f"QDialog {{ background: {config.COLOR_BG}; color: {config.COLOR_FG}; }}"
+            "QLabel { font-size: 13px; }"
+            "QDateTimeEdit { background:#1e222d; color:#d1d4dc;"
+            " border:1px solid #2a2e39; border-radius:3px; padding:2px 6px;"
+            " min-width:190px; }"
+        )
+
+        form = QFormLayout(self)
+        form.setContentsMargins(20, 16, 20, 16)
+        form.setVerticalSpacing(10)
+
+        now             = QDateTime.currentDateTime()
+        thirty_days_ago = now.addDays(-30)
+
+        self.start_edit = QDateTimeEdit(thirty_days_ago, self)
+        self.start_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.start_edit.setCalendarPopup(True)
+        form.addRow("起始時間:", self.start_edit)
+
+        self.end_edit = QDateTimeEdit(now, self)
+        self.end_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.end_edit.setCalendarPopup(True)
+        form.addRow("結束時間:", self.end_edit)
+
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        form.addRow(btn_box)
+
+    def get_range_ms(self) -> tuple[int, int]:
+        """回傳 (start_ms, end_ms)，以本機時間轉 UTC ms。"""
+        start_ms = self.start_edit.dateTime().toMSecsSinceEpoch()
+        end_ms   = self.end_edit.dateTime().toMSecsSinceEpoch()
+        return start_ms, end_ms
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -800,10 +888,8 @@ class MainWindow(QMainWindow):
         self._run_btn.clicked.connect(self._on_run_strategy)
         tb.addWidget(self._run_btn)
 
-        # 回測範圍選擇
+        # 回測範圍選擇（內容在 _build_toolbar 末尾由 _rebuild_range_combo 填充）
         self._bt_range_combo = QComboBox()
-        for label in config.BACKTEST_RANGE_OPTIONS:
-            self._bt_range_combo.addItem(label)
         self._bt_range_combo.setToolTip("回測資料範圍（點 ▶ 時自動載入不足的歷史）")
         tb.addWidget(self._bt_range_combo)
 
@@ -896,6 +982,9 @@ class MainWindow(QMainWindow):
             "color: #d1d4dc; font-size: 14px; font-weight: bold; padding-left: 16px;"
         )
         tb.addWidget(self._price_lbl)
+
+        # 初始化回測範圍下拉（需在 _bt_mode_combo 建立後）
+        self._rebuild_range_combo()
 
     def _build_ui(self) -> None:
         # ── 左欄（OB + Heatmap）─────────────────────────────────────────────
@@ -1441,6 +1530,39 @@ class MainWindow(QMainWindow):
         else:
             # ── Bar 模式：原始邏輯 ──────────────────────────────────────
             range_label = self._bt_range_combo.currentText()
+
+            # ── 自訂時間區間 ──────────────────────────────────────────────
+            if range_label == "🗓 自訂時間...":
+                dlg = BarDateRangeDialog(self)
+                if dlg.exec() != QDialog.DialogCode.Accepted:
+                    return
+                start_ms, end_ms = dlg.get_range_ms()
+                if start_ms >= end_ms:
+                    self._status_lbl.setText("⚠ 起始時間需早於結束時間")
+                    return
+                # 先嘗試從 _loaded_klines 篩選
+                bt_klines = [
+                    k for k in self._loaded_klines
+                    if start_ms <= k.open_time <= end_ms
+                ]
+                if not bt_klines:
+                    # 嘗試從 kline 快取篩選
+                    cached = kline_cache.load(self._symbol, self._interval)
+                    if cached:
+                        from core.data_types import Kline as _Kline
+                        all_k = [
+                            _Kline.from_rest(self._symbol, self._interval, r)
+                            for r in cached
+                        ]
+                        bt_klines = [k for k in all_k if start_ms <= k.open_time <= end_ms]
+                if not bt_klines:
+                    self._status_lbl.setText(
+                        "⚠ 自訂區間內無 K 棒資料，請先使用「💾 預載」下載對應期間"
+                    )
+                    return
+                self._execute_backtest(klines=bt_klines)
+                return
+
             need = config.BACKTEST_RANGE_OPTIONS.get(range_label, 200)
             have = len(self._loaded_klines)
 
@@ -1513,6 +1635,7 @@ class MainWindow(QMainWindow):
 
         # ── 依模式決定是否載入 tick_map ────────────────────────────────
         tick_map = None
+        tick_coverage_pct = 0.0
         use_tick_mode = self._bt_mode_combo.currentIndex() == 1
         if use_tick_mode and bt_klines:
             start_ms = bt_klines[0].open_time
@@ -1524,10 +1647,10 @@ class MainWindow(QMainWindow):
                     for k in bt_klines
                 ]
                 tick_map = tick_cache.build_bar_map(ticks, kline_times)
-                coverage = len(tick_map) / len(bt_klines) * 100
+                tick_coverage_pct = len(tick_map) / len(bt_klines) * 100
                 self._status_lbl.setText(
                     f"🎯 Tick 模式：覆蓋 {len(tick_map):,}/{len(bt_klines):,} 根 "
-                    f"({coverage:.0f}%)，開始回測…"
+                    f"({tick_coverage_pct:.0f}%)，開始回測…"
                 )
             else:
                 self._status_lbl.setText(
@@ -1562,7 +1685,13 @@ class MainWindow(QMainWindow):
             compound=self._bt_config_dlg.compound_combo.currentIndex() == 0,
         )
         sim_stats = simulate_trades(self._strategy_signals, cfg)
-        sim_stats["strategy_name"] = getattr(self._strategy_engine, "name", "策略")
+        sim_stats["strategy_name"]      = getattr(self._strategy_engine, "name", "策略")
+        sim_stats["backtest_start_ms"]  = bt_klines[0].open_time  if bt_klines else 0
+        sim_stats["backtest_end_ms"]    = bt_klines[-1].open_time if bt_klines else 0
+        sim_stats["tick_coverage_pct"]  = tick_coverage_pct if use_tick_mode else None
+        sim_stats["fallback_bar_count"] = getattr(
+            self._strategy_engine, "_fallback_bar_count", 0
+        ) if use_tick_mode else 0
 
         dlg = BacktestResultDialog(sim_stats, parent=self)
         dlg.exec()
@@ -1717,6 +1846,7 @@ class MainWindow(QMainWindow):
             # ── Bar 模式 ──────────────────────────────────────────────────
             for label in config.BACKTEST_RANGE_OPTIONS:
                 self._bt_range_combo.addItem(label)
+            self._bt_range_combo.addItem("🗓 自訂時間...")
         else:
             # ── Tick 模式 ─────────────────────────────────────────────────
             ti = tick_cache.info(self._symbol)

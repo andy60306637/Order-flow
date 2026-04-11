@@ -30,3 +30,4 @@ def register(cls: Type["StrategyBase"]) -> Type["StrategyBase"]:
 # ── 自動匯入所有策略（觸發 @register）────────────────────────────────────────
 from strategies import sma_cross as _sma_cross  # noqa: E402, F401
 from strategies import wick_reversal as _wick_reversal  # noqa: E402, F401
+from strategies import wick_reversal_v4 as _wick_reversal_v4  # noqa: E402, F401
