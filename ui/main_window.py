@@ -68,12 +68,11 @@ class TickImportThread(QThread):
     progress_signal = pyqtSignal(str)       # 狀態訊息
     done_signal     = pyqtSignal(int, str)  # (total_count, error_message)
 
-    def __init__(self, symbol: str, interval: str,
+    def __init__(self, symbol: str,
                  paths: list, parent=None) -> None:
         super().__init__(parent)
-        self._symbol   = symbol
-        self._interval = interval
-        self._paths    = paths
+        self._symbol = symbol
+        self._paths  = paths
 
     def run(self) -> None:
         from core import tick_cache as _tc
@@ -93,7 +92,7 @@ class TickImportThread(QThread):
                 st = int(arr[:, 0].min())
                 et = int(arr[:, 0].max())
                 total = _tc.merge_and_save_array(
-                    self._symbol, self._interval, arr, st, et
+                    self._symbol, arr, st, et
                 )
             except Exception as exc:
                 self.done_signal.emit(0, f"{p.name}: {exc}")
@@ -829,11 +828,26 @@ class MainWindow(QMainWindow):
         self._import_tick_btn = QPushButton("📂 匯入 Tick")
         self._import_tick_btn.setToolTip(
             "匯入從 data.binance.vision 下載的 aggTrades CSV/ZIP\n"
-            "可一次選取多個月份檔案，自動合併至本機快取"
+            "可 Ctrl+點選多個檔案同時匯入，自動合併至本機快取"
         )
         self._import_tick_btn.setStyleSheet(_btn_style)
         self._import_tick_btn.clicked.connect(self._on_import_ticks)
         tb.addWidget(self._import_tick_btn)
+
+        self._import_tick_dir_btn = QPushButton("📁 資料夾")
+        self._import_tick_dir_btn.setToolTip(
+            "選取資料夾，自動匯入其中所有的 aggTrades CSV/ZIP\n"
+            "（適合將 data.binance.vision 下載的月份檔案集中放在同一資料夾）"
+        )
+        self._import_tick_dir_btn.setStyleSheet(_btn_style)
+        self._import_tick_dir_btn.clicked.connect(self._on_import_ticks_folder)
+        tb.addWidget(self._import_tick_dir_btn)
+
+        self._clear_tick_btn = QPushButton("🗑")
+        self._clear_tick_btn.setToolTip("刪除本機 Tick 快取檔案以釋放磁碟空間")
+        self._clear_tick_btn.setStyleSheet(_btn_style)
+        self._clear_tick_btn.clicked.connect(self._on_clear_tick_cache)
+        tb.addWidget(self._clear_tick_btn)
 
         self._tick_lbl = QLabel()
         self._tick_lbl.setStyleSheet("color:#80cbc4; font-size:10px; padding-left:4px;")
@@ -1464,8 +1478,7 @@ class MainWindow(QMainWindow):
         if use_tick_mode and bt_klines:
             start_ms = bt_klines[0].open_time
             end_ms   = bt_klines[-1].open_time + _interval_ms(self._interval)
-            ticks = tick_cache.load_range(self._symbol, self._interval,
-                                         start_ms, end_ms)
+            ticks = tick_cache.load_range(self._symbol, start_ms, end_ms)
             if len(ticks) > 0:
                 kline_times = [
                     (k.open_time, k.open_time + _interval_ms(self._interval) - 1)
@@ -1600,11 +1613,12 @@ class MainWindow(QMainWindow):
             self._tick_import_thread.wait(500)
 
         self._import_tick_btn.setEnabled(False)
+        self._import_tick_dir_btn.setEnabled(False)
         self._import_tick_btn.setText("匯入中…")
         self._tick_lbl.setText("🔄 匯入中…")
 
         self._tick_import_thread = TickImportThread(
-            self._symbol, self._interval, paths, parent=self
+            self._symbol, paths, parent=self
         )
         self._tick_import_thread.progress_signal.connect(self._on_tick_import_progress)
         self._tick_import_thread.done_signal.connect(self._on_tick_import_done)
@@ -1615,12 +1629,13 @@ class MainWindow(QMainWindow):
 
     def _on_tick_import_done(self, count: int, err: str) -> None:
         self._import_tick_btn.setEnabled(True)
+        self._import_tick_dir_btn.setEnabled(True)
         self._import_tick_btn.setText("📂 匯入 Tick")
         if err:
             self._status_lbl.setText(f"❌ 匯入失敗：{err}")
             self._tick_lbl.setText("❌ 匯入失敗")
         elif count:
-            ti = tick_cache.info(self._symbol, self._interval)
+            ti = tick_cache.info(self._symbol)
             self._refresh_tick_label()
             self._status_lbl.setText(
                 f"✓ 匯入完成，快取共 {count:,} 筆"
@@ -1632,7 +1647,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_tick_label(self) -> None:
         """更新 tick 快取狀態標籤。"""
-        ti = tick_cache.info(self._symbol, self._interval)
+        ti = tick_cache.info(self._symbol)
         if ti:
             from datetime import datetime, timezone
             s = datetime.fromtimestamp(ti["start_ms"] / 1000, tz=timezone.utc).strftime("%y-%m-%d")
@@ -1642,6 +1657,81 @@ class MainWindow(QMainWindow):
             )
         else:
             self._tick_lbl.setText("🎯 無 Tick 快取")
+
+    def _on_import_ticks_folder(self) -> None:
+        """「📁 資料夾」按鈕：選取資料夾，自動尋找內部所有 CSV/ZIP 並匯入。"""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "選取包含 aggTrades 檔案的資料夾（data.binance.vision）",
+            "",
+        )
+        if not folder:
+            return
+        folder_path = Path(folder)
+        paths = sorted(
+            str(p) for p in folder_path.iterdir()
+            if p.suffix.lower() in (".csv", ".zip")
+        )
+        if not paths:
+            self._status_lbl.setText(f"⚠ 資料夾中未找到任何 CSV/ZIP 檔案：{folder_path.name}")
+            return
+        if self._tick_import_thread and self._tick_import_thread.isRunning():
+            self._tick_import_thread.wait(500)
+        self._import_tick_btn.setEnabled(False)
+        self._import_tick_dir_btn.setEnabled(False)
+        self._import_tick_dir_btn.setText("匯入中…")
+        self._tick_lbl.setText("🔄 匯入中…")
+        self._tick_import_thread = TickImportThread(
+            self._symbol, paths, parent=self
+        )
+        self._tick_import_thread.progress_signal.connect(self._on_tick_import_progress)
+        self._tick_import_thread.done_signal.connect(self._on_tick_import_done_folder)
+        self._tick_import_thread.start()
+
+    def _on_tick_import_done_folder(self, count: int, err: str) -> None:
+        self._import_tick_btn.setEnabled(True)
+        self._import_tick_dir_btn.setEnabled(True)
+        self._import_tick_dir_btn.setText("📁 資料夾")
+        if err:
+            self._status_lbl.setText(f"❌ 匯入失敗：{err}")
+            self._tick_lbl.setText("❌ 匯入失敗")
+        elif count:
+            ti = tick_cache.info(self._symbol)
+            self._refresh_tick_label()
+            self._status_lbl.setText(
+                f"✓ 資料夾匯入完成，快取共 {count:,} 筆"
+                + (f" ({ti['size_mb']:.1f} MB)" if ti else "")
+            )
+        else:
+            self._status_lbl.setText("⚠ 匯入完成，但未解析到任何資料（請確認檔案格式）")
+            self._tick_lbl.setText("⚠ 無資料")
+
+    def _on_clear_tick_cache(self) -> None:
+        """「🗑」按鈕：刪除本機 tick 快取檔案以釋放磁碟空間。"""
+        ti = tick_cache.info(self._symbol)
+        if not ti:
+            self._status_lbl.setText("⚠ 目前無 Tick 快取，無需清除")
+            return
+        size_mb = ti["size_mb"]
+        count   = ti["count"]
+        reply = QMessageBox.question(
+            self,
+            "刪除 Tick 快取",
+            f"確定要刪除 {self._symbol} 的 Tick 快取？\n"
+            f"共 {count:,} 筆，占用 {size_mb:.1f} MB\n\n"
+            f"刪除後將無法還原，請確認。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        path = tick_cache.cache_path(self._symbol)
+        try:
+            path.unlink(missing_ok=True)
+            self._refresh_tick_label()
+            self._status_lbl.setText(f"✓ Tick 快取已刪除（釋放 {size_mb:.1f} MB）")
+        except Exception as exc:
+            self._status_lbl.setText(f"❌ 刪除失敗：{exc}")
 
     def _refresh_cache_label(self) -> None:
         """更新工具列快取資訊 label（切換幣對/interval 時呼叫）。"""

@@ -24,6 +24,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 import config
 from core import kline_cache
+from core import tick_cache
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class WsWorkerThread(QThread):
     status_signal           = pyqtSignal(str)    # 狀態文字
     backtest_history_signal = pyqtSignal(list)   # 回測專用批量 K 線
     cache_ready_signal      = pyqtSignal(int)    # 快取儲存完成（傳回列數）
+    backtest_ticks_signal   = pyqtSignal(int)    # aggTrades 下載完成（傳回筆數）
 
     def __init__(
         self,
@@ -88,6 +90,16 @@ class WsWorkerThread(QThread):
             asyncio.run_coroutine_threadsafe(
                 self._fetch_backtest_history(total_candles, cache_only=cache_only),
                 self._loop,
+            )
+
+    def request_backtest_ticks(self, start_ms: int, end_ms: int) -> None:
+        """
+        從主執行緒請求下載 [start_ms, end_ms) 範圍的 aggTrades。
+        完成後透過 backtest_ticks_signal 回傳筆數。
+        """
+        if self._loop and not self._loop.is_closed():
+            asyncio.run_coroutine_threadsafe(
+                self._fetch_backtest_ticks(start_ms, end_ms), self._loop
             )
 
     def stop(self) -> None:
@@ -462,6 +474,149 @@ class WsWorkerThread(QThread):
                 self.cache_ready_signal.emit(0)
             else:
                 self.backtest_history_signal.emit([])
+
+    async def _fetch_backtest_ticks(self, start_ms: int, end_ms: int) -> None:
+        """
+        下載 [start_ms, end_ms) 範圍的 aggTrades 並寫入本機快取。
+        支援從快取續傳：若快取已涵蓋部分範圍，只下載缺失部分。
+        完成後透過 backtest_ticks_signal 回傳總筆數。
+        """
+        symbol = self._symbol.upper()
+        interval = self._interval
+
+        # ── 檢查快取是否已涵蓋 ─────────────────────────────────────────────
+        cached_info = tick_cache.info(symbol, interval)
+        if cached_info:
+            cs, ce = cached_info["start_ms"], cached_info["end_ms"]
+            if cs <= start_ms and ce >= end_ms:
+                self.status_signal.emit(
+                    f"Tick 快取已涵蓋所需範圍（{cached_info['count']:,} 筆）"
+                )
+                self.backtest_ticks_signal.emit(cached_info["count"])
+                return
+            # 需要補充的範圍：快取之前 or 之後（簡化：只補快取之前的部分）
+            if cs <= end_ms:
+                # 快取已涵蓋後段，只需下載 [start_ms, cs)
+                actual_end = cs
+                actual_start = start_ms
+            else:
+                actual_start = start_ms
+                actual_end = end_ms
+        else:
+            actual_start = start_ms
+            actual_end = end_ms
+
+        page_count = 0
+        try:
+            async with aiohttp.ClientSession() as session:
+                all_trades: list[dict] = []
+                from_t = actual_start
+
+                while from_t < actual_end and self._running:
+                    page_count += 1
+                    if page_count % 10 == 0:
+                        self.status_signal.emit(
+                            f"下載 aggTrades… {len(all_trades):,} 筆"
+                            f"（{page_count} 頁）"
+                        )
+
+                    trades = await self._fetch_agg_page(
+                        session, from_t, actual_end
+                    )
+                    if trades is None:
+                        # 429 限流 → 等待後重試
+                        continue
+                    if not trades:
+                        break
+
+                    all_trades.extend(trades)
+                    last_t = int(trades[-1]["T"])
+                    if last_t <= from_t:
+                        break
+                    from_t = last_t + 1
+
+                # 儲存到快取
+                if all_trades:
+                    total = tick_cache.merge_and_save(
+                        symbol, all_trades,
+                        actual_start, actual_end,
+                    )
+                    self.status_signal.emit(
+                        f"aggTrades 下載完成：{total:,} 筆"
+                    )
+                    self.backtest_ticks_signal.emit(total)
+                else:
+                    ci = tick_cache.info(symbol)
+                    count = ci["count"] if ci else 0
+                    self.backtest_ticks_signal.emit(count)
+        except Exception as exc:
+            logger.error("fetch_backtest_ticks error: %s", exc)
+            self.backtest_ticks_signal.emit(0)
+
+    async def _fetch_agg_page(
+        self,
+        session: aiohttp.ClientSession,
+        start_ms: int,
+        end_ms: int,
+    ) -> list[dict] | None:
+        """
+        拉取一頁 aggTrades (limit=1000)。
+        回傳 list[dict]（成功），[]（無更多資料），None（429 需重試）。
+        """
+        url = (
+            f"{config.REST_BASE}/fapi/v1/aggTrades"
+            f"?symbol={self._symbol.upper()}&limit=1000"
+            f"&startTime={start_ms}&endTime={end_ms}"
+        )
+        _WEIGHT_LIMIT = 2400
+        _AGG_WEIGHT   = 20
+
+        try:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=30)
+            ) as r:
+                if r.status == 429:
+                    ra = r.headers.get("Retry-After")
+                    wait = max(float(ra) if ra else 60.0, 60.0)
+                    logger.warning("aggTrades HTTP 429, retry in %.0fs", wait)
+                    self.status_signal.emit(
+                        f"⏳ aggTrades 限流中，等待 {wait:.0f}s…"
+                    )
+                    await asyncio.sleep(wait)
+                    return None  # signal retry
+                if r.status != 200:
+                    logger.warning("aggTrades HTTP %d", r.status)
+                    return []
+
+                # 動態節流
+                used_weight_str = r.headers.get("X-MBX-USED-WEIGHT-1M", "")
+                try:
+                    used_weight = int(used_weight_str) if used_weight_str else 0
+                except ValueError:
+                    used_weight = 0
+
+                data = await r.json()
+                if not data:
+                    return []
+
+                # 根據剩餘權重決定延遲
+                if used_weight > 0:
+                    remaining = _WEIGHT_LIMIT - used_weight
+                    if remaining < _AGG_WEIGHT * 3:
+                        delay = 5.0
+                    elif remaining < _AGG_WEIGHT * 10:
+                        delay = 1.0
+                    elif remaining < _WEIGHT_LIMIT * 0.5:
+                        delay = 0.3
+                    else:
+                        delay = 0.1
+                else:
+                    delay = 0.8
+                await asyncio.sleep(delay)
+                return data
+        except Exception as exc:
+            logger.error("aggTrades page fetch error: %s", exc)
+            return []
 
     async def _fetch_ob_snapshot(self, session: aiohttp.ClientSession) -> dict:
         url = (

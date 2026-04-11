@@ -1,6 +1,7 @@
 """本機 aggTrades 快取。
 
-路徑：<project_root>/data/ticks/{SYMBOL}_{interval}_ticks.npz
+路徑：<project_root>/data/ticks/{SYMBOL}_ticks.npz
+（Tick 資料與 K 棒 interval 無關，快取以 symbol 命名，可跨 interval 共用）
 
 儲存格式為 NumPy compressed .npz，內含:
   - "data": shape (N, 4) float64 陣列
@@ -27,14 +28,15 @@ _CACHE_DIR    = _PROJECT_ROOT / "data" / "ticks"
 _NCOLS        = 4  # trade_time, price, qty, is_buyer_maker
 
 
-def cache_path(symbol: str, interval: str) -> Path:
+def cache_path(symbol: str) -> Path:
+    """回傳快取路徑。Tick 資料與 K 棒 interval 無關，僅以 symbol 命名。"""
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return _CACHE_DIR / f"{symbol.upper()}_{interval}_ticks.npz"
+    return _CACHE_DIR / f"{symbol.upper()}_ticks.npz"
 
 
-def load_raw(symbol: str, interval: str) -> tuple[np.ndarray | None, dict | None]:
+def load_raw(symbol: str) -> tuple[np.ndarray | None, dict | None]:
     """讀取原始快取。回傳 (data_array, meta_dict) 或 (None, None)。"""
-    path = cache_path(symbol, interval)
+    path = cache_path(symbol)
     if not path.exists():
         return None, None
     try:
@@ -48,10 +50,10 @@ def load_raw(symbol: str, interval: str) -> tuple[np.ndarray | None, dict | None
         return None, None
 
 
-def save_raw(symbol: str, interval: str, data: np.ndarray,
+def save_raw(symbol: str, data: np.ndarray,
              start_ms: int, end_ms: int) -> bool:
     """全量寫入快取。"""
-    path = cache_path(symbol, interval)
+    path = cache_path(symbol)
     try:
         meta = np.array([start_ms, end_ms], dtype=np.float64)
         np.savez_compressed(str(path), data=data, meta=meta)
@@ -138,15 +140,15 @@ def from_zip_file(path) -> np.ndarray:
             return _parse_agg_trades_csv_lines(f)
 
 
-def merge_and_save_array(symbol: str, interval: str,
+def merge_and_save_array(symbol: str,
                           new_arr: np.ndarray,
                           start_ms: int, end_ms: int) -> int:
     """將 ndarray(N, 4) 合併進既有快取並儲存，回傳合併後總筆數。"""
     if len(new_arr) == 0:
-        existing, _ = load_raw(symbol, interval)
+        existing, _ = load_raw(symbol)
         return len(existing) if existing is not None else 0
 
-    existing, meta = load_raw(symbol, interval)
+    existing, meta = load_raw(symbol)
     if existing is not None and len(existing) > 0:
         combined = np.concatenate([existing, new_arr], axis=0)
     else:
@@ -169,16 +171,16 @@ def merge_and_save_array(symbol: str, interval: str,
         s_ms = min(s_ms, meta["start_ms"])
         e_ms = max(e_ms, meta["end_ms"])
 
-    save_raw(symbol, interval, combined, s_ms, e_ms)
+    save_raw(symbol, combined, s_ms, e_ms)
     return len(combined)
 
 
-def merge_and_save(symbol: str, interval: str,
+def merge_and_save(symbol: str,
                    new_trades: list[dict],
                    new_start_ms: int, new_end_ms: int) -> int:
     """合併新資料與既有快取，依 trade_time 排序去重，儲存並回傳總筆數。"""
     new_arr = from_api_list(new_trades)
-    existing, meta = load_raw(symbol, interval)
+    existing, meta = load_raw(symbol)
 
     if existing is not None and len(existing) > 0:
         combined = np.concatenate([existing, new_arr], axis=0)
@@ -202,14 +204,14 @@ def merge_and_save(symbol: str, interval: str,
         start_ms = new_start_ms
         end_ms   = new_end_ms
 
-    save_raw(symbol, interval, combined, start_ms, end_ms)
+    save_raw(symbol, combined, start_ms, end_ms)
     return len(combined)
 
 
-def load_range(symbol: str, interval: str,
+def load_range(symbol: str,
                start_ms: int, end_ms: int) -> np.ndarray:
     """載入指定時間範圍內的 ticks（含兩端）。"""
-    data, meta = load_raw(symbol, interval)
+    data, meta = load_raw(symbol)
     if data is None or len(data) == 0:
         return np.empty((0, _NCOLS), dtype=np.float64)
     mask = (data[:, 0] >= start_ms) & (data[:, 0] <= end_ms)
@@ -239,13 +241,13 @@ def build_bar_map(ticks: np.ndarray,
     return result
 
 
-def info(symbol: str, interval: str) -> Optional[dict]:
+def info(symbol: str) -> Optional[dict]:
     """回傳快取資訊。"""
-    path = cache_path(symbol, interval)
+    path = cache_path(symbol)
     if not path.exists():
         return None
     try:
-        data, meta = load_raw(symbol, interval)
+        data, meta = load_raw(symbol)
         if data is None:
             return None
         return {
