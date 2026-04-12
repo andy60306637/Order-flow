@@ -56,10 +56,10 @@ def load_ticks(tick_dir: Path, symbol: str) -> np.ndarray:
 # ── 參數網格 ─────────────────────────────────────────────────────────────────
 
 GRID = {
-    "zoom_bars":                          [1, 3, 5],
-    "long_delta_eff_threshold":           [0.5, 0.6, 0.7, 0.8],
+    "zoom_bars":                          [1, 2, 3, 5],
+    "sl_offset":                          [5.0, 8.0, 10.0, 15.0],
+    "long_delta_eff_threshold":           [0.4, 0.5, 0.6, 0.7],
     "long_vol_sma_mult":                  [1.0, 1.2, 1.5, 2.0],
-    "k_delta_close_pos_min":              [0.7, 0.8, 0.9],
     "k0_min_range_sma_mult":              [0.5, 1.0, 1.5],
     "lower_wick_absorption_min_vol_ratio":[0.10, 0.15, 0.25],
     "lower_wick_absorption_delta_eff_max":[-0.2, 0.0],
@@ -163,10 +163,10 @@ def main():
               f"TS={stats['ts_count']} TD={stats['td_count']}")
         # print params delta from defaults
         defaults = {
-            "zoom_bars": 5,
+            "zoom_bars": 3,
+            "sl_offset": 10.0,
             "long_delta_eff_threshold": 0.6,
             "long_vol_sma_mult": 1.2,
-            "k_delta_close_pos_min": 0.8,
             "k0_min_range_sma_mult": 1.0,
             "lower_wick_absorption_min_vol_ratio": 0.15,
             "lower_wick_absorption_delta_eff_max": 0.0,

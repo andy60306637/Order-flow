@@ -40,6 +40,7 @@ from core.footprint_builder import FootprintBuilder
 from core.ws_client import WsWorkerThread
 from core.history_processor import HistoryProcessorThread
 from core import kline_cache, tick_cache
+from utils.tick_data_backtest import _build_klines_from_ticks
 from strategies import STRATEGY_REGISTRY
 from strategies.base import StrategyBase, StrategySignal
 from ui.order_book_widget import OrderBookWidget
@@ -142,10 +143,20 @@ class BacktestResultDialog(QDialog):
         return h_start <= h < h_end if h_start < h_end else (h >= h_start or h < h_end)
 
     # ─────────────────────────────────────────────────────────────────
-    def __init__(self, stats: dict, parent=None) -> None:
+    def __init__(
+        self,
+        stats: dict,
+        klines: list | None = None,
+        tick_map: dict | None = None,
+        signals: list | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._stats = stats
         self._full_trade_list = stats.get("trade_list", [])
+        self._klines   = klines   or []
+        self._tick_map = tick_map
+        self._signals  = signals  or []
         self.setWindowTitle("回測結果")
         self.setMinimumSize(1020, 620)
         self.setStyleSheet(
@@ -251,6 +262,18 @@ class BacktestResultDialog(QDialog):
         self._warn_lbl.setVisible(False)
         layout.addWidget(self._warn_lbl)
 
+        # ── 圖表快照按鈕 ─────────────────────────────────────────────
+        self._snap_btn = QPushButton("📸 圖表快照")
+        self._snap_btn.setToolTip("開啟所選交易的 K 棒快照視窗（雙擊表格列也可開啟）")
+        self._snap_btn.setEnabled(bool(self._klines and self._signals))
+        self._snap_btn.setStyleSheet(
+            "QPushButton { background:#1e222d; color:#80cbc4;"
+            " border:1px solid #26a69a; border-radius:3px; padding:3px 10px; }"
+            "QPushButton:hover { background:#1a3a3a; }"
+            "QPushButton:disabled { color:#444; border-color:#333; }"
+        )
+        self._snap_btn.clicked.connect(self._open_snapshot_selected)
+
         # ── 匯出按鈕 ─────────────────────────────────────────────────
         _exp_btn = QPushButton("⬇ 匯出 Excel")
         _exp_btn.setStyleSheet(
@@ -260,6 +283,7 @@ class BacktestResultDialog(QDialog):
         )
         _exp_btn.clicked.connect(self._export_excel)
         _btn_row = QHBoxLayout()
+        _btn_row.addWidget(self._snap_btn)
         _btn_row.addStretch()
         _btn_row.addWidget(_exp_btn)
         layout.addLayout(_btn_row)
@@ -279,6 +303,7 @@ class BacktestResultDialog(QDialog):
         self._trade_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
         )
+        self._trade_table.doubleClicked.connect(self._on_trade_double_clicked)
         layout.addWidget(self._trade_table)
 
         # ── 連接篩選信號 + 初次填充 ──────────────────────────────────
@@ -555,6 +580,42 @@ class BacktestResultDialog(QDialog):
 
         wb.save(path)
         QMessageBox.information(self, "匯出成功", f"已儲存至:\n{path}")
+
+    # ── 快照入口 ──────────────────────────────────────────────────────────────
+
+    def _open_snapshot_at(self, trade_row_idx: int) -> None:
+        """Build contexts once and open TradeSnapshotDialog at trade_row_idx."""
+        if not self._klines or not self._signals:
+            QMessageBox.information(
+                self, "無法開啟快照",
+                "快照功能需要 Tick 模式回測的 K 棒與訊號資料。\n"
+                "請切換至 🎯 Tick 模式後再執行回測。"
+            )
+            return
+
+        from ui.trade_snapshot_dialog import TradeSnapshotDialog, _collect_contexts
+        active_trades = [t for t in self._full_trade_list if not t.get("skipped")]
+        contexts = _collect_contexts(self._signals, active_trades, self._klines)
+        if not contexts:
+            QMessageBox.information(self, "無快照資料", "找不到可顯示的交易快照。")
+            return
+
+        # Map filtered-list row index to context index
+        ctx_idx = min(trade_row_idx, len(contexts) - 1)
+        dlg = TradeSnapshotDialog(
+            contexts, self._klines, self._tick_map,
+            start_idx=ctx_idx, parent=self,
+        )
+        dlg.exec()
+
+    def _open_snapshot_selected(self) -> None:
+        """Open snapshot for the currently selected trade row (or first trade)."""
+        rows = self._trade_table.selectionModel().selectedRows()
+        row  = rows[0].row() if rows else 0
+        self._open_snapshot_at(row)
+
+    def _on_trade_double_clicked(self, index) -> None:
+        self._open_snapshot_at(index.row())
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1642,14 +1703,23 @@ class MainWindow(QMainWindow):
             end_ms   = bt_klines[-1].open_time + _interval_ms(self._interval)
             ticks = tick_cache.load_range(self._symbol, start_ms, end_ms)
             if len(ticks) > 0:
+                # ── 從 tick 重建 kline，確保 tick/kline 完全一致 ──────
+                bt_klines = _build_klines_from_ticks(
+                    self._symbol, ticks, interval=self._interval,
+                )
+                if not bt_klines:
+                    self._status_lbl.setText(
+                        "⚠ Tick 模式：無法從 tick 資料重建 K 棒"
+                    )
+                    return
                 kline_times = [
-                    (k.open_time, k.open_time + _interval_ms(self._interval) - 1)
-                    for k in bt_klines
+                    (k.open_time, k.close_time) for k in bt_klines
                 ]
                 tick_map = tick_cache.build_bar_map(ticks, kline_times)
                 tick_coverage_pct = len(tick_map) / len(bt_klines) * 100
                 self._status_lbl.setText(
-                    f"🎯 Tick 模式：覆蓋 {len(tick_map):,}/{len(bt_klines):,} 根 "
+                    f"🎯 Tick 模式：從 tick 重建 {len(bt_klines):,} 根 K 棒，"
+                    f"tick 覆蓋 {len(tick_map):,}/{len(bt_klines):,} "
                     f"({tick_coverage_pct:.0f}%)，開始回測…"
                 )
             else:
@@ -1693,7 +1763,13 @@ class MainWindow(QMainWindow):
             self._strategy_engine, "_fallback_bar_count", 0
         ) if use_tick_mode else 0
 
-        dlg = BacktestResultDialog(sim_stats, parent=self)
+        dlg = BacktestResultDialog(
+            sim_stats,
+            klines=bt_klines if use_tick_mode else None,
+            tick_map=tick_map,
+            signals=self._strategy_signals if use_tick_mode else None,
+            parent=self,
+        )
         dlg.exec()
 
     # ── 本機快取 ──────────────────────────────────────────────────────────────
