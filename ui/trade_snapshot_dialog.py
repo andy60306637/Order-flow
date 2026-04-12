@@ -72,7 +72,8 @@ def _collect_contexts(
     for s in signals:
         sig_by_time[s.open_time].append(s)
 
-    k0_signals = [s for s in signals if s.signal_type == "k0_long"]
+    k0_long_signals  = [s for s in signals if s.signal_type == "k0_long"]
+    k0_short_signals = [s for s in signals if s.signal_type == "k0_short"]
 
     result = []
     for ti, trade in enumerate(trade_list):
@@ -80,20 +81,26 @@ def _collect_contexts(
             continue
         entry_time = trade.get("entry_time", 0)
         exit_time  = trade.get("exit_time",  0)
+        direction  = trade.get("dir", "long")
+
+        if direction == "short":
+            entry_type, exit_type, k0_pool = "short_entry", "short_exit", k0_short_signals
+        else:
+            entry_type, exit_type, k0_pool = "long_entry",  "long_exit",  k0_long_signals
 
         entry_sig = next(
-            (s for s in sig_by_time.get(entry_time, []) if s.signal_type == "long_entry"),
+            (s for s in sig_by_time.get(entry_time, []) if s.signal_type == entry_type),
             None,
         )
         exit_sig = next(
-            (s for s in sig_by_time.get(exit_time, []) if s.signal_type == "long_exit"),
+            (s for s in sig_by_time.get(exit_time, []) if s.signal_type == exit_type),
             None,
         )
         if entry_sig is None:
             continue
 
         k0_sig = next(
-            (k0 for k0 in reversed(k0_signals) if k0.open_time <= entry_time),
+            (k0 for k0 in reversed(k0_pool) if k0.open_time <= entry_time),
             None,
         )
 
@@ -335,9 +342,14 @@ class _SnapshotPanel(QWidget):
         entry_ki    = ctx.get("entry_ki")
 
         # TP 從 entry/stop 反推（rr=1.0 預設）
+        direction = trade.get("dir", "long")
         tp_p: Optional[float] = None
-        if stop_p and entry_price and (entry_price - stop_p) > 0:
-            tp_p = entry_price + (entry_price - stop_p)
+        if stop_p and entry_price:
+            risk = entry_price - stop_p  # 正數 = long（stop 在下方）；負數 = short（stop 在上方）
+            if direction == "short" and risk < 0:
+                tp_p = entry_price + risk  # short TP = entry - |risk|（低於 entry）
+            elif direction == "long" and risk > 0:
+                tp_p = entry_price + risk  # long  TP = entry + risk（高於 entry）
 
         key_prices = candle_prices.copy()
         for v in (entry_price, exit_price, stop_p, tp_p):

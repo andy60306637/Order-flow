@@ -600,8 +600,18 @@ class BacktestResultDialog(QDialog):
             QMessageBox.information(self, "無快照資料", "找不到可顯示的交易快照。")
             return
 
-        # Map filtered-list row index to context index
-        ctx_idx = min(trade_row_idx, len(contexts) - 1)
+        # trade_row_idx 是過濾後表格的列號；contexts 是依完整清單建立的。
+        # 先從過濾後清單取得目標 trade 物件，再在 contexts 中以 identity 比對找正確 index。
+        filtered_active = [t for t in self._filtered_trades() if not t.get("skipped")]
+        if trade_row_idx < len(filtered_active):
+            target_trade = filtered_active[trade_row_idx]
+            ctx_idx = next(
+                (i for i, c in enumerate(contexts) if c["trade"] is target_trade),
+                0,
+            )
+        else:
+            ctx_idx = min(trade_row_idx, len(contexts) - 1)
+
         dlg = TradeSnapshotDialog(
             contexts, self._klines, self._tick_map,
             start_idx=ctx_idx, parent=self,

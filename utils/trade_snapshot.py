@@ -85,8 +85,9 @@ def _collect_trade_contexts(
     for s in signals:
         sig_by_time[s.open_time].append(s)
 
-    # Build ordered list of k0 signals for matching
-    k0_signals = [s for s in signals if s.signal_type == "k0_long"]
+    # Build ordered lists of k0 signals for each direction
+    k0_long_signals  = [s for s in signals if s.signal_type == "k0_long"]
+    k0_short_signals = [s for s in signals if s.signal_type == "k0_short"]
 
     results = []
     for ti, trade in enumerate(trade_list):
@@ -94,17 +95,23 @@ def _collect_trade_contexts(
             continue
 
         entry_time = trade.get("entry_time", 0)
-        exit_time = trade.get("exit_time", 0)
+        exit_time  = trade.get("exit_time", 0)
+        direction  = trade.get("dir", "long")
+
+        if direction == "short":
+            entry_type, exit_type, k0_pool = "short_entry", "short_exit", k0_short_signals
+        else:
+            entry_type, exit_type, k0_pool = "long_entry",  "long_exit",  k0_long_signals
 
         # Find entry and exit signals
         entry_sig = None
-        exit_sig = None
+        exit_sig  = None
         for s in sig_by_time.get(entry_time, []):
-            if s.signal_type == "long_entry":
+            if s.signal_type == entry_type:
                 entry_sig = s
                 break
         for s in sig_by_time.get(exit_time, []):
-            if s.signal_type == "long_exit":
+            if s.signal_type == exit_type:
                 exit_sig = s
                 break
 
@@ -113,7 +120,7 @@ def _collect_trade_contexts(
 
         # Find the most recent k0 before entry
         k0_sig = None
-        for k0s in reversed(k0_signals):
+        for k0s in reversed(k0_pool):
             if k0s.open_time <= entry_time:
                 k0_sig = k0s
                 break
@@ -279,10 +286,20 @@ def render_trade_snapshot(
 
     # ── Take profit line ───────────────────────────────────────────────────
     # Reconstruct TP from entry + risk * rr
+    direction = trade.get("dir", "long")
     if stop_p and entry_price:
-        risk = entry_price - stop_p
-        if risk > 0:
-            tp_p = entry_price + risk  # rr_ratio=1.0 default
+        risk = entry_price - stop_p  # 正數 = long；負數 = short
+        if direction == "short" and risk < 0:
+            tp_p = entry_price + risk   # short TP 低於 entry
+            ax_candle.axhline(
+                tp_p, color="#4caf50", linestyle="--", linewidth=1.0, alpha=0.7,
+            )
+            ax_candle.text(
+                n - 0.5, tp_p, f"TP {tp_p:.1f}",
+                fontsize=7, color="#4caf50", va="top", ha="right",
+            )
+        elif direction == "long" and risk > 0:
+            tp_p = entry_price + risk   # long TP 高於 entry
             ax_candle.axhline(
                 tp_p, color="#4caf50", linestyle="--", linewidth=1.0, alpha=0.7,
             )
