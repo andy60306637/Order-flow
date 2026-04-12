@@ -1,15 +1,18 @@
 """
 Wick Reversal v4
 
-Long-only, tick-first research variant:
-  - k0 is color-agnostic, shape-based, requires lower-wick absorption
+Long + short, tick-first research variant:
+  - k0 is color-agnostic, shape-based, requires wick absorption confirmation
     (no range SMA filter — maximise signal count for initial exploration)
-  - entry triggers inside zoom window (up to zoom_bars=5) after k0:
-    first tick > k0_body_high with cumulative delta_eff > threshold (tick mode),
-    or bar closes with k.high >= k0_body_high and delta_eff > threshold (bar mode)
-  - zoom window invalidated when k.low < k0_body_low (body low, not k0.low)
-  - stop anchors to k0_body_low - sl_offset
-  - trailing/TP/TS/TD keep the existing long-side semantics
+  Long  k0: body in upper half, lower-wick > body, lower-wick zone delta_eff <= 0
+  Short k0: body in lower half, upper-wick > body, upper-wick zone delta_eff >= 0
+  - entry triggers inside zoom window (up to zoom_bars=5) after k0
+  - zoom window invalidated when guardian line is breached:
+      long:  k.low  < k0_body_low
+      short: k.high > k0_body_high
+  - stop: long  → k0.low  - sl_offset
+          short → k0.high + sl_offset
+  - trailing/TP/TS/TD symmetric between long and short
 """
 from __future__ import annotations
 
@@ -36,17 +39,25 @@ def _kline_delta_eff(k: Kline) -> float:
 class WickReversalV4Strategy(StrategyBase):
     name = "Wick Reversal 1m v4"
 
-    zoom_bars: int = 5                              # k0 後允許進場的最大觀察根數
-    sl_offset: float = 10.0                         # 固定停損位移（k0_body_low - sl_offset）
-    rr_ratio: float = 1.0                           # 盈虧比
-    long_delta_eff_threshold: float = 0.6           # 進場 delta_eff 門檻
-    long_vol_sma_period: int = 20                   # 成交量 SMA 窗期；0=不過濾
-    long_vol_sma_mult: float = 1.2                  # 成交量門標倍率
+    zoom_bars: int = 3                              # k0 後允許進場的最大觀察根數
+    sl_offset: float = 10.0                         # 固定停損位移
+    rr_ratio: float = 2.0                           # 盈虧比
     td_consec_bars: int = 2                         # 連續反向 delta 才觸發 TD
     k0_vol_gate: float = 50.0                       # k0 最低成交量門檻
+    # ── 做多參數 ──────────────────────────────────────────────────────────────
+    enable_long: bool = True                        # 啟用做多
+    long_delta_eff_threshold: float = 0.0           # 做多進場 delta_eff 門檻
+    long_vol_sma_period: int = 20                   # 成交量 SMA 窗期；0=不過濾
+    long_vol_sma_mult: float = 1.2                  # 成交量門標倍率
     lower_wick_absorption_delta_eff_max: float = 0.0
     lower_wick_absorption_min_vol_ratio: float = 0.15
     lower_wick_absorption_bar_delta_max: float = 0.0
+    # ── 做空參數（鏡像）──────────────────────────────────────────────────────
+    enable_short: bool = False                       # 啟用做空
+    short_delta_eff_threshold: float = 0.0          # 做空進場 delta_eff 門檻（負向）
+    upper_wick_absorption_delta_eff_min: float = 0.0
+    upper_wick_absorption_min_vol_ratio: float = 0.15
+    upper_wick_absorption_bar_delta_min: float = 0.0
 
     def on_history(
         self,
@@ -60,17 +71,21 @@ class WickReversalV4Strategy(StrategyBase):
 
         use_ticks = tick_map is not None and len(tick_map) > 0
 
-        k0: Optional[Kline] = None
-        k0_idx = -1
+        # ── k0 狀態（多空各自獨立追蹤）
+        long_k0:  Optional[Kline] = None
+        long_k0_idx  = -1
+        short_k0: Optional[Kline] = None
+        short_k0_idx = -1
 
         in_position = False
+        side = ""           # "long" | "short"
         entry_price = 0.0
-        stop_price = 0.0
+        stop_price  = 0.0
         target_price = 0.0
         trailing = False
         td_consec = 0
 
-        self._trailing = False
+        self._trailing  = False
         self._td_consec = 0
         self._stop_price = 0.0
 
@@ -79,63 +94,115 @@ class WickReversalV4Strategy(StrategyBase):
             if in_position:
                 exited = False
 
-                if use_ticks:
-                    self._trailing = trailing
-                    self._td_consec = td_consec
-                    self._stop_price = stop_price
-                    exited = self._tick_exit_long(k, tick_map, signals, target_price)
-                    if not exited:
-                        trailing = self._trailing
-                        td_consec = self._td_consec
-                        stop_price = self._stop_price
-                else:
-                    exited, trailing, td_consec, stop_price = self._bar_exit_long(
-                        k, signals, stop_price, target_price, trailing, td_consec,
-                    )
+                if side == "long":
+                    if use_ticks:
+                        self._trailing  = trailing
+                        self._td_consec = td_consec
+                        self._stop_price = stop_price
+                        exited = self._tick_exit_long(k, tick_map, signals, target_price)
+                        if not exited:
+                            trailing  = self._trailing
+                            td_consec = self._td_consec
+                            stop_price = self._stop_price
+                    else:
+                        exited, trailing, td_consec, stop_price = self._bar_exit_long(
+                            k, signals, stop_price, target_price, trailing, td_consec,
+                        )
+                else:  # side == "short"
+                    if use_ticks:
+                        self._trailing  = trailing
+                        self._td_consec = td_consec
+                        self._stop_price = stop_price
+                        exited = self._tick_exit_short(k, tick_map, signals, target_price)
+                        if not exited:
+                            trailing  = self._trailing
+                            td_consec = self._td_consec
+                            stop_price = self._stop_price
+                    else:
+                        exited, trailing, td_consec, stop_price = self._bar_exit_short(
+                            k, signals, stop_price, target_price, trailing, td_consec,
+                        )
 
                 if exited:
                     in_position = False
-                    trailing = False
+                    side = ""
+                    trailing  = False
                     td_consec = 0
+                    long_k0  = None   # 出場後清空，避免用到陳舊 k0
+                    short_k0 = None
                 else:
                     continue
 
-            # ── Step 2：k0 zoom 進場判定 ────────────────────────────────────
-            if k0 is not None and i > k0_idx:
-                bars_after = i - k0_idx
+            # ── Step 2a：做多 k0 zoom 進場判定 ─────────────────────────────
+            if long_k0 is not None and i > long_k0_idx:
+                bars_after = i - long_k0_idx
                 if bars_after > self.zoom_bars:
-                    k0 = None   # zoom 過期
-                elif k.low < min(k0.open, k0.close):
-                    k0 = None   # 實體低點被破，k0 失效
+                    long_k0 = None   # zoom 過期
+                elif k.low < min(long_k0.open, long_k0.close):
+                    long_k0 = None   # 實體低點守護線被破
                 else:
-                    entered = False
                     if use_ticks and k.open_time in tick_map:
                         entered, entry_price, stop_price, target_price = self._tick_entry(
-                            k, i, klines, tick_map, signals, k0,
+                            k, i, klines, tick_map, signals, long_k0,
                         )
                     else:
                         entered, entry_price, stop_price, target_price = self._bar_entry(
-                            k, i, klines, signals, k0,
+                            k, i, klines, signals, long_k0,
                         )
-
                     if entered:
                         in_position = True
-                        trailing = False
+                        side = "long"
+                        trailing  = False
                         td_consec = 0
-                        k0 = None
+                        long_k0  = None
+                        short_k0 = None
+                        continue
+
+            # ── Step 2b：做空 k0 zoom 進場判定 ─────────────────────────────
+            if short_k0 is not None and i > short_k0_idx:
+                bars_after = i - short_k0_idx
+                if bars_after > self.zoom_bars:
+                    short_k0 = None  # zoom 過期
+                elif k.high > max(short_k0.open, short_k0.close):
+                    short_k0 = None  # 實體高點守護線被破
+                else:
+                    if use_ticks and k.open_time in tick_map:
+                        entered, entry_price, stop_price, target_price = self._tick_entry_short(
+                            k, i, klines, tick_map, signals, short_k0,
+                        )
+                    else:
+                        entered, entry_price, stop_price, target_price = self._bar_entry_short(
+                            k, i, klines, signals, short_k0,
+                        )
+                    if entered:
+                        in_position = True
+                        side = "short"
+                        trailing  = False
+                        td_consec = 0
+                        short_k0 = None
+                        long_k0  = None
                         continue
 
             # ── Step 3：k0 偵測 ─────────────────────────────────────────────
             if not in_position:
                 cur_ticks = tick_map.get(k.open_time) if tick_map is not None else None
-                if self._is_k0_long(k, cur_ticks):
-                    k0 = k
-                    k0_idx = i
+                if self.enable_long and self._is_k0_long(k, cur_ticks):
+                    long_k0     = k
+                    long_k0_idx = i
                     signals.append(StrategySignal(
                         open_time=k.open_time,
                         price=k.low,
                         signal_type="k0_long",
                         label="k0",
+                    ))
+                if self.enable_short and self._is_k0_short(k, cur_ticks):
+                    short_k0     = k
+                    short_k0_idx = i
+                    signals.append(StrategySignal(
+                        open_time=k.open_time,
+                        price=k.high,
+                        signal_type="k0_short",
+                        label="k0s",
                     ))
 
         return signals
@@ -152,9 +219,9 @@ class WickReversalV4Strategy(StrategyBase):
         """
         Bar 模式進場：整根 K 棒 delta_eff > threshold 且突破 k0 實體高點。
         進場價固定為 k0_body_high（含輕度 look-ahead：使用整棒 delta）。
+        停損掛在 k0 K 棒最低點下方（含下影線）。
         """
         k0_body_high = max(k0.open, k0.close)
-        k0_body_low = min(k0.open, k0.close)
         if k.high < k0_body_high:
             return False, 0.0, 0.0, 0.0
         if _kline_delta_eff(k) <= self.long_delta_eff_threshold:
@@ -163,7 +230,7 @@ class WickReversalV4Strategy(StrategyBase):
             return False, 0.0, 0.0, 0.0
 
         entry_p = k0_body_high
-        stop_p = k0_body_low - self.sl_offset
+        stop_p = k0.low - self.sl_offset
         risk = entry_p - stop_p
         if risk <= 0:
             return False, 0.0, 0.0, 0.0
@@ -190,10 +257,11 @@ class WickReversalV4Strategy(StrategyBase):
         """
         Tick 模式進場：遍歷 tick 累計 delta，第一筆價格 > k0 實體高點且
         累計 delta_eff > threshold 時入場。
-        守護線改用 k0 實體低點；Vol SMA 使用前一根已收棒 volume，避免 look-ahead。
+        守護線為 k0 實體低點；停損掛在 k0 K 棒最低點下方（含下影線）。
+        Vol SMA 使用前一根已收棒 volume，避免 look-ahead。
         """
         k0_body_high = max(k0.open, k0.close)
-        k0_body_low = min(k0.open, k0.close)
+        k0_body_low = min(k0.open, k0.close)  # 守護線（進場失效判斷）
 
         ticks = tick_map.get(k.open_time)
         if ticks is None or len(ticks) == 0:
@@ -227,7 +295,7 @@ class WickReversalV4Strategy(StrategyBase):
 
             if price > k0_body_high and cum_delta_eff > self.long_delta_eff_threshold:
                 fill_p = price
-                stop_p = k0_body_low - self.sl_offset
+                stop_p = k0.low - self.sl_offset
                 risk = fill_p - stop_p
                 if risk <= 0:
                     continue
@@ -425,6 +493,303 @@ class WickReversalV4Strategy(StrategyBase):
         target_price: float,
     ) -> bool:
         exited, self._trailing, self._td_consec, self._stop_price = self._bar_exit_long(
+            k, signals, self._stop_price, target_price, self._trailing, self._td_consec,
+        )
+        return exited
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 做空鏡像方法
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # ── 做空 k0 判定 ───────────────────────────────────────────────────────────
+    def _is_k0_short(
+        self,
+        k: Kline,
+        ticks: Optional[np.ndarray] = None,
+    ) -> bool:
+        """
+        做空 k0（做多的鏡像）：
+          - 不看顏色，純形態
+          - 實體位於整根 K 棒下半部（body_high <= mid）
+          - 上影線明顯大於實體（upper_wick > body）
+          - 上影線區域出現吸收（買壓被承接）：delta_eff >= 0
+        """
+        rng = k.high - k.low
+        if rng <= 0:
+            return False
+        if k.volume < self.k0_vol_gate:
+            return False
+        mid = (k.high + k.low) / 2.0
+        body_high = max(k.open, k.close)
+        body = abs(k.close - k.open)
+        upper_wick = k.high - body_high
+        if not (body_high <= mid and upper_wick > 0 and upper_wick > body):
+            return False
+        return self._has_upper_wick_absorption(k, ticks, body_high)
+
+    def _has_upper_wick_absorption(
+        self,
+        k: Kline,
+        ticks: Optional[np.ndarray],
+        body_high: float,
+    ) -> bool:
+        """
+        上影線吸收確認（做空版）：
+          上影線區域買方主動（delta_eff >= min），但價格仍收在實體以下，
+          說明買壓被吸收、做空方佔優。
+        """
+        if ticks is not None and len(ticks) > 0:
+            wick_ticks = ticks[ticks[:, 1] >= body_high]
+            if len(wick_ticks) == 0:
+                return False
+            wick_vol = float(np.sum(wick_ticks[:, 2]))
+            total_vol = float(np.sum(ticks[:, 2]))
+            if wick_vol <= 0 or total_vol <= 0:
+                return False
+            wick_buy_vol = float(np.sum(wick_ticks[wick_ticks[:, 3] < 0.5, 2]))
+            wick_delta = 2.0 * wick_buy_vol - wick_vol
+            wick_delta_eff = wick_delta / wick_vol
+            return (
+                wick_vol / total_vol >= self.upper_wick_absorption_min_vol_ratio
+                and wick_delta_eff >= self.upper_wick_absorption_delta_eff_min
+            )
+        return _kline_delta(k) >= self.upper_wick_absorption_bar_delta_min
+
+    # ── 做空進場：Bar 模式 ─────────────────────────────────────────────────────
+    def _bar_entry_short(
+        self,
+        k: Kline,
+        i: int,
+        klines: List[Kline],
+        signals: List[StrategySignal],
+        k0: Kline,
+    ) -> tuple[bool, float, float, float]:
+        """
+        Bar 模式做空進場：整根 K 棒 delta_eff < -threshold 且跌破 k0 實體低點。
+        進場價固定為 k0_body_low（含輕度 look-ahead）。
+        停損掛在 k0 K 棒最高點上方（含上影線）。
+        """
+        k0_body_low = min(k0.open, k0.close)
+        if k.low > k0_body_low:
+            return False, 0.0, 0.0, 0.0
+        if _kline_delta_eff(k) >= -self.short_delta_eff_threshold:
+            return False, 0.0, 0.0, 0.0
+        if not self._vol_sma_ok(klines, i, k.volume):
+            return False, 0.0, 0.0, 0.0
+
+        entry_p = k0_body_low
+        stop_p  = k0.high + self.sl_offset
+        risk = stop_p - entry_p
+        if risk <= 0:
+            return False, 0.0, 0.0, 0.0
+        target_p = entry_p - risk * self.rr_ratio
+        signals.append(StrategySignal(
+            open_time=k.open_time,
+            price=entry_p,
+            signal_type="short_entry",
+            label="S4",
+            stop_price=stop_p,
+        ))
+        return True, entry_p, stop_p, target_p
+
+    # ── 做空進場：Tick 模式 ────────────────────────────────────────────────────
+    def _tick_entry_short(
+        self,
+        k: Kline,
+        i: int,
+        klines: List[Kline],
+        tick_map: TickBarMap,
+        signals: List[StrategySignal],
+        k0: Kline,
+    ) -> tuple[bool, float, float, float]:
+        """
+        Tick 模式做空進場：遍歷 tick 累計 delta，第一筆價格 < k0 實體低點且
+        累計 delta_eff < -threshold 時入場。
+        守護線為 k0 實體高點；停損掛在 k0 K 棒最高點上方（含上影線）。
+        """
+        k0_body_low  = min(k0.open, k0.close)
+        k0_body_high = max(k0.open, k0.close)  # 守護線
+
+        ticks = tick_map.get(k.open_time)
+        if ticks is None or len(ticks) == 0:
+            return self._bar_entry_short(k, i, klines, signals, k0)
+
+        prev_vol = klines[i - 1].volume if i > 0 else 0.0
+        if not self._vol_sma_ok(klines, i, prev_vol):
+            return False, 0.0, 0.0, 0.0
+
+        cum_buy_vol = 0.0
+        cum_vol     = 0.0
+
+        for t in ticks:
+            price = float(t[1])
+            qty   = float(t[2])
+            is_bm = t[3] > 0.5
+
+            cum_vol += qty
+            if not is_bm:
+                cum_buy_vol += qty
+
+            # 實體高點守護線被破 → 立即失效
+            if price > k0_body_high:
+                return False, 0.0, 0.0, 0.0
+
+            if cum_vol == 0:
+                continue
+
+            cum_delta_eff = (2.0 * cum_buy_vol - cum_vol) / cum_vol
+
+            if price < k0_body_low and cum_delta_eff < -self.short_delta_eff_threshold:
+                fill_p = price
+                stop_p = k0.high + self.sl_offset
+                risk   = stop_p - fill_p
+                if risk <= 0:
+                    continue
+                target_p = fill_p - risk * self.rr_ratio
+                signals.append(StrategySignal(
+                    open_time=k.open_time,
+                    price=k0_body_low,   # 圖表標記基準價
+                    signal_type="short_entry",
+                    label="S4",
+                    stop_price=stop_p,
+                    fill_price=fill_p,   # 實際 tick 成交價
+                ))
+                return True, fill_p, stop_p, target_p
+
+        return False, 0.0, 0.0, 0.0
+
+    # ── 做空出場：Tick 模式 ────────────────────────────────────────────────────
+    def _tick_exit_short(
+        self,
+        k: Kline,
+        tick_map: TickBarMap,
+        signals: List[StrategySignal],
+        target_price: float,
+    ) -> bool:
+        ticks = tick_map.get(k.open_time)
+        if ticks is None or len(ticks) == 0:
+            return self._bar_exit_simple_short(k, signals, target_price)
+
+        cum_buy_vol = 0.0
+        cum_vol     = 0.0
+        cum_delta   = 0.0
+
+        for t in ticks:
+            price = t[1]
+            qty   = t[2]
+            is_bm = t[3] > 0.5
+
+            cum_vol += qty
+            if not is_bm:
+                cum_buy_vol += qty
+            cum_delta = 2.0 * cum_buy_vol - cum_vol
+
+            # SL/TS：價格上漲觸及停損
+            if price >= self._stop_price:
+                label = "TS" if self._trailing else "SL"
+                signals.append(StrategySignal(
+                    open_time=k.open_time,
+                    price=self._stop_price,
+                    signal_type="short_exit",
+                    label=label,
+                    fill_price=price,
+                ))
+                return True
+
+            if self._trailing:
+                continue
+
+            # TP / 切換 trailing：價格下跌觸及目標
+            if price <= target_price:
+                if cum_delta < 0:   # 下跌動能仍在 → 切 trailing
+                    self._trailing   = True
+                    self._stop_price = target_price
+                    self._td_consec  = 0
+                else:               # 動能轉正 → 直接 TP
+                    signals.append(StrategySignal(
+                        open_time=k.open_time,
+                        price=target_price,
+                        signal_type="short_exit",
+                        label="TP",
+                    ))
+                    return True
+
+        # 棒末 trailing TD 判斷：連續 cum_delta >= 0 視為反轉
+        if self._trailing:
+            if cum_delta >= 0:
+                self._td_consec += 1
+                if self._td_consec >= self.td_consec_bars:
+                    signals.append(StrategySignal(
+                        open_time=k.open_time,
+                        price=k.close,
+                        signal_type="short_exit",
+                        label="TD",
+                    ))
+                    return True
+            else:
+                self._td_consec = 0
+
+        return False
+
+    # ── 做空出場：Bar 模式 ─────────────────────────────────────────────────────
+    def _bar_exit_short(
+        self,
+        k: Kline,
+        signals: List[StrategySignal],
+        stop_price: float,
+        target_price: float,
+        trailing: bool,
+        td_consec: int,
+    ) -> tuple[bool, bool, int, float]:
+        # SL/TS：價格上漲觸及停損
+        if k.high >= stop_price:
+            label = "TS" if trailing else "SL"
+            signals.append(StrategySignal(
+                open_time=k.open_time,
+                price=stop_price,
+                signal_type="short_exit",
+                label=label,
+            ))
+            return True, trailing, td_consec, stop_price
+
+        if trailing:
+            # TD：連續反向（delta >= 0 = 買方主導）
+            if _kline_delta(k) >= 0:
+                td_consec += 1
+                if td_consec >= self.td_consec_bars:
+                    signals.append(StrategySignal(
+                        open_time=k.open_time,
+                        price=k.close,
+                        signal_type="short_exit",
+                        label="TD",
+                    ))
+                    return True, trailing, td_consec, stop_price
+            else:
+                td_consec = 0
+        elif k.low <= target_price:
+            # TP / 切換 trailing
+            if _kline_delta(k) < 0:   # 下跌動能仍在
+                trailing   = True
+                stop_price = target_price
+                td_consec  = 0
+            else:
+                signals.append(StrategySignal(
+                    open_time=k.open_time,
+                    price=target_price,
+                    signal_type="short_exit",
+                    label="TP",
+                ))
+                return True, trailing, td_consec, stop_price
+
+        return False, trailing, td_consec, stop_price
+
+    def _bar_exit_simple_short(
+        self,
+        k: Kline,
+        signals: List[StrategySignal],
+        target_price: float,
+    ) -> bool:
+        exited, self._trailing, self._td_consec, self._stop_price = self._bar_exit_short(
             k, signals, self._stop_price, target_price, self._trailing, self._td_consec,
         )
         return exited
