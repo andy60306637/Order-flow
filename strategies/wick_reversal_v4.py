@@ -6,12 +6,12 @@ Long + short, tick-first research variant:
     (no range SMA filter — maximise signal count for initial exploration)
   Long  k0: body in upper half, lower-wick > body, lower-wick zone delta_eff <= 0
   Short k0: body in lower half, upper-wick > body, upper-wick zone delta_eff >= 0
-  - entry triggers inside zoom window (up to zoom_bars=5) after k0
+  - entry triggers inside zoom window (long_zoom_bars / short_zoom_bars) after k0
   - zoom window invalidated when guardian line is breached:
       long:  k.low  < k0_body_low
       short: k.high > k0_body_high
-  - stop: long  → k0.low  - sl_offset
-          short → k0.high + sl_offset
+  - stop: long  → k0.low  - long_sl_offset
+          short → k0.high + short_sl_offset
   - trailing/TP/TS/TD symmetric between long and short
 """
 from __future__ import annotations
@@ -39,22 +39,29 @@ def _kline_delta_eff(k: Kline) -> float:
 class WickReversalV4Strategy(StrategyBase):
     name = "Wick Reversal 1m v4"
 
-    zoom_bars: int = 3                              # k0 後允許進場的最大觀察根數
-    sl_offset: float = 10.0                         # 固定停損位移
-    rr_ratio: float = 2.0                           # 盈虧比
-    td_consec_bars: int = 2                         # 連續反向 delta 才觸發 TD
-    k0_vol_gate: float = 50.0                       # k0 最低成交量門檻
     # ── 做多參數 ──────────────────────────────────────────────────────────────
     enable_long: bool = True                        # 啟用做多
-    long_delta_eff_threshold: float = 0.0           # 做多進場 delta_eff 門檻
+    long_zoom_bars: int = 3                         # k0 後允許進場的最大觀察根數
+    long_sl_offset: float = 10.0                    # 固定停損位移
+    long_rr_ratio: float = 2.0                      # 盈虧比
+    long_td_consec_bars: int = 2                    # 連續反向 delta 才觸發 TD
+    long_k0_vol_gate: float = 50.0                  # k0 最低成交量門檻
+    long_delta_eff_threshold: float = 0.0           # 進場 delta_eff 門檻
     long_vol_sma_period: int = 20                   # 成交量 SMA 窗期；0=不過濾
     long_vol_sma_mult: float = 1.2                  # 成交量門標倍率
     lower_wick_absorption_delta_eff_max: float = 0.0
     lower_wick_absorption_min_vol_ratio: float = 0.15
     lower_wick_absorption_bar_delta_max: float = 0.0
     # ── 做空參數（鏡像）──────────────────────────────────────────────────────
-    enable_short: bool = False                       # 啟用做空
-    short_delta_eff_threshold: float = 0.0          # 做空進場 delta_eff 門檻（負向）
+    enable_short: bool = True                      # 啟用做空
+    short_zoom_bars: int = 3                        # k0 後允許進場的最大觀察根數
+    short_sl_offset: float = 10.0                   # 固定停損位移
+    short_rr_ratio: float = 1.0                     # 盈虧比
+    short_td_consec_bars: int = 2                   # 連續反向 delta 才觸發 TD
+    short_k0_vol_gate: float = 50.0                 # k0 最低成交量門檻
+    short_delta_eff_threshold: float = 0.0          # 進場 delta_eff 門檻（負向）
+    short_vol_sma_period: int = 20                  # 成交量 SMA 窗期；0=不過濾
+    short_vol_sma_mult: float = 1.2                 # 成交量門標倍率
     upper_wick_absorption_delta_eff_min: float = 0.0
     upper_wick_absorption_min_vol_ratio: float = 0.15
     upper_wick_absorption_bar_delta_min: float = 0.0
@@ -136,7 +143,7 @@ class WickReversalV4Strategy(StrategyBase):
             # ── Step 2a：做多 k0 zoom 進場判定 ─────────────────────────────
             if long_k0 is not None and i > long_k0_idx:
                 bars_after = i - long_k0_idx
-                if bars_after > self.zoom_bars:
+                if bars_after > self.long_zoom_bars:
                     long_k0 = None   # zoom 過期
                 elif k.low < min(long_k0.open, long_k0.close):
                     long_k0 = None   # 實體低點守護線被破
@@ -161,7 +168,7 @@ class WickReversalV4Strategy(StrategyBase):
             # ── Step 2b：做空 k0 zoom 進場判定 ─────────────────────────────
             if short_k0 is not None and i > short_k0_idx:
                 bars_after = i - short_k0_idx
-                if bars_after > self.zoom_bars:
+                if bars_after > self.short_zoom_bars:
                     short_k0 = None  # zoom 過期
                 elif k.high > max(short_k0.open, short_k0.close):
                     short_k0 = None  # 實體高點守護線被破
@@ -226,15 +233,15 @@ class WickReversalV4Strategy(StrategyBase):
             return False, 0.0, 0.0, 0.0
         if _kline_delta_eff(k) <= self.long_delta_eff_threshold:
             return False, 0.0, 0.0, 0.0
-        if not self._vol_sma_ok(klines, i, k.volume):
+        if not self._vol_sma_ok(klines, i, k.volume, self.long_vol_sma_period, self.long_vol_sma_mult):
             return False, 0.0, 0.0, 0.0
 
         entry_p = k0_body_high
-        stop_p = k0.low - self.sl_offset
+        stop_p = k0.low - self.long_sl_offset
         risk = entry_p - stop_p
         if risk <= 0:
             return False, 0.0, 0.0, 0.0
-        target_p = entry_p + risk * self.rr_ratio
+        target_p = entry_p + risk * self.long_rr_ratio
         signals.append(StrategySignal(
             open_time=k.open_time,
             price=entry_p,
@@ -269,7 +276,7 @@ class WickReversalV4Strategy(StrategyBase):
 
         # Vol SMA 前置檢查：用前一根已收棒避免 look-ahead
         prev_vol = klines[i - 1].volume if i > 0 else 0.0
-        if not self._vol_sma_ok(klines, i, prev_vol):
+        if not self._vol_sma_ok(klines, i, prev_vol, self.long_vol_sma_period, self.long_vol_sma_mult):
             return False, 0.0, 0.0, 0.0
 
         cum_buy_vol = 0.0
@@ -295,11 +302,11 @@ class WickReversalV4Strategy(StrategyBase):
 
             if price > k0_body_high and cum_delta_eff > self.long_delta_eff_threshold:
                 fill_p = price
-                stop_p = k0.low - self.sl_offset
+                stop_p = k0.low - self.long_sl_offset
                 risk = fill_p - stop_p
                 if risk <= 0:
                     continue
-                target_p = fill_p + risk * self.rr_ratio
+                target_p = fill_p + risk * self.long_rr_ratio
                 signals.append(StrategySignal(
                     open_time=k.open_time,
                     price=k0_body_high,  # 圖表標記基準價
@@ -321,7 +328,7 @@ class WickReversalV4Strategy(StrategyBase):
         rng = k.high - k.low
         if rng <= 0:
             return False
-        if k.volume < self.k0_vol_gate:
+        if k.volume < self.long_k0_vol_gate:
             return False
         mid = (k.high + k.low) / 2.0
         body_low = min(k.open, k.close)
@@ -355,17 +362,17 @@ class WickReversalV4Strategy(StrategyBase):
         return _kline_delta(k) <= self.lower_wick_absorption_bar_delta_max
 
     # ── Vol SMA 工具 ───────────────────────────────────────────────────────────
-    def _vol_sma_ok(self, klines: List[Kline], cur_idx: int, cur_vol: float) -> bool:
+    def _vol_sma_ok(self, klines: List[Kline], cur_idx: int, cur_vol: float,
+                    period: int, mult: float) -> bool:
         """
         SMA 窗口為 klines[cur_idx-period .. cur_idx-1]（不含 cur_idx）。
         bar 模式傳 k.volume；tick 模式傳 klines[i-1].volume，避免 look-ahead。
         """
-        period = self.long_vol_sma_period
         if period <= 0 or cur_idx < period:
             return True
         s = cur_idx - period
         sma = sum(klines[j].volume for j in range(s, cur_idx)) / period
-        return cur_vol > sma * self.long_vol_sma_mult
+        return cur_vol > sma * mult
 
     # ── 出場：Tick 模式 ────────────────────────────────────────────────────────
     def _tick_exit_long(
@@ -424,7 +431,7 @@ class WickReversalV4Strategy(StrategyBase):
         if self._trailing:
             if cum_delta <= 0:
                 self._td_consec += 1
-                if self._td_consec >= self.td_consec_bars:
+                if self._td_consec >= self.long_td_consec_bars:
                     signals.append(StrategySignal(
                         open_time=k.open_time,
                         price=k.close,
@@ -460,7 +467,7 @@ class WickReversalV4Strategy(StrategyBase):
         if trailing:
             if _kline_delta(k) <= 0:
                 td_consec += 1
-                if td_consec >= self.td_consec_bars:
+                if td_consec >= self.long_td_consec_bars:
                     signals.append(StrategySignal(
                         open_time=k.open_time,
                         price=k.close,
@@ -517,7 +524,7 @@ class WickReversalV4Strategy(StrategyBase):
         rng = k.high - k.low
         if rng <= 0:
             return False
-        if k.volume < self.k0_vol_gate:
+        if k.volume < self.short_k0_vol_gate:
             return False
         mid = (k.high + k.low) / 2.0
         body_high = max(k.open, k.close)
@@ -574,15 +581,15 @@ class WickReversalV4Strategy(StrategyBase):
             return False, 0.0, 0.0, 0.0
         if _kline_delta_eff(k) >= -self.short_delta_eff_threshold:
             return False, 0.0, 0.0, 0.0
-        if not self._vol_sma_ok(klines, i, k.volume):
+        if not self._vol_sma_ok(klines, i, k.volume, self.short_vol_sma_period, self.short_vol_sma_mult):
             return False, 0.0, 0.0, 0.0
 
         entry_p = k0_body_low
-        stop_p  = k0.high + self.sl_offset
+        stop_p  = k0.high + self.short_sl_offset
         risk = stop_p - entry_p
         if risk <= 0:
             return False, 0.0, 0.0, 0.0
-        target_p = entry_p - risk * self.rr_ratio
+        target_p = entry_p - risk * self.short_rr_ratio
         signals.append(StrategySignal(
             open_time=k.open_time,
             price=entry_p,
@@ -615,7 +622,7 @@ class WickReversalV4Strategy(StrategyBase):
             return self._bar_entry_short(k, i, klines, signals, k0)
 
         prev_vol = klines[i - 1].volume if i > 0 else 0.0
-        if not self._vol_sma_ok(klines, i, prev_vol):
+        if not self._vol_sma_ok(klines, i, prev_vol, self.short_vol_sma_period, self.short_vol_sma_mult):
             return False, 0.0, 0.0, 0.0
 
         cum_buy_vol = 0.0
@@ -641,11 +648,11 @@ class WickReversalV4Strategy(StrategyBase):
 
             if price < k0_body_low and cum_delta_eff < -self.short_delta_eff_threshold:
                 fill_p = price
-                stop_p = k0.high + self.sl_offset
+                stop_p = k0.high + self.short_sl_offset
                 risk   = stop_p - fill_p
                 if risk <= 0:
                     continue
-                target_p = fill_p - risk * self.rr_ratio
+                target_p = fill_p - risk * self.short_rr_ratio
                 signals.append(StrategySignal(
                     open_time=k.open_time,
                     price=k0_body_low,   # 圖表標記基準價
@@ -718,7 +725,7 @@ class WickReversalV4Strategy(StrategyBase):
         if self._trailing:
             if cum_delta >= 0:
                 self._td_consec += 1
-                if self._td_consec >= self.td_consec_bars:
+                if self._td_consec >= self.short_td_consec_bars:
                     signals.append(StrategySignal(
                         open_time=k.open_time,
                         price=k.close,
@@ -756,7 +763,7 @@ class WickReversalV4Strategy(StrategyBase):
             # TD：連續反向（delta >= 0 = 買方主導）
             if _kline_delta(k) >= 0:
                 td_consec += 1
-                if td_consec >= self.td_consec_bars:
+                if td_consec >= self.short_td_consec_bars:
                     signals.append(StrategySignal(
                         open_time=k.open_time,
                         price=k.close,
