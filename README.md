@@ -18,6 +18,8 @@ A real-time order flow analysis desktop application for Binance USDT-M Futures, 
 | **Stats Panel** | Per-candle Volume / Delta / CVD numeric summary |
 | **Order Book (Level 2)** | Real-time bid/ask ladder with price-weighted color depth |
 | **OB Heatmap** | Time-series order book heatmap showing liquidity distribution |
+| **Tick-Level Backtest** | Bar or tick mode strategy simulation from local aggTrades zip files |
+| **Background Tick Cache Worker** | Pre-parses aggTrades zip files into NPZ cache so UI loads instantly |
 
 ### Footprint Modes
 - **BidxAsk** — Left column = taker sell, right column = taker buy; dominance coloring
@@ -47,6 +49,7 @@ OrderFlow/
 │   ├── cvd_calculator.py    # CVD accumulator with history seeding
 │   ├── footprint_builder.py # Footprint candle builder (tick-size bucketing)
 │   ├── order_book.py        # Level-2 order book with diff application
+│   ├── tick_cache.py        # aggTrades NPZ cache (load/save/merge/build_bar_map)
 │   └── data_types.py        # Dataclasses: Trade, Kline, FootprintCandle, etc.
 │
 ├── ui/
@@ -57,8 +60,21 @@ OrderFlow/
 │   ├── order_book_widget.py # OrderBookWidget (Level 2 ladder)
 │   └── heatmap_widget.py    # HeatmapWidget (OB time-series heatmap)
 │
-└── utils/
-    └── time_utils.py        # Timezone-aware time formatting (UTC+8)
+├── strategies/
+│   ├── base.py              # StrategyBase + StrategySignal dataclass
+│   ├── wick_reversal_v4.py  # Wick Reversal 1m v4 (long + short, tick-first)
+│   └── __init__.py          # STRATEGY_REGISTRY
+│
+├── backtest/
+│   └── engine.py            # simulate_trades — fee / slippage / drawdown accounting
+│
+├── utils/
+│   ├── tick_data_backtest.py  # CLI: run strategy on local aggTrades zip files
+│   ├── tick_cache_worker.py   # Background worker: zip → NPZ cache (incremental)
+│   └── time_utils.py          # Timezone-aware time formatting (UTC+8)
+│
+└── data/
+    └── ticks/               # Auto-created; stores {SYMBOL}_ticks.npz + manifest
 ```
 
 ### Threading Model
@@ -71,8 +87,22 @@ Main Thread (Qt)
 │           ├── REST: fetch kline history + OB snapshot + aggTrade history
 │           └── WebSocket: kline stream + aggTrade stream + depth stream
 │
-└── HistoryProcessorThread (QThread)
-      └── Background aggTrade → Footprint bucketing (bisect O(N log M))
+├── HistoryProcessorThread (QThread)
+│     └── Background aggTrade → Footprint bucketing (bisect O(N log M))
+│
+└── TickImportThread (QThread)       ← triggered by toolbar "匯入 Tick" button
+      └── merge_and_save_array → data/ticks/{SYMBOL}_ticks.npz
+```
+
+**Background tick cache worker** (separate process, optional):
+```
+tick_cache_worker.py  ──parse zips──►  data/ticks/{SYMBOL}_ticks.npz
+                                                    │
+                              UI opens / runs backtest in Tick mode
+                                                    │
+                                        tick_cache.load_range()
+                                        build_bar_map()
+                                        _build_klines_from_ticks()
 ```
 
 All data flows from worker threads to the main thread exclusively via Qt signals, guaranteeing thread safety without explicit locking.
@@ -103,6 +133,7 @@ pyqtgraph>=0.13.3
 websockets>=11.0
 aiohttp>=3.9.0
 numpy>=1.24.0
+pandas>=1.5.0   # optional but recommended — 10-50x faster zip parsing
 ```
 
 ---
@@ -148,12 +179,66 @@ Edit [`config.py`](config.py) to customize:
 
 ## Usage
 
+### Real-time UI
+
 1. **Select symbol and interval** from the toolbar dropdowns
 2. **Switch between K-Line and Footprint** using the tab bar
 3. **Switch Footprint mode** (BidxAsk / Delta / Volume / Imbalance) from the toolbar
 4. **Toggle Log scale** on the K-line Y-axis with the `Log` button
 5. **Scroll / zoom** the X-axis freely — all charts (K-Line, Footprint, CVD, Stats) stay synchronized
 6. The chart **auto-scrolls** only when you are viewing the latest candles; manually scrolled views stay in place
+
+### Tick-Level Backtest (CLI)
+
+Download daily aggTrades zip files from [data.binance.vision](https://data.binance.vision/?prefix=data/futures/um/daily/aggTrades/) and run:
+
+```bash
+# First run — parses zips and builds NPZ cache (~1-3 min for 90 days)
+python utils/tick_data_backtest.py \
+    --symbol BTCUSDT \
+    --tick-dir "tick_data/binance/futures/um/daily/aggTrades/BTCUSDT"
+
+# Subsequent runs — loads from NPZ cache (~5-30 sec)
+python utils/tick_data_backtest.py \
+    --symbol BTCUSDT \
+    --tick-dir "tick_data/binance/futures/um/daily/aggTrades/BTCUSDT"
+
+# Force rebuild cache
+python utils/tick_data_backtest.py ... --rebuild-cache
+```
+
+### Background Tick Cache Worker
+
+Pre-parse zip files in the background so the UI and backtest CLI load instantly:
+
+```bash
+# Parse all pending zips once and exit
+python utils/tick_cache_worker.py \
+    --symbol BTCUSDT \
+    --tick-dir "tick_data/binance/futures/um/daily/aggTrades/BTCUSDT"
+
+# Watch mode — re-scan every 60 s, picks up newly downloaded zips automatically
+python utils/tick_cache_worker.py \
+    --symbol BTCUSDT \
+    --tick-dir "tick_data/binance/futures/um/daily/aggTrades/BTCUSDT" \
+    --watch --interval 60
+
+# Multiple symbols via config file
+python utils/tick_cache_worker.py --config worker_config.json --watch
+```
+
+`worker_config.json` example:
+```json
+[
+  {"symbol": "BTCUSDT", "tick_dir": "tick_data/binance/futures/um/daily/aggTrades/BTCUSDT"},
+  {"symbol": "ETHUSDT", "tick_dir": "tick_data/binance/futures/um/daily/aggTrades/ETHUSDT"}
+]
+```
+
+Once the worker has run, open the UI and select **Tick 模式** in the backtest panel — the cached data is loaded automatically with no further import step required. If the worker updated the cache while the UI was open, switch the symbol and switch back (or reopen) to pick up the latest data.
+
+**Cache location:** `data/ticks/{SYMBOL}_ticks.npz`  
+**Manifest:** `data/ticks/{SYMBOL}_manifest.json` — tracks which zips have been processed; only new or modified zips are re-parsed on subsequent runs.
 
 ---
 

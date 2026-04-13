@@ -41,19 +41,21 @@ class WickReversalV4Strategy(StrategyBase):
 
     # ── 做多參數 ──────────────────────────────────────────────────────────────
     enable_long: bool = True                        # 啟用做多
-    long_zoom_bars: int = 3                         # k0 後允許進場的最大觀察根數
+    long_zoom_bars: int = 1                         # k0 後允許進場的最大觀察根數
     long_sl_offset: float = 10.0                    # 固定停損位移
-    long_rr_ratio: float = 2.0                      # 盈虧比
+    long_rr_ratio: float = 2                      # 盈虧比
     long_td_consec_bars: int = 2                    # 連續反向 delta 才觸發 TD
     long_k0_vol_gate: float = 50.0                  # k0 最低成交量門檻
+    # long_k0_vol_gate: float = 70.0                  # k0 最低成交量門檻
     long_delta_eff_threshold: float = 0.0           # 進場 delta_eff 門檻
     long_vol_sma_period: int = 20                   # 成交量 SMA 窗期；0=不過濾
+    # long_vol_sma_period: int = 0                   # 成交量 SMA 窗期；0=不過濾
     long_vol_sma_mult: float = 1.2                  # 成交量門標倍率
     lower_wick_absorption_delta_eff_max: float = 0.0
     lower_wick_absorption_min_vol_ratio: float = 0.15
     lower_wick_absorption_bar_delta_max: float = 0.0
     # ── 做空參數（鏡像）──────────────────────────────────────────────────────
-    enable_short: bool = True                      # 啟用做空
+    enable_short: bool = False                      # 啟用做空
     short_zoom_bars: int = 3                        # k0 後允許進場的最大觀察根數
     short_sl_offset: float = 10.0                   # 固定停損位移
     short_rr_ratio: float = 1.0                     # 盈虧比

@@ -52,11 +52,15 @@ def load_raw(symbol: str) -> tuple[np.ndarray | None, dict | None]:
 
 def save_raw(symbol: str, data: np.ndarray,
              start_ms: int, end_ms: int) -> bool:
-    """全量寫入快取。"""
+    """全量寫入快取（原子寫入：先寫 .tmp 再 rename，避免讀寫競爭造成損毀）。"""
     path = cache_path(symbol)
+    # np.savez_compressed 只在路徑不含 .npz 時才補後綴，
+    # 因此 tmp 必須已含 .npz，否則 rename 會找不到檔案。
+    tmp  = path.with_name(path.stem + "_writing.npz")
     try:
         meta = np.array([start_ms, end_ms], dtype=np.float64)
-        np.savez_compressed(str(path), data=data, meta=meta)
+        np.savez_compressed(str(tmp), data=data, meta=meta)
+        tmp.replace(path)          # 原子 rename：讀端永遠看到完整檔案
         size_mb = path.stat().st_size / 1_048_576
         logger.info(
             "tick_cache saved %d ticks → %s (%.1f MB)",
@@ -65,6 +69,7 @@ def save_raw(symbol: str, data: np.ndarray,
         return True
     except Exception as exc:
         logger.error("tick_cache save error [%s]: %s", path.name, exc)
+        tmp.unlink(missing_ok=True)
         return False
 
 

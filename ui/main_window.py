@@ -1561,43 +1561,46 @@ class MainWindow(QMainWindow):
         use_tick = self._bt_mode_combo.currentIndex() == 1
 
         if use_tick:
-            # ── Tick 模式：以 tick 快取的時間範圍裁切 K 棒 ────────────────
+            # ── Tick 模式：以 tick 快取的起訖時間（或使用者自訂區間）決定回測範圍 ──
+            # K 棒由 _execute_backtest 從 tick 重建，不依賴 self._loaded_klines
             ti = tick_cache.info(self._symbol)
             if not ti:
                 self._status_lbl.setText(
                     "⚠ Tick 模式：無 Tick 快取，請先匯入 aggTrades 檔案"
                 )
                 return
-            tick_start = ti["start_ms"]
-            tick_end   = ti["end_ms"]
-            interval_ms = _interval_ms(self._interval)
-            # 篩選 open_time 落在 tick 快取範圍內的 K 棒
-            bt_klines = [
-                k for k in self._loaded_klines
-                if k.open_time >= tick_start
-                and k.open_time + interval_ms <= tick_end + interval_ms
-            ]
-            if not bt_klines:
-                # 記憶體中的 K 棒不覆蓋 tick 範圍 → 嘗試從 kline 快取補
-                cached = kline_cache.load(self._symbol, self._interval)
-                if cached:
-                    from core.data_types import Kline as _Kline
-                    all_k = [
-                        _Kline.from_rest(self._symbol, self._interval, r)
-                        for r in cached
-                    ]
-                    bt_klines = [
-                        k for k in all_k
-                        if k.open_time >= tick_start
-                        and k.open_time + interval_ms <= tick_end + interval_ms
-                    ]
-                if not bt_klines:
-                    self._status_lbl.setText(
-                        "⚠ Tick 模式：K 棒資料未覆蓋 Tick 快取範圍，"
-                        "請先在 Bar 模式下預載對應時段的 K 棒"
-                    )
+
+            range_label = self._bt_range_combo.currentText()
+            if range_label == "🗓 自訂時間...":
+                # 以 tick 快取的實際範圍預設日期對話框
+                from PyQt6.QtCore import QDateTime
+                dlg = BarDateRangeDialog(self)
+                # 預設為 tick 快取的起訖時間
+                dlg.start_edit.setDateTime(
+                    QDateTime.fromMSecsSinceEpoch(int(ti["start_ms"]))
+                )
+                dlg.end_edit.setDateTime(
+                    QDateTime.fromMSecsSinceEpoch(int(ti["end_ms"]))
+                )
+                if dlg.exec() != QDialog.DialogCode.Accepted:
                     return
-            self._execute_backtest(klines=bt_klines)
+                start_ms, end_ms = dlg.get_range_ms()
+                if start_ms >= end_ms:
+                    self._status_lbl.setText("⚠ 起始時間需早於結束時間")
+                    return
+                # 限制在快取實際範圍內
+                start_ms = max(start_ms, ti["start_ms"])
+                end_ms   = min(end_ms,   ti["end_ms"])
+                if start_ms >= end_ms:
+                    self._status_lbl.setText("⚠ 選取時間超出 Tick 快取範圍")
+                    return
+                self._execute_backtest(tick_start_ms=start_ms, tick_end_ms=end_ms)
+            else:
+                # 全部：使用 tick 快取完整範圍
+                self._execute_backtest(
+                    tick_start_ms=ti["start_ms"],
+                    tick_end_ms=ti["end_ms"],
+                )
         else:
             # ── Bar 模式：原始邏輯 ──────────────────────────────────────
             range_label = self._bt_range_combo.currentText()
@@ -1700,17 +1703,36 @@ class MainWindow(QMainWindow):
         if self._strategy_engine:
             self._execute_backtest()
 
-    def _execute_backtest(self, klines: list | None = None) -> None:
-        """執行回測並顯示結果。klines 為 None 時使用 self._loaded_klines。"""
+    def _execute_backtest(
+        self,
+        klines: list | None = None,
+        tick_start_ms: int | None = None,
+        tick_end_ms:   int | None = None,
+    ) -> None:
+        """執行回測並顯示結果。
+
+        tick_start_ms / tick_end_ms 由 tick 模式直接傳入 tick 快取的起訖時間，
+        讓回測範圍不受 self._loaded_klines 的筆數限制。
+        klines 為 None 且未傳 tick 範圍時，使用 self._loaded_klines。
+        """
         bt_klines = klines if klines is not None else self._loaded_klines
 
         # ── 依模式決定是否載入 tick_map ────────────────────────────────
         tick_map = None
         tick_coverage_pct = 0.0
         use_tick_mode = self._bt_mode_combo.currentIndex() == 1
-        if use_tick_mode and bt_klines:
-            start_ms = bt_klines[0].open_time
-            end_ms   = bt_klines[-1].open_time + _interval_ms(self._interval)
+        if use_tick_mode:
+            # tick_start_ms/tick_end_ms 由呼叫方直接提供（完整 tick 快取範圍）；
+            # 若未提供則回退到 bt_klines 的時間範圍（向後相容）。
+            if tick_start_ms is not None:
+                start_ms = tick_start_ms
+                end_ms   = tick_end_ms
+            elif bt_klines:
+                start_ms = bt_klines[0].open_time
+                end_ms   = bt_klines[-1].open_time + _interval_ms(self._interval)
+            else:
+                self._status_lbl.setText("⚠ Tick 模式：無 K 棒資料可回測")
+                return
             ticks = tick_cache.load_range(self._symbol, start_ms, end_ms)
             if len(ticks) > 0:
                 # ── 從 tick 重建 kline，確保 tick/kline 完全一致 ──────
@@ -1944,6 +1966,7 @@ class MainWindow(QMainWindow):
                 self._bt_range_combo.addItem(
                     f"全部 ({s}~{e}, {span_days:.0f}天)"
                 )
+                self._bt_range_combo.addItem("🗓 自訂時間...")
             else:
                 self._bt_range_combo.addItem("⚠ 無 Tick 資料")
 
