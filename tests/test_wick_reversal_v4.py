@@ -126,7 +126,7 @@ class TestWickReversalV4(unittest.TestCase):
         entries = [s for s in signals if s.signal_type == "long_entry"]
 
         self.assertEqual(len(entries), 1)
-        expected_stop = k0.low - strat.sl_offset
+        expected_stop = k0.low - strat.long_sl_offset
         self.assertAlmostEqual(entries[0].stop_price, expected_stop)
 
     def test_bar_entry_fails_if_structure_broken(self):
@@ -142,6 +142,7 @@ class TestWickReversalV4(unittest.TestCase):
     def test_bar_entry_fails_if_no_breakout(self):
         """k.high < k0_body_high 時不進場，k0 仍保持有效，下一根再試。"""
         strat = self._make_strat()
+        strat.long_zoom_bars = 2
         # k0_body_high = max(100,108) = 108
         k0 = _k(0, 100.0, 110.0, 90.0, 108.0)
         no_break = _k(1, 107.0, 107.8, 106.5, 107.0, vol=120.0, tbv=90.0)  # high=107.8 < body_high=108
@@ -196,7 +197,7 @@ class TestWickReversalV4(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].price, k0_body_high)      # 圖表基準價 = k0_body_high
         self.assertAlmostEqual(entries[0].fill_price, 108.3)  # 第一筆穿越 body_high 的 tick
-        expected_stop = k0.low - strat.sl_offset               # 停損 = k0 整根最低點 - offset
+        expected_stop = k0.low - strat.long_sl_offset               # 停損 = k0 整根最低點 - offset
         self.assertAlmostEqual(entries[0].stop_price, expected_stop)
 
     def test_tick_entry_invalidates_if_structure_broken_first(self):
@@ -299,6 +300,7 @@ class TestWickReversalV4(unittest.TestCase):
     def test_k0_short_is_color_agnostic(self):
         """不看顏色，實體在下半部且有明顯上影線即可作為 short k0。"""
         strat = self._make_strat()
+        strat.enable_short = True
         # body_high=95<=mid=99, upper_wick=15>body=3, delta=0>=0
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
         next_bar = _k(1, 93.0, 94.0, 89.0, 91.0, tbv=10.0)  # 不觸發進場
@@ -312,6 +314,7 @@ class TestWickReversalV4(unittest.TestCase):
     def test_k0_short_requires_absorption_without_ticks(self):
         """無 tick 時，若整根 bar delta 偏賣方（< 0），不視為上影線吸收，不應為 short k0。"""
         strat = self._make_strat()
+        strat.enable_short = True
         # delta = 2*10-100 = -80 < upper_wick_absorption_bar_delta_min(0) → fail
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0, vol=100.0, tbv=10.0)
         next_bar = _k(1, 93.0, 94.0, 89.0, 91.0)
@@ -325,6 +328,7 @@ class TestWickReversalV4(unittest.TestCase):
     def test_bar_entry_short_triggers_in_zoom_window(self):
         """zoom 窗口內跌破 k0_body_low 且 delta_eff 達標即做空，進場基準為 k0_body_low。"""
         strat = self._make_strat()
+        strat.enable_short = True
         # k0: body_low=92, body_high=95, k0.high=110
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
         # entry: k.low=88<=body_low=92, delta_eff<0 (bearish)
@@ -342,6 +346,7 @@ class TestWickReversalV4(unittest.TestCase):
     def test_bar_entry_short_stop_is_k0_high_plus_offset(self):
         """做空停損為 k0.high（含上影線）+ sl_offset，非 k0_body_high。"""
         strat = self._make_strat()
+        strat.enable_short = True
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
         entry_bar = _k(1, 91.5, 92.3, 86.0, 88.0, vol=120.0, tbv=10.0)
 
@@ -349,12 +354,13 @@ class TestWickReversalV4(unittest.TestCase):
         entries = [s for s in signals if s.signal_type == "short_entry"]
 
         self.assertEqual(len(entries), 1)
-        expected_stop = k0.high + strat.sl_offset   # 110 + 10 = 120（含上影線）
+        expected_stop = k0.high + strat.short_sl_offset   # 110 + 10 = 120（含上影線）
         self.assertAlmostEqual(entries[0].stop_price, expected_stop)
 
     def test_bar_entry_short_fails_if_guardian_broken(self):
         """k.high > k0_body_high 表示守護線被破，k0 失效，不進場。"""
         strat = self._make_strat()
+        strat.enable_short = True
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
         # k.high=96 > k0_body_high=95 → guardian broken
         broken_bar = _k(1, 93.0, 96.0, 86.0, 88.0, vol=120.0, tbv=10.0)
@@ -366,6 +372,7 @@ class TestWickReversalV4(unittest.TestCase):
     def test_bar_entry_short_fails_if_no_breakdown(self):
         """k.low > k0_body_low 時不進場，k0 仍保持有效，下一根再試。"""
         strat = self._make_strat()
+        strat.enable_short = True
         # k0_body_low = 92
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
         no_break = _k(1, 92.5, 94.0, 92.3, 93.0, vol=100.0, tbv=10.0)  # low=92.3 > 92
@@ -380,7 +387,8 @@ class TestWickReversalV4(unittest.TestCase):
     def test_bar_entry_short_expires_after_zoom(self):
         """超出 zoom_bars 後做空 k0 失效。"""
         strat = self._make_strat()
-        strat.zoom_bars = 2
+        strat.enable_short = True
+        strat.short_zoom_bars = 2
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
         bars = [
             k0,
@@ -398,6 +406,7 @@ class TestWickReversalV4(unittest.TestCase):
         """tick 模式：第一筆 < k0_body_low 且 cum_delta_eff < -threshold 時，以 tick 價入場。
         停損為 k0.high（含上影線）+ sl_offset，非 k0_body_high。"""
         strat = self._make_strat()
+        strat.enable_short = True
         strat.short_delta_eff_threshold = 0.3
         # k0: body_low=92, body_high=95, k0.high=110
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
@@ -420,12 +429,13 @@ class TestWickReversalV4(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].price, k0_body_low)       # 圖表基準 = k0_body_low
         self.assertAlmostEqual(entries[0].fill_price, 91.5)   # 第一筆穿越 body_low 的 tick
-        expected_stop = k0.high + strat.sl_offset              # 110 + 10 = 120
+        expected_stop = k0.high + strat.short_sl_offset              # 110 + 10 = 120
         self.assertAlmostEqual(entries[0].stop_price, expected_stop)
 
     def test_tick_entry_short_invalidates_if_guardian_broken_first(self):
         """tick 先突破 k0_body_high（守護線），即使後來再跌破 k0_body_low 也不進場。"""
         strat = self._make_strat()
+        strat.enable_short = True
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
         entry_bar = _k(1, 93.0, 97.0, 86.0, 88.0)
 
@@ -445,7 +455,8 @@ class TestWickReversalV4(unittest.TestCase):
     def test_sl_exit_short_bar_mode(self):
         """Bar 模式做空：k.high >= stop_price 觸發 SL。"""
         strat = self._make_strat()
-        # k0: k0.high=110, stop=120, entry=92, risk=28, target=92-28*1.5=50
+        strat.enable_short = True
+        # k0: k0.high=110, stop=120, entry=92, risk=28, target=92-28*1.0=64
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
         entry_bar = _k(1, 91.5, 92.3, 86.0, 88.0, vol=120.0, tbv=10.0)
         sl_bar = _k(2, 119.0, 121.0, 118.0, 120.5)  # high=121 >= stop=120 → SL
@@ -460,16 +471,234 @@ class TestWickReversalV4(unittest.TestCase):
     def test_tp_exit_short_bar_mode(self):
         """Bar 模式做空：k.low <= target_price 且 delta >= 0 → TP。"""
         strat = self._make_strat()
-        # entry=92, stop=120, risk=28, rr=1.5 → target=92-42=50
+        strat.enable_short = True
+        # k0 wick: upper_wick=15, body=3, ratio=5.0 → A-grade, rr=2.0
+        # entry=92, stop=120, risk=28, rr=2.0 → target=92-56=36
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
         entry_bar = _k(1, 91.5, 92.3, 86.0, 88.0, vol=120.0, tbv=10.0)
-        tp_bar = _k(2, 51.0, 53.0, 48.0, 50.5, vol=100.0, tbv=50.0)  # delta=0, low=48<=50→TP
+        tp_bar = _k(2, 37.0, 39.0, 34.0, 36.5, vol=100.0, tbv=50.0)  # delta=0, low=34<=36→TP
 
         signals = strat.on_history([k0, entry_bar, tp_bar])
         exits = [s for s in signals if s.signal_type == "short_exit"]
 
         self.assertEqual(len(exits), 1)
         self.assertEqual(exits[0].label, "TP")
+
+
+    # ════════════════════════════════════════════════════════════════
+    # Fee Filter + Dynamic RR 測試
+    # ════════════════════════════════════════════════════════════════
+
+    # ── _round_trip_cost ─────────────────────────────────────────────────────
+
+    def test_round_trip_cost_btc_84000(self):
+        """BTC 84000 的 round trip cost 為 57.12。"""
+        strat = self._make_strat()
+        cost = strat._round_trip_cost(84000.0)
+        self.assertAlmostEqual(cost, 57.12, places=4)
+
+    def test_round_trip_cost_formula(self):
+        """公式：2 * (taker_fee + slippage) * price。"""
+        strat = self._make_strat()
+        # 0.00032 + 0.00002 = 0.00034, * 2 = 0.00068
+        cost = strat._round_trip_cost(100.0)
+        self.assertAlmostEqual(cost, 0.068, places=6)
+
+    # ── _classify_long_k0_wick ───────────────────────────────────────────────
+
+    def test_classify_long_wick_type_a(self):
+        """lower_wick/body >= 4.0 → A。"""
+        strat = self._make_strat()
+        # body=2, lower_wick=8, ratio=4.0 → A
+        k0 = _k(0, 108.0, 110.0, 100.0, 110.0, vol=100.0, tbv=50.0)
+        # body=|110-108|=2, lower_wick=min(108,110)-100=108-100=8
+        self.assertEqual(strat._classify_long_k0_wick(k0), "A")
+
+    def test_classify_long_wick_type_b(self):
+        """3.0 <= lower_wick/body < 4.0 → B。"""
+        strat = self._make_strat()
+        # body=3, lower_wick=10, ratio=3.33 → B
+        k0 = _k(0, 107.0, 110.0, 97.0, 110.0, vol=100.0, tbv=50.0)
+        # body=|110-107|=3, lower_wick=min(107,110)-97=107-97=10, ratio=10/3≈3.33
+        self.assertEqual(strat._classify_long_k0_wick(k0), "B")
+
+    def test_classify_long_wick_type_c(self):
+        """lower_wick/body < 3.0 → C。"""
+        strat = self._make_strat()
+        # body=8, lower_wick=10, ratio=1.25 → C
+        k0 = _k(0, 100.0, 110.0, 90.0, 108.0, vol=100.0, tbv=50.0)
+        self.assertEqual(strat._classify_long_k0_wick(k0), "C")
+
+    def test_classify_long_wick_doji_no_div_zero(self):
+        """body=0 (doji) 時不會除以 0，使用 body_floor。"""
+        strat = self._make_strat()
+        # open=close=100 → body=0, lower_wick=100-90=10
+        k0 = _k(0, 100.0, 110.0, 90.0, 100.0, vol=100.0, tbv=50.0)
+        wtype = strat._classify_long_k0_wick(k0)
+        self.assertIn(wtype, ["A", "B", "C"])  # 不出錯即可
+
+    # ── _classify_short_k0_wick ──────────────────────────────────────────────
+
+    def test_classify_short_wick_type_a(self):
+        """upper_wick/body >= 4.0 → A。"""
+        strat = self._make_strat()
+        # body=|95-92|=3, upper_wick=110-95=15, ratio=5.0 → A
+        k0 = _k(0, 92.0, 110.0, 88.0, 95.0, vol=100.0, tbv=50.0)
+        self.assertEqual(strat._classify_short_k0_wick(k0), "A")
+
+    def test_classify_short_wick_type_b(self):
+        """3.0 <= upper_wick/body < 4.0 → B。"""
+        strat = self._make_strat()
+        # body=|95-92|=3, upper_wick=105-95=10, ratio=3.33 → B
+        k0 = _k(0, 92.0, 105.0, 88.0, 95.0, vol=100.0, tbv=50.0)
+        self.assertEqual(strat._classify_short_k0_wick(k0), "B")
+
+    def test_classify_short_wick_type_c(self):
+        """upper_wick/body < 3.0 → C。"""
+        strat = self._make_strat()
+        # body=|95-92|=3, upper_wick=100-95=5, ratio=1.67 → C
+        k0 = _k(0, 92.0, 100.0, 88.0, 95.0, vol=100.0, tbv=50.0)
+        self.assertEqual(strat._classify_short_k0_wick(k0), "C")
+
+    def test_classify_short_wick_doji_no_div_zero(self):
+        """body=0 (doji) 時不會除以 0。"""
+        strat = self._make_strat()
+        k0 = _k(0, 95.0, 110.0, 88.0, 95.0, vol=100.0, tbv=50.0)
+        wtype = strat._classify_short_k0_wick(k0)
+        self.assertIn(wtype, ["A", "B", "C"])
+
+    # ── _resolve_long_rr / _resolve_short_rr ─────────────────────────────────
+
+    def test_resolve_long_rr_returns_correct_values(self):
+        """A/B/C 各自回傳對應 RR。"""
+        strat = self._make_strat()
+        # A-grade: body=2, lower_wick=8
+        k0_a = _k(0, 108.0, 110.0, 100.0, 110.0)
+        self.assertAlmostEqual(strat._resolve_long_rr(k0_a), 2.0)
+        # B-grade: body=3, lower_wick=10
+        k0_b = _k(0, 107.0, 110.0, 97.0, 110.0)
+        self.assertAlmostEqual(strat._resolve_long_rr(k0_b), 1.5)
+        # C-grade: body=8, lower_wick=10
+        k0_c = _k(0, 100.0, 110.0, 90.0, 108.0)
+        self.assertAlmostEqual(strat._resolve_long_rr(k0_c), 1.0)
+
+    def test_resolve_short_rr_returns_correct_values(self):
+        strat = self._make_strat()
+        # A-grade: upper_wick=15, body=3
+        k0_a = _k(0, 92.0, 110.0, 88.0, 95.0)
+        self.assertAlmostEqual(strat._resolve_short_rr(k0_a), 2.0)
+        # C-grade: upper_wick=5, body=3
+        k0_c = _k(0, 92.0, 100.0, 88.0, 95.0)
+        self.assertAlmostEqual(strat._resolve_short_rr(k0_c), 1.0)
+
+    # ── _risk_covers_cost ────────────────────────────────────────────────────
+
+    def test_risk_covers_cost_at_boundary(self):
+        """BTC 84000, RR=2, fee_cover=1.2 → min_risk=34.272。"""
+        strat = self._make_strat()
+        # round_trip=57.12, min_risk=57.12*1.2/2=34.272
+        self.assertTrue(strat._risk_covers_cost(84000.0, 34.272, 2.0, 1.2))
+        self.assertFalse(strat._risk_covers_cost(84000.0, 34.0, 2.0, 1.2))
+
+    def test_risk_covers_cost_rejects_zero_risk(self):
+        strat = self._make_strat()
+        self.assertFalse(strat._risk_covers_cost(84000.0, 0.0, 2.0, 1.2))
+
+    def test_risk_covers_cost_rejects_zero_rr(self):
+        strat = self._make_strat()
+        self.assertFalse(strat._risk_covers_cost(84000.0, 100.0, 0.0, 1.2))
+
+    # ── Long bar entry cost gate ─────────────────────────────────────────────
+
+    def test_long_bar_entry_rejected_by_cost_gate(self):
+        """risk 太小被 cost gate 擋住。"""
+        strat = self._make_strat()
+        # 做一個 risk 很小的 k0（entry_p 接近 stop_p）
+        # k0: open=100, close=100.5, high=101, low=99.99
+        # body_high=100.5, stop=99.99-10=89.99, risk=100.5-89.99=10.51
+        # round_trip=100.5*0.00068=0.0683, min_risk=0.0683*1.2/1.0=0.082 → 10.51 passes
+        # 要讓它 fail，需要很大 entry_price 但很小 risk
+        strat.long_sl_offset = 0.0
+        # k0: entry_p=100.5, stop=100.49, risk=0.01
+        k0 = _k(0, 100.0, 101.0, 100.49, 100.5, vol=100.0, tbv=20.0)
+        entry_bar = _k(1, 100.6, 101.5, 100.4, 101.0, vol=120.0, tbv=90.0)
+        signals = strat.on_history([k0, entry_bar])
+        entries = [s for s in signals if s.signal_type == "long_entry"]
+        self.assertEqual(len(entries), 0)
+
+    # ── Long tick entry cost gate ────────────────────────────────────────────
+
+    def test_long_tick_entry_rejected_by_cost_gate(self):
+        """tick 模式 risk 太小被 cost gate 擋住。"""
+        strat = self._make_strat()
+        strat.long_sl_offset = 0.0
+        k0 = _k(0, 100.0, 101.0, 100.49, 100.5, vol=100.0, tbv=20.0)
+        entry_bar = _k(1, 100.6, 101.5, 100.4, 101.0, vol=120.0, tbv=90.0)
+        tick_map = {
+            entry_bar.open_time: _tick_arr([
+                (entry_bar.open_time + 1, 100.6, 0.5, 0.0),
+            ])
+        }
+        signals = strat.on_history([k0, entry_bar], tick_map=tick_map)
+        entries = [s for s in signals if s.signal_type == "long_entry"]
+        self.assertEqual(len(entries), 0)
+
+    # ── Label 測試 ───────────────────────────────────────────────────────────
+
+    def test_long_entry_label_contains_wick_type(self):
+        """進場 label 包含 wick 分級：L4A/L4B/L4C。"""
+        strat = self._make_strat()
+        # C-grade k0: body=8, lower_wick=10, ratio=1.25
+        k0 = _k(0, 100.0, 110.0, 90.0, 108.0)
+        entry_bar = _k(1, 109.0, 115.0, 108.5, 114.0, vol=120.0, tbv=90.0)
+        signals = strat.on_history([k0, entry_bar])
+        entries = [s for s in signals if s.signal_type == "long_entry"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].label, "L4C")
+
+    def test_short_entry_label_contains_wick_type(self):
+        """做空進場 label 包含 wick 分級：S4A/S4B/S4C。"""
+        strat = self._make_strat()
+        strat.enable_short = True
+        # A-grade k0: upper_wick=15, body=3, ratio=5.0
+        k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
+        entry_bar = _k(1, 91.5, 92.3, 86.0, 88.0, vol=120.0, tbv=10.0)
+        signals = strat.on_history([k0, entry_bar])
+        entries = [s for s in signals if s.signal_type == "short_entry"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].label, "S4A")
+
+    # ── Dynamic RR target 驗證 ───────────────────────────────────────────────
+
+    def test_long_bar_a_grade_uses_higher_rr(self):
+        """A-grade wick 使用 rr=2.0，target 更高。"""
+        strat = self._make_strat()
+        # A-grade: body=2, lower_wick=8, ratio=4.0
+        # open=108, close=110, low=100, high=111
+        # entry=110 (body_high), stop=100-10=90, risk=20, rr=2.0 → target=110+40=150
+        k0 = _k(0, 108.0, 111.0, 100.0, 110.0)
+        entry_bar = _k(1, 110.5, 116.0, 110.0, 115.0, vol=120.0, tbv=90.0)
+        # 需要 TP bar 在 target=150
+        tp_bar = _k(2, 149.0, 152.0, 148.0, 151.0, vol=100.0, tbv=50.0)
+        signals = strat.on_history([k0, entry_bar, tp_bar])
+        exits = [s for s in signals if s.signal_type == "long_exit"]
+        self.assertEqual(len(exits), 1)
+        self.assertEqual(exits[0].label, "TP")
+
+    # ── Short bar entry cost gate ────────────────────────────────────────────
+
+    def test_short_bar_entry_rejected_by_cost_gate(self):
+        """做空 risk 太小被 cost gate 擋住。"""
+        strat = self._make_strat()
+        strat.enable_short = True
+        strat.short_sl_offset = 0.0
+        # k0: body_low=99.5, body_high=100.0, k0.high=100.01
+        # entry=99.5, stop=100.01, risk=0.51 → 太小被擋
+        k0 = _k(0, 99.5, 100.01, 88.0, 100.0, vol=100.0, tbv=50.0)
+        entry_bar = _k(1, 99.0, 99.8, 98.0, 98.5, vol=120.0, tbv=10.0)
+        signals = strat.on_history([k0, entry_bar])
+        entries = [s for s in signals if s.signal_type == "short_entry"]
+        self.assertEqual(len(entries), 0)
 
 
 if __name__ == "__main__":

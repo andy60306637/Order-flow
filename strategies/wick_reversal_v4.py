@@ -45,28 +45,45 @@ class WickReversalV4Strategy(StrategyBase):
     long_sl_offset: float = 10.0                    # 固定停損位移
     long_rr_ratio: float = 2                      # 盈虧比
     long_td_consec_bars: int = 2                    # 連續反向 delta 才觸發 TD
-    long_k0_vol_gate: float = 50.0                  # k0 最低成交量門檻
-    # long_k0_vol_gate: float = 70.0                  # k0 最低成交量門檻
-    long_delta_eff_threshold: float = 0.0           # 進場 delta_eff 門檻
+    long_k0_vol_gate: float = 300.0                 # k0 最低成交量門檻
+    long_delta_eff_threshold: float = 0.8           # 進場 delta_eff 門檻
     long_vol_sma_period: int = 20                   # 成交量 SMA 窗期；0=不過濾
-    # long_vol_sma_period: int = 0                   # 成交量 SMA 窗期；0=不過濾
     long_vol_sma_mult: float = 1.2                  # 成交量門標倍率
     lower_wick_absorption_delta_eff_max: float = 0.0
     lower_wick_absorption_min_vol_ratio: float = 0.15
     lower_wick_absorption_bar_delta_max: float = 0.0
+    # ── 做多 cost filter / dynamic RR ─────────────────────────────────────
+    long_min_fee_cover_ratio: float = 2.0           # 最低費用覆蓋倍率
+    long_body_floor_pct: float = 0.00001            # body floor 百分比
+    long_wick_type_a_threshold: float = 4.0         # wick A 級門檻
+    long_wick_type_b_threshold: float = 3.0         # wick B 級門檻
+    long_rr_wick_a: float = 4.0                     # A 級 RR
+    long_rr_wick_b: float = 2.5                     # B 級 RR
+    long_rr_wick_c: float = 2.0                     # C 級 RR
     # ── 做空參數（鏡像）──────────────────────────────────────────────────────
-    enable_short: bool = False                      # 啟用做空
-    short_zoom_bars: int = 3                        # k0 後允許進場的最大觀察根數
+    enable_short: bool = True                       # 啟用做空
+    short_zoom_bars: int = 1                        # k0 後允許進場的最大觀察根數
     short_sl_offset: float = 10.0                   # 固定停損位移
     short_rr_ratio: float = 1.0                     # 盈虧比
     short_td_consec_bars: int = 2                   # 連續反向 delta 才觸發 TD
-    short_k0_vol_gate: float = 50.0                 # k0 最低成交量門檻
-    short_delta_eff_threshold: float = 0.0          # 進場 delta_eff 門檻（負向）
+    short_k0_vol_gate: float = 300.0                # k0 最低成交量門檻
+    short_delta_eff_threshold: float = 0.8          # 進場 delta_eff 門檻（負向）
     short_vol_sma_period: int = 20                  # 成交量 SMA 窗期；0=不過濾
     short_vol_sma_mult: float = 1.2                 # 成交量門標倍率
     upper_wick_absorption_delta_eff_min: float = 0.0
     upper_wick_absorption_min_vol_ratio: float = 0.15
     upper_wick_absorption_bar_delta_min: float = 0.0
+    # ── 做空 cost filter / dynamic RR ─────────────────────────────────────
+    short_min_fee_cover_ratio: float = 2.0          # 最低費用覆蓋倍率
+    short_body_floor_pct: float = 0.00001           # body floor 百分比
+    short_wick_type_a_threshold: float = 4.0        # wick A 級門檻
+    short_wick_type_b_threshold: float = 3.0        # wick B 級門檻
+    short_rr_wick_a: float = 4.5                    # A 級 RR
+    short_rr_wick_b: float = 2.5                    # B 級 RR
+    short_rr_wick_c: float = 2.0                    # C 級 RR
+    # ── cost helper 參數 ──────────────────────────────────────────────────
+    taker_fee_rate: float = 0.00032                 # taker 手續費率
+    slippage_rate: float = 0.00002                  # 滑價率 (0.2 bps)
 
     def on_history(
         self,
@@ -240,15 +257,19 @@ class WickReversalV4Strategy(StrategyBase):
 
         entry_p = k0_body_high
         stop_p = k0.low - self.long_sl_offset
+        rr = self._resolve_long_rr(k0)
         risk = entry_p - stop_p
         if risk <= 0:
             return False, 0.0, 0.0, 0.0
-        target_p = entry_p + risk * self.long_rr_ratio
+        if not self._risk_covers_cost(entry_p, risk, rr, self.long_min_fee_cover_ratio):
+            return False, 0.0, 0.0, 0.0
+        target_p = entry_p + risk * rr
+        wick_type = self._classify_long_k0_wick(k0)
         signals.append(StrategySignal(
             open_time=k.open_time,
             price=entry_p,
             signal_type="long_entry",
-            label="L4",
+            label=f"L4{wick_type}",
             stop_price=stop_p,
         ))
         return True, entry_p, stop_p, target_p
@@ -305,15 +326,19 @@ class WickReversalV4Strategy(StrategyBase):
             if price > k0_body_high and cum_delta_eff > self.long_delta_eff_threshold:
                 fill_p = price
                 stop_p = k0.low - self.long_sl_offset
+                rr = self._resolve_long_rr(k0)
                 risk = fill_p - stop_p
                 if risk <= 0:
                     continue
-                target_p = fill_p + risk * self.long_rr_ratio
+                if not self._risk_covers_cost(fill_p, risk, rr, self.long_min_fee_cover_ratio):
+                    continue
+                target_p = fill_p + risk * rr
+                wick_type = self._classify_long_k0_wick(k0)
                 signals.append(StrategySignal(
                     open_time=k.open_time,
                     price=k0_body_high,  # 圖表標記基準價
                     signal_type="long_entry",
-                    label="L4",
+                    label=f"L4{wick_type}",
                     stop_price=stop_p,
                     fill_price=fill_p,   # 實際 tick 成交價
                 ))
@@ -362,6 +387,60 @@ class WickReversalV4Strategy(StrategyBase):
                 and wick_delta_eff <= self.lower_wick_absorption_delta_eff_max
             )
         return _kline_delta(k) <= self.lower_wick_absorption_bar_delta_max
+
+    # ── Cost / RR helpers ─────────────────────────────────────────────────────
+    def _round_trip_cost(self, price: float) -> float:
+        return 2.0 * (self.taker_fee_rate + self.slippage_rate) * price
+
+    def _long_body_floor(self, price: float) -> float:
+        return max(price * self.long_body_floor_pct, 1e-9)
+
+    def _short_body_floor(self, price: float) -> float:
+        return max(price * self.short_body_floor_pct, 1e-9)
+
+    def _classify_long_k0_wick(self, k0: Kline) -> str:
+        body = abs(k0.close - k0.open)
+        lower_wick = min(k0.open, k0.close) - k0.low
+        denom = max(body, self._long_body_floor(k0.close))
+        ratio = lower_wick / denom
+        if ratio >= self.long_wick_type_a_threshold:
+            return "A"
+        if ratio >= self.long_wick_type_b_threshold:
+            return "B"
+        return "C"
+
+    def _classify_short_k0_wick(self, k0: Kline) -> str:
+        body = abs(k0.close - k0.open)
+        upper_wick = k0.high - max(k0.open, k0.close)
+        denom = max(body, self._short_body_floor(k0.close))
+        ratio = upper_wick / denom
+        if ratio >= self.short_wick_type_a_threshold:
+            return "A"
+        if ratio >= self.short_wick_type_b_threshold:
+            return "B"
+        return "C"
+
+    def _resolve_long_rr(self, k0: Kline) -> float:
+        wtype = self._classify_long_k0_wick(k0)
+        if wtype == "A":
+            return self.long_rr_wick_a
+        if wtype == "B":
+            return self.long_rr_wick_b
+        return self.long_rr_wick_c
+
+    def _resolve_short_rr(self, k0: Kline) -> float:
+        wtype = self._classify_short_k0_wick(k0)
+        if wtype == "A":
+            return self.short_rr_wick_a
+        if wtype == "B":
+            return self.short_rr_wick_b
+        return self.short_rr_wick_c
+
+    def _risk_covers_cost(self, entry_price: float, risk: float, rr: float, fee_cover_ratio: float) -> bool:
+        if rr <= 0 or risk <= 0 or entry_price <= 0:
+            return False
+        min_risk = self._round_trip_cost(entry_price) * fee_cover_ratio / rr
+        return risk >= min_risk
 
     # ── Vol SMA 工具 ───────────────────────────────────────────────────────────
     def _vol_sma_ok(self, klines: List[Kline], cur_idx: int, cur_vol: float,
@@ -588,15 +667,19 @@ class WickReversalV4Strategy(StrategyBase):
 
         entry_p = k0_body_low
         stop_p  = k0.high + self.short_sl_offset
+        rr = self._resolve_short_rr(k0)
         risk = stop_p - entry_p
         if risk <= 0:
             return False, 0.0, 0.0, 0.0
-        target_p = entry_p - risk * self.short_rr_ratio
+        if not self._risk_covers_cost(entry_p, risk, rr, self.short_min_fee_cover_ratio):
+            return False, 0.0, 0.0, 0.0
+        target_p = entry_p - risk * rr
+        wick_type = self._classify_short_k0_wick(k0)
         signals.append(StrategySignal(
             open_time=k.open_time,
             price=entry_p,
             signal_type="short_entry",
-            label="S4",
+            label=f"S4{wick_type}",
             stop_price=stop_p,
         ))
         return True, entry_p, stop_p, target_p
@@ -651,15 +734,19 @@ class WickReversalV4Strategy(StrategyBase):
             if price < k0_body_low and cum_delta_eff < -self.short_delta_eff_threshold:
                 fill_p = price
                 stop_p = k0.high + self.short_sl_offset
+                rr = self._resolve_short_rr(k0)
                 risk   = stop_p - fill_p
                 if risk <= 0:
                     continue
-                target_p = fill_p - risk * self.short_rr_ratio
+                if not self._risk_covers_cost(fill_p, risk, rr, self.short_min_fee_cover_ratio):
+                    continue
+                target_p = fill_p - risk * rr
+                wick_type = self._classify_short_k0_wick(k0)
                 signals.append(StrategySignal(
                     open_time=k.open_time,
                     price=k0_body_low,   # 圖表標記基準價
                     signal_type="short_entry",
-                    label="S4",
+                    label=f"S4{wick_type}",
                     stop_price=stop_p,
                     fill_price=fill_p,   # 實際 tick 成交價
                 ))
