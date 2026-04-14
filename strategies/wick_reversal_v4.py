@@ -61,7 +61,7 @@ class WickReversalV4Strategy(StrategyBase):
     long_rr_wick_b: float = 2.5                     # B 級 RR
     long_rr_wick_c: float = 2.0                     # C 級 RR
     # ── 做空參數（鏡像）──────────────────────────────────────────────────────
-    enable_short: bool = True                       # 啟用做空
+    enable_short: bool = False                       # 啟用做空
     short_zoom_bars: int = 1                        # k0 後允許進場的最大觀察根數
     short_sl_offset: float = 10.0                   # 固定停損位移
     short_rr_ratio: float = 1.0                     # 盈虧比
