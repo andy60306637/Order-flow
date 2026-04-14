@@ -111,12 +111,12 @@ class TickImportThread(QThread):
 class BacktestResultDialog(QDialog):
     """顯示策略回測統計摘要與逐筆交易明細（含市場時區/月份篩選）。"""
 
-    # UTC 小時區間（h_start <= hour < h_end）
+    # 各盤口對應的 session key（DST-aware，詳見 _in_session）
     SESSIONS = {
         "全時間": None,
-        "亞洲盤": (0, 8),
-        "倫敦盤": (8, 16),
-        "紐約盤": (13, 21),
+        "亞洲盤": "asia",
+        "倫敦盤": "london",
+        "紐約盤": "newyork",
     }
 
     @staticmethod
@@ -133,15 +133,52 @@ class BacktestResultDialog(QDialog):
         return f"{dt.year}-{dt.month:02d}"
 
     @staticmethod
-    def _in_session(t: dict, h_range) -> bool:
+    def _in_session(t: dict, session_key: str) -> bool:
+        """
+        判斷交易是否落在指定盤口時段。
+
+        以各市場本地時間判斷（自動處理夏/冬令），換算關係：
+          亞洲盤  Asia/Taipei  07:00~16:00（UTC+8，無 DST）
+                   → 夏/冬令相同：UTC 23:00~08:00
+          倫敦盤  Europe/London 08:00~17:00
+                   → 夏令(BST, UTC+1)：UTC 07:00~16:00 ≈ 台灣 15:00~00:00
+                   → 冬令(GMT, UTC+0)：UTC 08:00~17:00 ≈ 台灣 16:00~01:00
+          紐約盤  America/New_York 08:00~16:00
+                   → 夏令(EDT, UTC-4)：UTC 12:00~20:00 ≈ 台灣 20:00~04:00
+                   → 冬令(EST, UTC-5)：UTC 13:00~21:00 ≈ 台灣 21:00~05:00
+        """
         from datetime import datetime, timezone
         ts = t.get("entry_time", 0)
         if not ts:
             return True
-        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-        h = dt.hour
-        h_start, h_end = h_range
-        return h_start <= h < h_end if h_start < h_end else (h >= h_start or h < h_end)
+        dt_utc = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+
+        try:
+            from zoneinfo import ZoneInfo
+            if session_key == "asia":
+                h = dt_utc.astimezone(ZoneInfo("Asia/Taipei")).hour
+                return 7 <= h < 16
+            elif session_key == "london":
+                h = dt_utc.astimezone(ZoneInfo("Europe/London")).hour
+                return 8 <= h < 17
+            elif session_key == "newyork":
+                h = dt_utc.astimezone(ZoneInfo("America/New_York")).hour
+                return 8 <= h < 16
+        except Exception:
+            # tzdata 未安裝時退回靜態 UTC 範圍（近似）
+            _FALLBACK = {
+                "asia":    (23, 8),   # UTC 23:00~08:00
+                "london":  (8, 17),   # UTC 08:00~17:00（冬令）
+                "newyork": (12, 21),  # UTC 12:00~21:00（夏令近似）
+            }
+            h_range = _FALLBACK.get(session_key)
+            if h_range is None:
+                return True
+            h = dt_utc.hour
+            h_start, h_end = h_range
+            return h_start <= h < h_end if h_start < h_end else (h >= h_start or h < h_end)
+
+        return True
 
     # ─────────────────────────────────────────────────────────────────
     def __init__(
@@ -198,7 +235,7 @@ class BacktestResultDialog(QDialog):
         layout.addWidget(cfg_lbl)
 
         # ── 回測區間 + Tick 覆蓋率 ──────────────────────────────────────
-        from datetime import datetime as _dt2, timezone as _tz2
+        from datetime import datetime as _dt2
         start_ms = stats.get("backtest_start_ms", 0)
         end_ms   = stats.get("backtest_end_ms", 0)
         tick_cov = stats.get("tick_coverage_pct")   # None = Bar 模式
@@ -325,9 +362,9 @@ class BacktestResultDialog(QDialog):
 
     def _filtered_trades(self) -> list:
         trades = self._full_trade_list
-        sess_range = self.SESSIONS.get(self._session_combo.currentText())
-        if sess_range:
-            trades = [t for t in trades if self._in_session(t, sess_range)]
+        sess_key = self.SESSIONS.get(self._session_combo.currentText())
+        if sess_key:
+            trades = [t for t in trades if self._in_session(t, sess_key)]
         month = self._month_combo.currentText()
         if month != "全部月份":
             trades = [t for t in trades if self._trade_month(t) == month]
