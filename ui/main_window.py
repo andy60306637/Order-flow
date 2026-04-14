@@ -40,6 +40,7 @@ from core.footprint_builder import FootprintBuilder
 from core.ws_client import WsWorkerThread
 from core.history_processor import HistoryProcessorThread
 from core import kline_cache, tick_cache
+from utils.ui_settings import ui_settings
 from utils.tick_data_backtest import _build_klines_from_ticks
 from strategies import STRATEGY_REGISTRY
 from strategies.base import StrategyBase, StrategySignal
@@ -655,9 +656,12 @@ class BacktestConfigDialog(QDialog):
         form.setContentsMargins(20, 16, 20, 16)
         form.setVerticalSpacing(10)
 
+        # 載入先前儲存的設定
+        s = ui_settings.get("backtest_config", {})
+
         self.capital_spin = QDoubleSpinBox()
         self.capital_spin.setRange(100, 10_000_000)
-        self.capital_spin.setValue(10_000)
+        self.capital_spin.setValue(s.get("initial_capital", 10_000))
         self.capital_spin.setDecimals(0)
         self.capital_spin.setSuffix(" USDT")
         self.capital_spin.setStyleSheet(self._SPIN_STYLE)
@@ -665,7 +669,7 @@ class BacktestConfigDialog(QDialog):
 
         self.loss_spin = QDoubleSpinBox()
         self.loss_spin.setRange(0.1, 50.0)
-        self.loss_spin.setValue(2.0)
+        self.loss_spin.setValue(s.get("max_loss_pct", 2.0))
         self.loss_spin.setDecimals(1)
         self.loss_spin.setSuffix(" %")
         self.loss_spin.setStyleSheet(self._SPIN_STYLE)
@@ -673,13 +677,14 @@ class BacktestConfigDialog(QDialog):
 
         self.leverage_spin = QSpinBox()
         self.leverage_spin.setRange(1, 125)
-        self.leverage_spin.setValue(20)
+        self.leverage_spin.setValue(s.get("leverage", 20))
         self.leverage_spin.setSuffix(" x")
         self.leverage_spin.setStyleSheet(self._SPIN_STYLE)
         form.addRow("槓桿:", self.leverage_spin)
 
         self.fee_combo = QComboBox()
         self.fee_combo.addItems(["Taker", "Maker", "100% Maker", "70M/30T", "50M/50T", "自訂"])
+        self.fee_combo.setCurrentText(s.get("fee_mode", "Taker"))
         self.fee_combo.setToolTip(
             "Taker=0.05%  Maker=0.02%\n"
             "成本情境測試:\n"
@@ -693,7 +698,7 @@ class BacktestConfigDialog(QDialog):
 
         self.custom_fee_spin = QDoubleSpinBox()
         self.custom_fee_spin.setRange(0.0, 1.0)
-        self.custom_fee_spin.setValue(0.05)
+        self.custom_fee_spin.setValue(s.get("custom_fee_rate", 0.05))
         self.custom_fee_spin.setDecimals(4)
         self.custom_fee_spin.setSingleStep(0.001)
         self.custom_fee_spin.setSuffix(" %")
@@ -701,14 +706,16 @@ class BacktestConfigDialog(QDialog):
         self.custom_fee_spin.setStyleSheet(self._SPIN_STYLE)
         self._custom_fee_row_label = QLabel("自訂費率:")
         form.addRow(self._custom_fee_row_label, self.custom_fee_spin)
-        self._custom_fee_row_label.setVisible(False)
-        self.custom_fee_spin.setVisible(False)
+        
+        mode = self.fee_combo.currentText()
+        self._custom_fee_row_label.setVisible(mode == "自訂")
+        self.custom_fee_spin.setVisible(mode == "自訂")
 
         self.fee_combo.currentTextChanged.connect(self._on_fee_mode_changed)
 
         self.slippage_spin = QDoubleSpinBox()
         self.slippage_spin.setRange(0.0, 50.0)
-        self.slippage_spin.setValue(0.0)
+        self.slippage_spin.setValue(s.get("slippage_bps", 0.0))
         self.slippage_spin.setDecimals(1)
         self.slippage_spin.setSuffix(" bps")
         self.slippage_spin.setToolTip("滞dge (1 bps = 0.01%)")
@@ -717,7 +724,7 @@ class BacktestConfigDialog(QDialog):
 
         self.funding_spin = QDoubleSpinBox()
         self.funding_spin.setRange(0.0, 1.0)
-        self.funding_spin.setValue(0.0)
+        self.funding_spin.setValue(s.get("funding_rate", 0.0))
         self.funding_spin.setDecimals(4)
         self.funding_spin.setSingleStep(0.0001)
         self.funding_spin.setSuffix(" /8h")
@@ -727,7 +734,7 @@ class BacktestConfigDialog(QDialog):
 
         self.maint_spin = QDoubleSpinBox()
         self.maint_spin.setRange(0.001, 0.5)
-        self.maint_spin.setValue(0.005)
+        self.maint_spin.setValue(s.get("maint_margin", 0.005))
         self.maint_spin.setDecimals(3)
         self.maint_spin.setSingleStep(0.001)
         self.maint_spin.setToolTip("維持保證金率 (0.5% = 0.005)")
@@ -736,6 +743,7 @@ class BacktestConfigDialog(QDialog):
 
         self.compound_combo = QComboBox()
         self.compound_combo.addItems(["複利（動態資金）", "固定（初始資金）"])
+        self.compound_combo.setCurrentIndex(0 if s.get("compound", True) else 1)
         self.compound_combo.setToolTip(
             "複利：每筆依當前資產計算倉位 (equity) — PnL 複利\n"
             "固定：每筆依初始資金計算倉位，不受盈虧影響"
@@ -751,6 +759,25 @@ class BacktestConfigDialog(QDialog):
         visible = (mode == "自訂")
         self._custom_fee_row_label.setVisible(visible)
         self.custom_fee_spin.setVisible(visible)
+
+    def save_settings(self) -> None:
+        """將目前 UI 設定儲存至 UiSettingsManager。"""
+        cfg = {
+            "initial_capital": self.capital_spin.value(),
+            "max_loss_pct":    self.loss_spin.value(),
+            "leverage":        self.leverage_spin.value(),
+            "fee_mode":        self.fee_combo.currentText(),
+            "custom_fee_rate": self.custom_fee_spin.value(),
+            "slippage_bps":    self.slippage_spin.value(),
+            "funding_rate":    self.funding_spin.value(),
+            "maint_margin":    self.maint_spin.value(),
+            "compound":        self.compound_combo.currentIndex() == 0,
+        }
+        ui_settings.set("backtest_config", cfg)
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self.save_settings()
+        super().hideEvent(event)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -776,15 +803,22 @@ class BarDateRangeDialog(QDialog):
         form.setContentsMargins(20, 16, 20, 16)
         form.setVerticalSpacing(10)
 
+        # 嘗試載入上次選擇的時間
+        last_start = ui_settings.get("last_custom_start_ms")
+        last_end   = ui_settings.get("last_custom_end_ms")
+
         now             = QDateTime.currentDateTime()
         thirty_days_ago = now.addDays(-30)
 
-        self.start_edit = QDateTimeEdit(thirty_days_ago, self)
+        dt_start = QDateTime.fromMSecsSinceEpoch(last_start) if last_start else thirty_days_ago
+        dt_end   = QDateTime.fromMSecsSinceEpoch(last_end)   if last_end   else now
+
+        self.start_edit = QDateTimeEdit(dt_start, self)
         self.start_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.start_edit.setCalendarPopup(True)
         form.addRow("起始時間:", self.start_edit)
 
-        self.end_edit = QDateTimeEdit(now, self)
+        self.end_edit = QDateTimeEdit(dt_end, self)
         self.end_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.end_edit.setCalendarPopup(True)
         form.addRow("結束時間:", self.end_edit)
@@ -800,6 +834,11 @@ class BarDateRangeDialog(QDialog):
         """回傳 (start_ms, end_ms)，以本機時間轉 UTC ms。"""
         start_ms = self.start_edit.dateTime().toMSecsSinceEpoch()
         end_ms   = self.end_edit.dateTime().toMSecsSinceEpoch()
+        
+        # 儲存選擇的時間
+        ui_settings.set("last_custom_start_ms", start_ms, autosave=False)
+        ui_settings.set("last_custom_end_ms",   end_ms,   autosave=True)
+        
         return start_ms, end_ms
 
 
@@ -810,8 +849,9 @@ class MainWindow(QMainWindow):
         self.resize(1600, 900)
 
         # ── 狀態 ─────────────────────────────────────────────────────────────
-        self._symbol   = config.DEFAULT_SYMBOL
-        self._interval = config.DEFAULT_INTERVAL
+        # 從設定載入上次的狀態
+        self._symbol   = ui_settings.get("symbol", config.DEFAULT_SYMBOL)
+        self._interval = ui_settings.get("interval", config.DEFAULT_INTERVAL)
         self._current_kline_open_time: int = 0
         self._last_price: float = 0.0
         self._loaded_klines: list = []   # 最近一次歷史 K 線，供 agg_history 使用
@@ -840,6 +880,11 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._refresh_tick_label()
         self._bt_config_dlg = BacktestConfigDialog(self)
+
+        # 還原策略選擇
+        last_strat = ui_settings.get("strategy_name")
+        if last_strat and last_strat in STRATEGY_REGISTRY:
+            self._strategy_combo.setCurrentText(last_strat)
 
         # ── Heatmap timer ─────────────────────────────────────────────────────
         self._heatmap_timer = QTimer(self)
@@ -1513,6 +1558,7 @@ class MainWindow(QMainWindow):
         if sym == self._symbol:
             return
         self._symbol = sym
+        ui_settings.set("symbol", sym)
         self._refresh_cache_label()
         self._start_stream()
 
@@ -1520,15 +1566,18 @@ class MainWindow(QMainWindow):
         if iv == self._interval:
             return
         self._interval = iv
+        ui_settings.set("interval", iv)
         self._refresh_cache_label()
         self._start_stream()
 
     def _on_fp_mode_changed(self, mode: str) -> None:
         self._fp_chart.set_mode(mode)
+        ui_settings.set("fp_mode", mode)
 
     def _on_tick_multiplier_changed(self, index: int) -> None:
         """切換價格聚合倍數，重新設定 tick size 並清空 Footprint。"""
         multiplier = config.TICK_MULTIPLIERS[index]
+        ui_settings.set("tick_multiplier_index", index)
         base_tick = config.TICK_SIZES.get(self._symbol, 1.0)
         effective_tick = base_tick * multiplier
         self._fp_builder.reset(tick_size=effective_tick)
@@ -1542,11 +1591,13 @@ class MainWindow(QMainWindow):
         self._kline_chart.toggle_log_scale()
         lbl = "Log ✓" if checked else "Log"
         self._log_btn.setText(lbl)
+        ui_settings.set("log_scale", checked)
 
     # ── 策略事件 ──────────────────────────────────────────────────────────────
 
     def _on_strategy_changed(self, name: str) -> None:
         """下拉選單切換策略 engine。"""
+        ui_settings.set("strategy_name", name)
         if name == "── 無 ──":
             self._strategy_engine = None
         else:
