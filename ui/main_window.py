@@ -49,6 +49,7 @@ from ui.kline_chart import KlineChart
 from ui.cvd_chart import CvdChart, StatsPanel
 from ui.heatmap_widget import HeatmapWidget
 from ui.footprint_widget import FootprintChart
+from ui.capacity_tab import CapacityTab
 
 logger = logging.getLogger(__name__)
 
@@ -1176,6 +1177,8 @@ class MainWindow(QMainWindow):
         )
         self._chart_tabs.addTab(self._kline_chart, "K 線")
         self._chart_tabs.addTab(self._fp_chart,    "Footprint")
+        self._capacity_tab = CapacityTab()
+        self._chart_tabs.addTab(self._capacity_tab, "容量分析")
 
         # 連結 CVD / Stats 的 x 軸到 K 線
         self._cvd_chart.link_x(self._kline_chart.get_plot_item())
@@ -1891,6 +1894,9 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dlg.exec()
+
+        # 通知容量分析頁：訊號已就緒
+        self._capacity_tab.set_ready(bool(self._strategy_signals))
 
     # ── 本機快取 ──────────────────────────────────────────────────────────────
 

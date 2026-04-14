@@ -15,8 +15,8 @@ def _k(
     h: float,
     l: float,
     c: float,
-    vol: float = 100.0,
-    tbv: float = 50.0,
+    vol: float = 300.0,
+    tbv: float = 150.0,
     base_time: int = 0,
 ) -> Kline:
     ot = base_time + i * _MS_1M
@@ -73,7 +73,7 @@ class TestWickReversalV4(unittest.TestCase):
         """無 tick 時，若整根 bar 為明顯主動買盤，不應視為 lower-wick absorption。"""
         strat = self._make_strat()
         bars = [
-            _k(0, 100.0, 110.0, 90.0, 108.0, vol=100.0, tbv=90.0),
+            _k(0, 100.0, 110.0, 90.0, 108.0, vol=300.0, tbv=270.0),
             _k(1, 108.0, 112.0, 107.5, 111.0, tbv=80.0),
         ]
         signals = strat.on_history(bars)
@@ -83,7 +83,7 @@ class TestWickReversalV4(unittest.TestCase):
     def test_k0_absorption_uses_wick_zone_ticks_when_available(self):
         """有 tick 時，k0 吸收應優先看下影線區域的 wick-zone order flow。"""
         strat = self._make_strat()
-        k0 = _k(0, 100.0, 110.0, 90.0, 108.0, vol=100.0, tbv=90.0)
+        k0 = _k(0, 100.0, 110.0, 90.0, 108.0, vol=300.0, tbv=270.0)
         next_bar = _k(1, 108.0, 112.0, 107.5, 111.0, tbv=80.0)
         tick_map = {
             k0.open_time: _tick_arr([
@@ -158,7 +158,7 @@ class TestWickReversalV4(unittest.TestCase):
     def test_bar_entry_expires_after_zoom(self):
         """超出 zoom_bars 後 k0 失效，不再進場。"""
         strat = self._make_strat()
-        strat.zoom_bars = 2
+        strat.long_zoom_bars = 2
         # k0_body_high = max(100,108) = 108
         k0 = _k(0, 100.0, 110.0, 90.0, 108.0)
         bars = [
@@ -246,7 +246,7 @@ class TestWickReversalV4(unittest.TestCase):
     def test_new_k0_overrides_old_k0(self):
         """出現新 k0 時覆蓋舊 k0，最終以新 k0_body_high 作為進場基準。"""
         strat = self._make_strat()
-        strat.zoom_bars = 5
+        strat.long_zoom_bars = 5
         k0_old = _k(0, 100.0, 110.0, 90.0, 108.0)
         k0_new = _k(1, 104.0, 114.0, 94.0, 112.0)  # 也符合 k0 形態，覆蓋舊 k0
         # k0_new: body_high = max(104,112) = 112
@@ -280,9 +280,10 @@ class TestWickReversalV4(unittest.TestCase):
         """Bar 模式：k.high >= target_price 且 delta <= 0 → TP。"""
         strat = self._make_strat()
         k0 = _k(0, 100.0, 110.0, 90.0, 108.0)
-        # entry_p=108 (body_high), stop=80, risk=28, rr=1.5 → target=150
+        # C-grade long: rr=2.0
+        # entry_p=108 (body_high), stop=80, risk=28 → target=164
         entry_bar = _k(1, 109.0, 115.0, 108.5, 114.0, vol=120.0, tbv=90.0)
-        tp_bar = _k(2, 148.0, 152.0, 147.0, 151.0, vol=100.0, tbv=50.0)  # delta=0, TP
+        tp_bar = _k(2, 162.0, 166.0, 161.0, 165.0, tbv=150.0)  # delta=0, TP
 
         signals = strat.on_history([k0, entry_bar, tp_bar])
         exits = [s for s in signals if s.signal_type == "long_exit"]
@@ -316,7 +317,7 @@ class TestWickReversalV4(unittest.TestCase):
         strat = self._make_strat()
         strat.enable_short = True
         # delta = 2*10-100 = -80 < upper_wick_absorption_bar_delta_min(0) → fail
-        k0 = _k(0, 92.0, 110.0, 88.0, 95.0, vol=100.0, tbv=10.0)
+        k0 = _k(0, 92.0, 110.0, 88.0, 95.0, vol=300.0, tbv=30.0)
         next_bar = _k(1, 93.0, 94.0, 89.0, 91.0)
 
         signals = strat.on_history([k0, next_bar])
@@ -373,6 +374,7 @@ class TestWickReversalV4(unittest.TestCase):
         """k.low > k0_body_low 時不進場，k0 仍保持有效，下一根再試。"""
         strat = self._make_strat()
         strat.enable_short = True
+        strat.short_zoom_bars = 2
         # k0_body_low = 92
         k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
         no_break = _k(1, 92.5, 94.0, 92.3, 93.0, vol=100.0, tbv=10.0)  # low=92.3 > 92
@@ -472,11 +474,11 @@ class TestWickReversalV4(unittest.TestCase):
         """Bar 模式做空：k.low <= target_price 且 delta >= 0 → TP。"""
         strat = self._make_strat()
         strat.enable_short = True
-        # k0 wick: upper_wick=15, body=3, ratio=5.0 → A-grade, rr=2.0
-        # entry=92, stop=120, risk=28, rr=2.0 → target=92-56=36
-        k0 = _k(0, 92.0, 110.0, 88.0, 95.0)
-        entry_bar = _k(1, 91.5, 92.3, 86.0, 88.0, vol=120.0, tbv=10.0)
-        tp_bar = _k(2, 37.0, 39.0, 34.0, 36.5, vol=100.0, tbv=50.0)  # delta=0, low=34<=36→TP
+        # C-grade short: upper_wick=11, body=4, ratio=2.75 → rr=2.0
+        # entry=95, stop=120, risk=25 → target=45
+        k0 = _k(0, 99.0, 110.0, 88.0, 95.0)
+        entry_bar = _k(1, 94.5, 95.3, 86.0, 88.0, vol=120.0, tbv=10.0)
+        tp_bar = _k(2, 46.0, 48.0, 44.0, 45.5, tbv=150.0)  # delta=0, low=44<=45→TP
 
         signals = strat.on_history([k0, entry_bar, tp_bar])
         exits = [s for s in signals if s.signal_type == "short_exit"]
@@ -574,22 +576,22 @@ class TestWickReversalV4(unittest.TestCase):
         strat = self._make_strat()
         # A-grade: body=2, lower_wick=8
         k0_a = _k(0, 108.0, 110.0, 100.0, 110.0)
-        self.assertAlmostEqual(strat._resolve_long_rr(k0_a), 2.0)
+        self.assertAlmostEqual(strat._resolve_long_rr(k0_a), 4.0)
         # B-grade: body=3, lower_wick=10
         k0_b = _k(0, 107.0, 110.0, 97.0, 110.0)
-        self.assertAlmostEqual(strat._resolve_long_rr(k0_b), 1.5)
+        self.assertAlmostEqual(strat._resolve_long_rr(k0_b), 2.5)
         # C-grade: body=8, lower_wick=10
         k0_c = _k(0, 100.0, 110.0, 90.0, 108.0)
-        self.assertAlmostEqual(strat._resolve_long_rr(k0_c), 1.0)
+        self.assertAlmostEqual(strat._resolve_long_rr(k0_c), 2.0)
 
     def test_resolve_short_rr_returns_correct_values(self):
         strat = self._make_strat()
         # A-grade: upper_wick=15, body=3
         k0_a = _k(0, 92.0, 110.0, 88.0, 95.0)
-        self.assertAlmostEqual(strat._resolve_short_rr(k0_a), 2.0)
+        self.assertAlmostEqual(strat._resolve_short_rr(k0_a), 4.5)
         # C-grade: upper_wick=5, body=3
         k0_c = _k(0, 92.0, 100.0, 88.0, 95.0)
-        self.assertAlmostEqual(strat._resolve_short_rr(k0_c), 1.0)
+        self.assertAlmostEqual(strat._resolve_short_rr(k0_c), 2.0)
 
     # ── _risk_covers_cost ────────────────────────────────────────────────────
 
@@ -671,15 +673,15 @@ class TestWickReversalV4(unittest.TestCase):
     # ── Dynamic RR target 驗證 ───────────────────────────────────────────────
 
     def test_long_bar_a_grade_uses_higher_rr(self):
-        """A-grade wick 使用 rr=2.0，target 更高。"""
+        """A-grade wick 使用新版較高 RR，target 更高。"""
         strat = self._make_strat()
         # A-grade: body=2, lower_wick=8, ratio=4.0
         # open=108, close=110, low=100, high=111
-        # entry=110 (body_high), stop=100-10=90, risk=20, rr=2.0 → target=110+40=150
+        # entry=110 (body_high), stop=100-10=90, risk=20, rr=4.0 → target=190
         k0 = _k(0, 108.0, 111.0, 100.0, 110.0)
         entry_bar = _k(1, 110.5, 116.0, 110.0, 115.0, vol=120.0, tbv=90.0)
-        # 需要 TP bar 在 target=150
-        tp_bar = _k(2, 149.0, 152.0, 148.0, 151.0, vol=100.0, tbv=50.0)
+        # 需要 TP bar 在 target=190
+        tp_bar = _k(2, 188.0, 192.0, 187.0, 191.0, tbv=150.0)
         signals = strat.on_history([k0, entry_bar, tp_bar])
         exits = [s for s in signals if s.signal_type == "long_exit"]
         self.assertEqual(len(exits), 1)

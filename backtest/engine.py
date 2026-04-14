@@ -9,8 +9,9 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from strategies.base import StrategySignal
 
@@ -36,6 +37,8 @@ class BacktestConfig:
     funding_rate:     float = 0.0        # 資金費率 (0.01% per 8h)；0 = 不計
     maint_margin:     float = 0.005       # 維持保證金率 (0.5%)
     compound:         bool  = True        # True=複利（動態 equity），False=固定初始資金
+    dynamic_slippage: Optional[Callable[[float, int], float]] = None
+    # 簽名：dynamic_slippage(provisional_entry_notional, entry_time_ms) -> extra_bps
 
 
 def _resolve_fee_rate(cfg: BacktestConfig) -> float:
@@ -69,22 +72,36 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
 
     trade_list: List[dict] = []
 
-    slip = cfg.slippage_bps * 1e-4   # bps → 小數
-
     for rt in raw_trades:
         entry_p = rt["entry"]
         exit_p  = rt["exit"]
         stop_p  = rt.get("stop")
         d       = rt["dir"]
+        provisional_entry = entry_p   # 滑價前的原始進場價
+
+        # ── 動態滑價（容量分析用）──────────────────────────────────
+        extra_slip_bps = 0.0
+        entry_time = rt.get("entry_time", 0)
+        if cfg.dynamic_slippage is not None:
+            # 先以原始進場價估算 provisional notional
+            prov_qty = _calc_qty(
+                equity if cfg.compound else cfg.initial_capital,
+                entry_p, stop_p, d, cfg.max_loss_pct, cfg.leverage
+            )
+            if prov_qty is not None:
+                prov_notional = prov_qty * entry_p
+                extra_slip_bps = cfg.dynamic_slippage(prov_notional, entry_time)
+
+        total_slip = (cfg.slippage_bps + extra_slip_bps) * 1e-4
 
         # ── 滑價 ──────────────────────────────────────────────────
-        if slip:
+        if total_slip:
             if d == "long":
-                entry_p *= (1 + slip)   # 買入更貴
-                exit_p  *= (1 - slip)   # 賣出更便宜
+                entry_p *= (1 + total_slip)   # 買入更貴
+                exit_p  *= (1 - total_slip)   # 賣出更便宜
             else:
-                entry_p *= (1 - slip)   # 做空進場更低
-                exit_p  *= (1 + slip)   # 做空平倉更高
+                entry_p *= (1 - total_slip)   # 做空進場更低
+                exit_p  *= (1 + total_slip)   # 做空平倉更高
 
         qty = _calc_qty(
             equity if cfg.compound else cfg.initial_capital,
@@ -142,7 +159,14 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
             "funding_cost": funding_cost,
             "gross_pnl": gross_pnl, "net_pnl": net_pnl,
             "equity_after": equity,
+            "entry_label": rt.get("entry_label", ""),
             "exit_label": rt.get("exit_label", ""),
+            "entry_notional": entry_notional,
+            "exit_notional": exit_notional,
+            "applied_slippage_bps": cfg.slippage_bps + extra_slip_bps,
+            "impact_bps": extra_slip_bps,
+            "entry_stop": stop_p,
+            "provisional_entry": provisional_entry,
             "skipped": False, "skip_reason": "",
             "liquidated": liquidated,
         })
@@ -166,6 +190,8 @@ def _pair_signals(signals: List[StrategySignal]):
     short_stop: Optional[float] = None
     long_time: int = 0
     short_time: int = 0
+    long_label: str = ""
+    short_label: str = ""
     open_count = 0
 
     for sig in signals:
@@ -174,34 +200,40 @@ def _pair_signals(signals: List[StrategySignal]):
             if open_short is not None:
                 trades.append({"dir": "short", "entry": open_short,
                                "exit": fp, "stop": short_stop,
-                               "entry_time": short_time, "exit_time": sig.open_time})
+                               "entry_time": short_time, "exit_time": sig.open_time,
+                               "entry_label": short_label})
                 open_short = None
             if open_long is None:
                 open_long = fp
                 long_stop = sig.stop_price
                 long_time = sig.open_time
+                long_label = sig.label
         elif sig.signal_type == "long_exit":
             if open_long is not None:
                 trades.append({"dir": "long", "entry": open_long,
                                "exit": fp, "stop": long_stop,
                                "entry_time": long_time, "exit_time": sig.open_time,
+                               "entry_label": long_label,
                                "exit_label": sig.label})
                 open_long = None
         elif sig.signal_type == "short_entry":
             if open_long is not None:
                 trades.append({"dir": "long", "entry": open_long,
                                "exit": fp, "stop": long_stop,
-                               "entry_time": long_time, "exit_time": sig.open_time})
+                               "entry_time": long_time, "exit_time": sig.open_time,
+                               "entry_label": long_label})
                 open_long = None
             if open_short is None:
                 open_short = fp
                 short_stop = sig.stop_price
                 short_time = sig.open_time
+                short_label = sig.label
         elif sig.signal_type == "short_exit":
             if open_short is not None:
                 trades.append({"dir": "short", "entry": open_short,
                                "exit": fp, "stop": short_stop,
                                "entry_time": short_time, "exit_time": sig.open_time,
+                               "entry_label": short_label,
                                "exit_label": sig.label})
                 open_short = None
 

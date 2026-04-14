@@ -1,0 +1,15 @@
+{
+    "backtest_config": {
+        "initial_capital": 500000.0,
+        "max_loss_pct": 2.0,
+        "leverage": 20,
+        "fee_mode": "自訂",
+        "custom_fee_rate": 0.032,
+        "slippage_bps": 0.2,
+        "funding_rate": 0.0,
+        "maint_margin": 0.01,
+        "compound": false
+    },
+    "strategy_name": "Wick Reversal 1m v4",
+    "interval": "1m"
+}
