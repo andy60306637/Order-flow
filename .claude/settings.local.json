@@ -5,7 +5,9 @@
       "Bash(python:*)",
       "Bash(tee /tmp/opt_result.txt)",
       "Bash(echo \"EXIT_CODE=$?\")",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(xargs grep:*)",
+      "Bash(grep -E \"\\\\.py$\")"
     ]
   }
 }

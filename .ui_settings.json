@@ -1,6 +1,6 @@
 {
     "backtest_config": {
-        "initial_capital": 500000.0,
+        "initial_capital": 10000.0,
         "max_loss_pct": 2.0,
         "leverage": 20,
         "fee_mode": "自訂",

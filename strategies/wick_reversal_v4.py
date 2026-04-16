@@ -44,25 +44,25 @@ class WickReversalV4Strategy(StrategyBase):
     long_zoom_bars: int = 1                         # k0 後允許進場的最大觀察根數
     long_sl_offset: float = 10.0                    # 固定停損位移
     long_rr_ratio: float = 2                      # 盈虧比
-    long_td_consec_bars: int = 2                    # 連續反向 delta 才觸發 TD
-    long_k0_vol_gate: float = 300.0                 # k0 最低成交量門檻
+    long_td_consec_bars: int = 1                    # 連續反向 delta 才觸發 TD
+    long_k0_vol_gate: float = 500.0                 # k0 最低成交量門檻
     long_delta_eff_threshold: float = 0.8           # 進場 delta_eff 門檻
     long_vol_sma_period: int = 20                   # 成交量 SMA 窗期；0=不過濾
-    long_vol_sma_mult: float = 1.2                  # 成交量門標倍率
+    long_vol_sma_mult: float = 1.0                  # 成交量門標倍率
     lower_wick_absorption_delta_eff_max: float = 0.0
     lower_wick_absorption_min_vol_ratio: float = 0.15
     lower_wick_absorption_bar_delta_max: float = 0.0
     # ── 做多 cost filter / dynamic RR ─────────────────────────────────────
-    long_min_fee_cover_ratio: float = 2.0           # 最低費用覆蓋倍率
+    long_min_fee_cover_ratio: float = 1.2           # 最低費用覆蓋倍率
     long_body_floor_pct: float = 0.00001            # body floor 百分比
     long_wick_type_a_threshold: float = 4.0         # wick A 級門檻
     long_wick_type_b_threshold: float = 3.0         # wick B 級門檻
-    long_rr_wick_a: float = 4.0                     # A 級 RR
-    long_rr_wick_b: float = 2.5                     # B 級 RR
+    long_rr_wick_a: float = 3.0                     # A 級 RR
+    long_rr_wick_b: float = 1.5                     # B 級 RR
     long_rr_wick_c: float = 2.0                     # C 級 RR
     # ── 做空參數（鏡像）──────────────────────────────────────────────────────
-    enable_short: bool = False                       # 啟用做空
-    short_zoom_bars: int = 1                        # k0 後允許進場的最大觀察根數
+    enable_short: bool = True                       # 啟用做空
+    short_zoom_bars: int = 1                         # k0 後允許進場的最大觀察根數
     short_sl_offset: float = 10.0                   # 固定停損位移
     short_rr_ratio: float = 1.0                     # 盈虧比
     short_td_consec_bars: int = 2                   # 連續反向 delta 才觸發 TD
@@ -78,9 +78,18 @@ class WickReversalV4Strategy(StrategyBase):
     short_body_floor_pct: float = 0.00001           # body floor 百分比
     short_wick_type_a_threshold: float = 4.0        # wick A 級門檻
     short_wick_type_b_threshold: float = 3.0        # wick B 級門檻
+    enable_short_wick_a: bool = True
+    enable_short_wick_b: bool = True
+    enable_short_wick_c: bool = False
+    short_a_min_upper_wick_pct: float = 0.0011
     short_rr_wick_a: float = 4.5                    # A 級 RR
     short_rr_wick_b: float = 2.5                    # B 級 RR
     short_rr_wick_c: float = 2.0                    # C 級 RR
+    # ── S4B 專屬 filter ───────────────────────────────────────────────────
+    short_b_min_upper_wick_pct: float = 0.0         # B级：最小上影線幅度 (佔收盤價 %)，0=不過濾
+    short_b_min_k0_vol: float = 0.0                 # B级：獨立最低 k0 成交量，0=用全局門檻
+    short_b_min_runup_pct: float = 0.0              # B级：k0 前 N 根最小漲幅，0=不過濾
+    short_b_runup_lookback: int = 3                 # B级：前置漲幅觀察根數
     # ── cost helper 參數 ──────────────────────────────────────────────────
     taker_fee_rate: float = 0.00032                 # taker 手續費率
     slippage_rate: float = 0.00002                  # 滑價率 (0.2 bps)
@@ -114,6 +123,7 @@ class WickReversalV4Strategy(StrategyBase):
         self._trailing  = False
         self._td_consec = 0
         self._stop_price = 0.0
+        self.k0_records: list = []   # 供外部分析用 (k0 特徵 + entry 資訊)
 
         for i, k in enumerate(klines):
             # ── Step 1：持倉管理 ────────────────────────────────────────────
@@ -205,6 +215,11 @@ class WickReversalV4Strategy(StrategyBase):
                         side = "short"
                         trailing  = False
                         td_consec = 0
+                        # 標記此次進場對應的 k0 record
+                        for _r in reversed(self.k0_records):
+                            if _r["k0_open_time"] == short_k0.open_time and _r["entry_open_time"] is None:
+                                _r["entry_open_time"] = k.open_time
+                                break
                         short_k0 = None
                         long_k0  = None
                         continue
@@ -221,9 +236,35 @@ class WickReversalV4Strategy(StrategyBase):
                         signal_type="k0_long",
                         label="k0",
                     ))
+                # 設定 runup 查詢用的 context（供 _short_k0_regime_ok 使用）
+                self._cur_i = i
+                self._cur_klines = klines
                 if self.enable_short and self._is_k0_short(k, cur_ticks):
                     short_k0     = k
                     short_k0_idx = i
+                    # 收集 k0 特徵供分析
+                    _body = abs(k.close - k.open)
+                    _body_hi = max(k.open, k.close)
+                    _uw = k.high - _body_hi
+                    _denom = max(_body, self._short_body_floor(k.close))
+                    _rec: dict = {
+                        "k0_open_time": k.open_time,
+                        "wick_type": self._classify_short_k0_wick(k),
+                        "upper_wick": _uw,
+                        "body": _body,
+                        "wick_body_ratio": _uw / _denom,
+                        "upper_wick_pct": _uw / max(k.close, 1e-9),
+                        "k0_volume": k.volume,
+                        "entry_open_time": None,  # 填入於進場時
+                    }
+                    if cur_ticks is not None and len(cur_ticks) > 0:
+                        _wt = cur_ticks[cur_ticks[:, 1] >= _body_hi]
+                        _wvol = float(np.sum(_wt[:, 2])) if len(_wt) > 0 else 0.0
+                        _tvol = float(np.sum(cur_ticks[:, 2]))
+                        _rec["absorption_vol_ratio"] = _wvol / _tvol if _tvol > 0 else 0.0
+                    else:
+                        _rec["absorption_vol_ratio"] = None
+                    self.k0_records.append(_rec)
                     signals.append(StrategySignal(
                         open_time=k.open_time,
                         price=k.high,
@@ -436,6 +477,37 @@ class WickReversalV4Strategy(StrategyBase):
             return self.short_rr_wick_b
         return self.short_rr_wick_c
 
+    def _is_short_wick_enabled(self, wick_type: str) -> bool:
+        if wick_type == "A":
+            return self.enable_short_wick_a
+        if wick_type == "B":
+            return self.enable_short_wick_b
+        return self.enable_short_wick_c
+
+    def _short_k0_regime_ok(self, k0: Kline, wick_type: str) -> bool:
+        upper_wick = k0.high - max(k0.open, k0.close)
+        if wick_type == "A":
+            if self.short_a_min_upper_wick_pct <= 0:
+                return True
+            return (upper_wick / max(k0.close, 1e-9)) >= self.short_a_min_upper_wick_pct
+        if wick_type == "B":
+            if self.short_b_min_upper_wick_pct > 0:
+                if (upper_wick / max(k0.close, 1e-9)) < self.short_b_min_upper_wick_pct:
+                    return False
+            if self.short_b_min_k0_vol > 0 and k0.volume < self.short_b_min_k0_vol:
+                return False
+            if self.short_b_min_runup_pct > 0:
+                i = getattr(self, "_cur_i", 0)
+                kls = getattr(self, "_cur_klines", None)
+                if kls is not None and i >= self.short_b_runup_lookback:
+                    lb = i - self.short_b_runup_lookback
+                    low_ref = min(kls[j].low for j in range(lb, i))
+                    runup = (k0.high - low_ref) / max(low_ref, 1e-9)
+                    if runup < self.short_b_min_runup_pct:
+                        return False
+            return True
+        return True
+
     def _risk_covers_cost(self, entry_price: float, risk: float, rr: float, fee_cover_ratio: float) -> bool:
         if rr <= 0 or risk <= 0 or entry_price <= 0:
             return False
@@ -613,7 +685,10 @@ class WickReversalV4Strategy(StrategyBase):
         upper_wick = k.high - body_high
         if not (body_high <= mid and upper_wick > 0 and upper_wick > body):
             return False
-        return self._has_upper_wick_absorption(k, ticks, body_high)
+        if not self._has_upper_wick_absorption(k, ticks, body_high):
+            return False
+        wick_type = self._classify_short_k0_wick(k)
+        return self._is_short_wick_enabled(wick_type) and self._short_k0_regime_ok(k, wick_type)
 
     def _has_upper_wick_absorption(
         self,
@@ -667,6 +742,9 @@ class WickReversalV4Strategy(StrategyBase):
 
         entry_p = k0_body_low
         stop_p  = k0.high + self.short_sl_offset
+        wick_type = self._classify_short_k0_wick(k0)
+        if not self._is_short_wick_enabled(wick_type):
+            return False, 0.0, 0.0, 0.0
         rr = self._resolve_short_rr(k0)
         risk = stop_p - entry_p
         if risk <= 0:
@@ -674,7 +752,6 @@ class WickReversalV4Strategy(StrategyBase):
         if not self._risk_covers_cost(entry_p, risk, rr, self.short_min_fee_cover_ratio):
             return False, 0.0, 0.0, 0.0
         target_p = entry_p - risk * rr
-        wick_type = self._classify_short_k0_wick(k0)
         signals.append(StrategySignal(
             open_time=k.open_time,
             price=entry_p,
@@ -734,6 +811,9 @@ class WickReversalV4Strategy(StrategyBase):
             if price < k0_body_low and cum_delta_eff < -self.short_delta_eff_threshold:
                 fill_p = price
                 stop_p = k0.high + self.short_sl_offset
+                wick_type = self._classify_short_k0_wick(k0)
+                if not self._is_short_wick_enabled(wick_type):
+                    continue
                 rr = self._resolve_short_rr(k0)
                 risk   = stop_p - fill_p
                 if risk <= 0:
@@ -741,7 +821,6 @@ class WickReversalV4Strategy(StrategyBase):
                 if not self._risk_covers_cost(fill_p, risk, rr, self.short_min_fee_cover_ratio):
                     continue
                 target_p = fill_p - risk * rr
-                wick_type = self._classify_short_k0_wick(k0)
                 signals.append(StrategySignal(
                     open_time=k.open_time,
                     price=k0_body_low,   # 圖表標記基準價
