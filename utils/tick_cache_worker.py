@@ -313,7 +313,7 @@ def _run_once(jobs: list[dict], full_rebuild: bool, zip_workers: int, log: loggi
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Background worker: parse aggTrades zips → NPZ cache (incremental)."
+        description="Background worker: parse aggTrades zips to NPZ cache (incremental)."
     )
     # single-symbol shorthand
     ap.add_argument("--symbol",   default=None, help="e.g. BTCUSDT")

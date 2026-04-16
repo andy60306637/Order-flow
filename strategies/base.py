@@ -4,15 +4,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
 
 from core.data_types import Kline
 
 # tick bar map type：open_time_ms → ndarray(N, 4) [time, price, qty, is_buyer_maker]
-TickBarMap = Dict[int, np.ndarray]
+TickBarMap = Mapping[int, np.ndarray]
 
 
 @dataclass

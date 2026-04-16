@@ -17,7 +17,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backtest.engine import BacktestConfig, simulate_trades
 from core.data_types import Kline
-from core.tick_cache import _parse_agg_trades_csv_lines, build_bar_map, load_raw, save_raw
+from core.tick_cache import (
+    _parse_agg_trades_csv_lines,
+    build_bar_map,
+    build_tick_slice_accessor,
+    load_raw,
+    save_raw,
+)
 from strategies import STRATEGY_REGISTRY
 
 # ── pandas 快速 CSV 解析（可選，fallback 到純 Python）────────────────────────
@@ -268,6 +274,10 @@ def main() -> None:
         "--zip-workers", type=int, default=4,
         help="parallel workers for zip loading (default: 4)",
     )
+    parser.add_argument(
+        "--tick-access", choices=["map", "range"], default="map",
+        help="tick access mode: materialized dict map or lazy range accessor (default: map)",
+    )
     args = parser.parse_args()
 
     strategy_cls = STRATEGY_REGISTRY.get(args.strategy)
@@ -289,8 +299,15 @@ def main() -> None:
         )
 
     klines = _build_klines_from_ticks(args.symbol, ticks, interval=args.interval)
-    tick_map = build_bar_map(ticks, [(k.open_time, k.close_time) for k in klines])
-    print(f"[prep] bars={len(klines)} tick_map={len(tick_map)} in {time.perf_counter()-t_load:.1f}s")
+    kline_times = [(k.open_time, k.close_time) for k in klines]
+    if args.tick_access == "range":
+        tick_map = build_tick_slice_accessor(ticks, kline_times)
+    else:
+        tick_map = build_bar_map(ticks, kline_times)
+    print(
+        f"[prep] bars={len(klines)} tick_access={args.tick_access} "
+        f"coverage={len(tick_map)} in {time.perf_counter()-t_load:.1f}s"
+    )
 
     # ── 執行策略 ────────────────────────────────────────────────────────
     t_strat = time.perf_counter()
@@ -317,6 +334,7 @@ def main() -> None:
     print(f"strategy={args.strategy}")
     print(f"symbol={args.symbol.upper()}  interval={args.interval}")
     print(f"tick_source={tick_dir.resolve()}")
+    print(f"tick_access={args.tick_access}")
     print(f"bars={len(klines)} tick_coverage={len(tick_map)}/{len(klines)}")
     print(f"range_utc={first_bar} -> {last_bar}")
     print(f"trades={stats['trades']}")

@@ -15,7 +15,10 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Iterator, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -25,13 +28,140 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CACHE_DIR    = _PROJECT_ROOT / "data" / "ticks"
+_SHARD_ROOT   = _CACHE_DIR / "shards"
 _NCOLS        = 4  # trade_time, price, qty, is_buyer_maker
+
+
+class TickSliceAccessor(Mapping[int, np.ndarray]):
+    """以 index range 延後 materialize 每根 bar 的 tick slice。"""
+
+    def __init__(self, ticks: np.ndarray, bar_ranges: dict[int, tuple[int, int]]):
+        self._ticks = ticks
+        self._bar_ranges = bar_ranges
+
+    def __getitem__(self, open_time: int) -> np.ndarray:
+        bar_range = self._bar_ranges.get(open_time)
+        if bar_range is None:
+            raise KeyError(open_time)
+        lo, hi = bar_range
+        return self._ticks[lo:hi]
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._bar_ranges)
+
+    def __len__(self) -> int:
+        return len(self._bar_ranges)
+
+    def __contains__(self, open_time: object) -> bool:
+        return open_time in self._bar_ranges
+
+    def get(self, open_time: int, default=None) -> np.ndarray | None:
+        bar_range = self._bar_ranges.get(open_time)
+        if bar_range is None:
+            return default
+        lo, hi = bar_range
+        return self._ticks[lo:hi]
+
+    def range_for(self, open_time: int) -> tuple[int, int] | None:
+        return self._bar_ranges.get(open_time)
+
+    @property
+    def ticks(self) -> np.ndarray:
+        return self._ticks
+
+    @property
+    def bar_ranges(self) -> dict[int, tuple[int, int]]:
+        return self._bar_ranges
 
 
 def cache_path(symbol: str) -> Path:
     """回傳快取路徑。Tick 資料與 K 棒 interval 無關，僅以 symbol 命名。"""
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     return _CACHE_DIR / f"{symbol.upper()}_ticks.npz"
+
+
+def shard_dir(symbol: str) -> Path:
+    path = _SHARD_ROOT / symbol.upper()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def shard_manifest_path(symbol: str) -> Path:
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return _CACHE_DIR / f"{symbol.upper()}_shards.json"
+
+
+def shard_path(symbol: str, month_key: str) -> Path:
+    return shard_dir(symbol) / f"{symbol.upper()}_{month_key}.npy"
+
+
+def _month_key_from_ms(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y%m")
+
+
+def _month_start_ms(month_key: str) -> int:
+    cur = datetime.strptime(month_key, "%Y%m").replace(tzinfo=timezone.utc)
+    return int(cur.timestamp() * 1000)
+
+
+def _iter_month_keys(start_ms: int, end_ms: int) -> list[str]:
+    start = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    keys: list[str] = []
+    cur = start
+    while cur <= end:
+        keys.append(cur.strftime("%Y%m"))
+        if cur.month == 12:
+            cur = cur.replace(year=cur.year + 1, month=1)
+        else:
+            cur = cur.replace(month=cur.month + 1)
+    return keys
+
+
+def _next_month_start_ms(month_key: str) -> int:
+    cur = datetime.strptime(month_key, "%Y%m").replace(tzinfo=timezone.utc)
+    if cur.month == 12:
+        nxt = cur.replace(year=cur.year + 1, month=1)
+    else:
+        nxt = cur.replace(month=cur.month + 1)
+    return int(nxt.timestamp() * 1000)
+
+
+def _load_shard_manifest(symbol: str) -> dict | None:
+    path = shard_manifest_path(symbol)
+    if not path.exists():
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception as exc:
+        logger.error("tick shard manifest load error [%s]: %s", path.name, exc)
+        return None
+
+
+def _load_npz_meta(symbol: str) -> dict | None:
+    path = cache_path(symbol)
+    if not path.exists():
+        return None
+    try:
+        with np.load(str(path)) as npz:
+            meta_arr = npz["meta"]
+        return {"start_ms": int(meta_arr[0]), "end_ms": int(meta_arr[1]), "source": "legacy_npz"}
+    except Exception as exc:
+        logger.error("tick_cache meta load error [%s]: %s", path.name, exc)
+        return None
+
+
+def load_meta(symbol: str) -> dict | None:
+    """讀取資料時間範圍 metadata；優先 shard manifest，再回退舊 NPZ。"""
+    manifest = _load_shard_manifest(symbol)
+    if manifest is not None:
+        return {
+            "start_ms": int(manifest["start_ms"]),
+            "end_ms": int(manifest["end_ms"]),
+            "source": "shards",
+        }
+    return _load_npz_meta(symbol)
 
 
 def load_raw(symbol: str) -> tuple[np.ndarray | None, dict | None]:
@@ -48,6 +178,46 @@ def load_raw(symbol: str) -> tuple[np.ndarray | None, dict | None]:
     except Exception as exc:
         logger.error("tick_cache load error [%s]: %s", path.name, exc)
         return None, None
+
+
+def save_shards(symbol: str, data: np.ndarray, overwrite: bool = False) -> dict:
+    """將完整 tick array 寫成按月份分片的 NPY shards。"""
+    symbol = symbol.upper()
+    if len(data) == 0:
+        raise ValueError("cannot shard empty tick data")
+
+    order = np.argsort(data[:, 0], kind="stable")
+    sorted_data = data[order]
+    times = sorted_data[:, 0]
+    month_keys = _iter_month_keys(int(times[0]), int(times[-1]))
+    months: dict[str, dict] = {}
+    for month_key in month_keys:
+        lo = int(np.searchsorted(times, _month_start_ms(month_key), side="left"))
+        hi = int(np.searchsorted(times, _next_month_start_ms(month_key), side="left"))
+        if lo >= hi:
+            continue
+        part = sorted_data[lo:hi]
+        path = shard_path(symbol, str(month_key))
+        if path.exists() and not overwrite:
+            raise FileExistsError(f"shard already exists: {path}")
+        np.save(str(path), part, allow_pickle=False)
+        months[str(month_key)] = {
+            "path": str(path.relative_to(_CACHE_DIR)),
+            "count": int(len(part)),
+            "start_ms": int(part[0, 0]),
+            "end_ms": int(part[-1, 0]),
+        }
+
+    manifest = {
+        "symbol": symbol,
+        "format": "tick_shards_v1",
+        "start_ms": int(sorted_data[0, 0]),
+        "end_ms": int(sorted_data[-1, 0]),
+        "months": months,
+    }
+    with open(shard_manifest_path(symbol), "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2, ensure_ascii=False)
+    return manifest
 
 
 def save_raw(symbol: str, data: np.ndarray,
@@ -216,11 +386,50 @@ def merge_and_save(symbol: str,
 def load_range(symbol: str,
                start_ms: int, end_ms: int) -> np.ndarray:
     """載入指定時間範圍內的 ticks（含兩端）。"""
+    shard_data = load_range_sharded(symbol, start_ms, end_ms)
+    if shard_data is not None:
+        return shard_data
+
     data, meta = load_raw(symbol)
     if data is None or len(data) == 0:
         return np.empty((0, _NCOLS), dtype=np.float64)
     mask = (data[:, 0] >= start_ms) & (data[:, 0] <= end_ms)
     return data[mask]
+
+
+def load_range_sharded(symbol: str, start_ms: int, end_ms: int) -> np.ndarray | None:
+    """優先從月分片讀取指定時間範圍；若 shards 不完整則回傳 None。"""
+    manifest = _load_shard_manifest(symbol)
+    if manifest is None:
+        return None
+
+    month_entries: dict[str, dict] = manifest.get("months", {})
+    month_keys = _iter_month_keys(start_ms, end_ms)
+    if not month_keys:
+        return np.empty((0, _NCOLS), dtype=np.float64)
+
+    parts: list[np.ndarray] = []
+    for month_key in month_keys:
+        entry = month_entries.get(month_key)
+        if entry is None:
+            return None
+
+        path = _CACHE_DIR / entry["path"]
+        if not path.exists():
+            return None
+
+        shard = np.load(str(path), mmap_mode="r")
+        times = shard[:, 0]
+        lo = int(np.searchsorted(times, start_ms, side="left"))
+        hi = int(np.searchsorted(times, end_ms, side="right"))
+        if lo < hi:
+            parts.append(np.array(shard[lo:hi], copy=True))
+
+    if not parts:
+        return np.empty((0, _NCOLS), dtype=np.float64)
+    if len(parts) == 1:
+        return parts[0]
+    return np.concatenate(parts, axis=0)
 
 
 def build_bar_map(ticks: np.ndarray,
@@ -237,24 +446,59 @@ def build_bar_map(ticks: np.ndarray,
     Returns:
         dict: open_time_ms → ticks within [open_time, close_time]
     """
+    bar_ranges = build_bar_ranges(ticks, kline_times)
+    return {ot: ticks[lo:hi] for ot, (lo, hi) in bar_ranges.items()}
+
+
+def build_bar_ranges(
+    ticks: np.ndarray,
+    kline_times: list[tuple[int, int]],
+) -> dict[int, tuple[int, int]]:
+    """將 ticks 對應到每根 K 棒的 index range。"""
     if len(ticks) == 0:
         return {}
-    result: dict[int, np.ndarray] = {}
+    result: dict[int, tuple[int, int]] = {}
     times = ticks[:, 0]
     for ot, ct in kline_times:
         lo = int(np.searchsorted(times, ot,     side="left"))
         hi = int(np.searchsorted(times, ct + 1, side="left"))
         if lo < hi:
-            result[ot] = ticks[lo:hi]
+            result[ot] = (lo, hi)
     return result
+
+
+def build_tick_slice_accessor(
+    ticks: np.ndarray,
+    kline_times: list[tuple[int, int]],
+) -> TickSliceAccessor:
+    """建立 dict-like lazy accessor，保留舊策略的 get/contains/len 用法。"""
+    return TickSliceAccessor(ticks, build_bar_ranges(ticks, kline_times))
 
 
 def info(symbol: str) -> Optional[dict]:
     """回傳快取資訊。"""
     path = cache_path(symbol)
-    if not path.exists():
-        return None
+    manifest = _load_shard_manifest(symbol)
     try:
+        if manifest is not None:
+            count = sum(int(v["count"]) for v in manifest.get("months", {}).values())
+            size_mb = 0.0
+            for month in manifest.get("months", {}).values():
+                shard_file = _CACHE_DIR / month["path"]
+                if shard_file.exists():
+                    size_mb += shard_file.stat().st_size / 1_048_576
+            return {
+                "count": count,
+                "start_ms": int(manifest["start_ms"]),
+                "end_ms": int(manifest["end_ms"]),
+                "size_mb": size_mb,
+                "path": str(shard_manifest_path(symbol)),
+                "source": "shards",
+            }
+
+        if not path.exists():
+            return None
+
         data, meta = load_raw(symbol)
         if data is None:
             return None
@@ -264,6 +508,7 @@ def info(symbol: str) -> Optional[dict]:
             "end_ms":   meta["end_ms"],
             "size_mb":  path.stat().st_size / 1_048_576,
             "path":     str(path),
+            "source":   "legacy_npz",
         }
     except Exception as exc:
         logger.error("tick_cache info error: %s", exc)

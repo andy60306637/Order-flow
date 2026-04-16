@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backtest.engine import BacktestConfig, simulate_trades
-from core.tick_cache import load_raw, build_bar_map
+from core.tick_cache import load_meta, load_range, build_bar_map
 from strategies.wick_reversal_v4 import WickReversalV4Strategy
 from utils.tick_data_backtest import _build_klines_from_ticks
 
@@ -119,13 +119,12 @@ class Dataset:
 
 class StrategyRunner:
     def __init__(self, symbol: str, interval: str, train_start_ms: int, split_ms: int, end_ms: int):
-        ticks, meta = load_raw(symbol)
-        if ticks is None or len(ticks) == 0:
+        meta = load_meta(symbol)
+        if meta is None:
             raise RuntimeError(f"tick cache not found for {symbol}")
         self.symbol = symbol.upper()
         self.interval = interval
         self.meta = meta or {}
-        self._ticks = ticks
         self.train = self._build_dataset("train", train_start_ms, split_ms)
         self.validation = self._build_dataset("validation", split_ms, end_ms)
         self.full = self._build_dataset("full", train_start_ms, end_ms)
@@ -139,7 +138,7 @@ class StrategyRunner:
         )
 
     def _build_dataset(self, name: str, start_ms: int, end_ms: int) -> Dataset:
-        sub_ticks = _slice_ticks(self._ticks, start_ms, end_ms)
+        sub_ticks = load_range(self.symbol, start_ms, end_ms)
         klines = _build_klines_from_ticks(self.symbol, sub_ticks, interval=self.interval)
         tick_map = build_bar_map(sub_ticks, [(k.open_time, k.close_time) for k in klines])
         return Dataset(name=name, klines=klines, tick_map=tick_map)

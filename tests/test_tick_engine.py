@@ -18,7 +18,7 @@ import numpy as np
 from core.data_types import Kline
 from strategies.wick_reversal import WickReversalStrategy
 from strategies.base import StrategySignal
-from core.tick_cache import build_bar_map
+from core.tick_cache import TickSliceAccessor, build_bar_map, build_bar_ranges
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -135,6 +135,42 @@ class TestBuildBarMap(unittest.TestCase):
         kline_times = [(0, 59999), (60000, 119999)]
         result = build_bar_map(ticks, kline_times)
         self.assertEqual(len(result), 0)
+
+    def test_build_bar_ranges_matches_materialized_map(self):
+        """range mapping 與 materialized map 的切片邊界一致。"""
+        ticks = np.array([
+            [0, 50000, 1, 0],
+            [100, 50001, 1, 1],
+            [60000, 50010, 2, 0],
+            [60500, 50020, 3, 1],
+        ], dtype=np.float64)
+        kline_times = [(0, 59999), (60000, 119999)]
+
+        bar_map = build_bar_map(ticks, kline_times)
+        bar_ranges = build_bar_ranges(ticks, kline_times)
+
+        self.assertEqual(set(bar_map), set(bar_ranges))
+        self.assertTrue(np.array_equal(bar_map[0], ticks[slice(*bar_ranges[0])]))
+        self.assertTrue(np.array_equal(bar_map[60000], ticks[slice(*bar_ranges[60000])]))
+
+    def test_tick_slice_accessor_behaves_like_mapping(self):
+        """TickSliceAccessor 應支援 len/contains/get 與惰性 slicing。"""
+        ticks = np.array([
+            [0, 50000, 1, 0],
+            [100, 50001, 1, 1],
+            [60000, 50010, 2, 0],
+        ], dtype=np.float64)
+        accessor = TickSliceAccessor(
+            ticks,
+            {0: (0, 2), 60000: (2, 3)},
+        )
+
+        self.assertEqual(len(accessor), 2)
+        self.assertIn(0, accessor)
+        self.assertNotIn(120000, accessor)
+        self.assertTrue(np.array_equal(accessor.get(0), ticks[0:2]))
+        self.assertIsNone(accessor.get(120000))
+        self.assertEqual(accessor.range_for(60000), (2, 3))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

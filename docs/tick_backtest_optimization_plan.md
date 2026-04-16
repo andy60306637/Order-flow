@@ -383,3 +383,58 @@
 - 最後才決定存儲格式
 
 如果執行順序正確，這會是一個風險可控、可逐步落地、也最容易驗證效果的回測基礎設施優化方案。
+
+---
+
+## 12. Current Status / TODO
+
+### 已完成
+
+- `Phase 0: Benchmark Harness`
+  - 已新增 `utils/benchmark_tick_backtest.py`
+  - 可拆分量測 `tick load / range filter / bar build / tick-to-bar mapping / strategy / simulate`
+- `Phase 1: Index-Range Mapping`
+  - 已在 `core/tick_cache.py` 新增 `build_bar_ranges()` 與 `TickSliceAccessor`
+  - 已在 `strategies/base.py` 將 `TickBarMap` 放寬為 mapping-like 介面
+  - 已在 `utils/tick_data_backtest.py` 增加 `--tick-access map|range`
+- `Phase 2: Lazy Range Loading`
+  - 已在 `core/tick_cache.py` 新增 shard-aware `load_range()`
+  - 目前 `load_range()` 會優先使用 shard，缺資料時回退舊 `NPZ`
+- `Phase 3: Sharding`
+  - 已支援 `symbol + YYYYMM` 月分片 `.npy`
+  - 已新增 `utils/rebuild_tick_shards_once.py`
+  - `BTCUSDT` 已實際建立 shard 並通過 benchmark 驗證
+
+### 已驗證成果
+
+- `1d legacy` → `1d auto(shard)`：
+  - tick load 約 `34.3s` 降到 `0.03s`
+  - peak RSS 約 `17.4 GB` 降到 `124 MB`
+- `7d legacy` → `7d auto(shard)`：
+  - tick load 約 `33.3s` 降到 `0.17s`
+  - peak RSS 約 `17.7 GB` 降到 `396 MB`
+- `1d / 7d` 回測結果一致：
+  - trade count / PF / net pnl 無差異
+
+### Optional TODO
+
+- 將剩餘仍直接使用 `load_raw()` 的主要路徑逐步切到 `load_range()` / shard-aware 路徑
+  - 例如 `backtest/capacity.py`
+  - 例如 `utils/optimize_v4.py`
+  - 例如 `utils/optimize_v4_long.py`
+  - 例如 `utils/optimize_v4_short.py`
+- `Phase 4: Storage Format Benchmark`
+  - 正式比較 `.npz`、`.npy + memmap`、`Parquet`
+  - 若 `npy + memmap` 已滿足需求，可不繼續推進 Parquet
+- `Phase 5: Strategy Interface Cleanup`
+  - 進一步將策略從 `tick_map.get(open_time)` 遷移到更明確的 accessor 抽象
+  - 優先對象為 `strategies/wick_reversal_v4.py`
+  - 此項屬於結構清理，不是當前效能瓶頸的必要前置
+
+### 決策註記
+
+- 目前核心優化目標已達成：
+  - 短區間回測啟動時間已顯著下降
+  - peak memory 已顯著下降
+  - shard 路徑已可正式使用
+- 因此剩餘 `Phase 4/5` 屬於「可選升級」，不是當前版本上線的必要條件

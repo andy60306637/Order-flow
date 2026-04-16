@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from core.tick_cache import build_bar_ranges, TickSliceAccessor
 from core.data_types import Kline
 from strategies.wick_reversal_v4 import WickReversalV4Strategy
 
@@ -199,6 +200,42 @@ class TestWickReversalV4(unittest.TestCase):
         self.assertAlmostEqual(entries[0].fill_price, 108.3)  # 第一筆穿越 body_high 的 tick
         expected_stop = k0.low - strat.long_sl_offset               # 停損 = k0 整根最低點 - offset
         self.assertAlmostEqual(entries[0].stop_price, expected_stop)
+
+    def test_tick_slice_accessor_matches_dict_tick_map(self):
+        """range accessor 與舊 dict tick_map 對策略結果應一致。"""
+        strat_dict = self._make_strat()
+        strat_range = self._make_strat()
+        k0 = _k(0, 100.0, 110.0, 90.0, 108.0)
+        entry_bar = _k(1, 107.5, 115.0, 107.0, 114.0, vol=120.0, tbv=80.0)
+        ticks = _tick_arr([
+            (entry_bar.open_time + 1, 107.5, 0.5, 0.0),
+            (entry_bar.open_time + 2, 107.8, 0.4, 1.0),
+            (entry_bar.open_time + 3, 108.3, 0.6, 0.0),
+            (entry_bar.open_time + 4, 109.0, 0.3, 1.0),
+        ])
+        tick_map = {entry_bar.open_time: ticks}
+        accessor = TickSliceAccessor(
+            ticks,
+            build_bar_ranges(ticks, [(entry_bar.open_time, entry_bar.close_time)]),
+        )
+
+        dict_signals = strat_dict.on_history([k0, entry_bar], tick_map=tick_map)
+        range_signals = strat_range.on_history([k0, entry_bar], tick_map=accessor)
+
+        def _sig_view(sig):
+            return (
+                sig.open_time,
+                sig.price,
+                sig.signal_type,
+                sig.label,
+                sig.stop_price,
+                sig.fill_price,
+            )
+
+        self.assertEqual(
+            [_sig_view(s) for s in dict_signals],
+            [_sig_view(s) for s in range_signals],
+        )
 
     def test_tick_entry_invalidates_if_structure_broken_first(self):
         """tick 先打破 k0.low，即使後來再突破 k0.high 也不進場。"""
