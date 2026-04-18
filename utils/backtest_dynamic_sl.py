@@ -50,7 +50,7 @@ SHARDS = [
     },
 ]
 
-STRATEGY_NAME = "Wick Reversal 1m v4"
+DEFAULT_STRATEGY_NAME = "Wick Reversal 1m v5"
 BAR_MS = 60_000  # 1m
 
 BACKTEST_CFG = BacktestConfig(
@@ -204,21 +204,31 @@ def run_shard(shard: dict, strategy_cls, strategy_factory: Optional[Callable] = 
 def main():
     import argparse
     ap = argparse.ArgumentParser()
+    ap.add_argument("--strategy", default=DEFAULT_STRATEGY_NAME)
     ap.add_argument("--regime-params", default="",
                     help="path to regime opt JSON (enables regime mode with optimized params)")
     args = ap.parse_args()
 
-    strategy_cls = STRATEGY_REGISTRY.get(STRATEGY_NAME)
+    strategy_name = args.strategy
+    strategy_cls = STRATEGY_REGISTRY.get(strategy_name)
     if strategy_cls is None:
-        raise SystemExit(f"strategy not found: {STRATEGY_NAME}")
+        raise SystemExit(f"strategy not found: {strategy_name}")
 
     regime_params: dict | None = None
     if args.regime_params:
         with open(args.regime_params, encoding="utf-8") as f:
             data = json.load(f)
         regime_params = data.get("combined_params", {})
-        print(f"Strategy: {STRATEGY_NAME}  [REGIME MODE]")
+        print(f"Strategy: {strategy_name}  [REGIME MODE]")
         print(f"  regime_breaks: {regime_params.get('regime_price_break_0')} / {regime_params.get('regime_price_break_1')}")
+        if float(regime_params.get("regime_band_size", 0) or 0) > 0:
+            band_prefixes = sorted({
+                key.split("_", 1)[0]
+                for key in regime_params
+                if key.startswith("b") and "_" in key
+            })
+            print(f"  regime_band_size: {regime_params.get('regime_band_size')}")
+            print(f"  band_overrides: {', '.join(band_prefixes) if band_prefixes else '(none)'}")
         for ri in range(3):
             rr_a = regime_params.get(f'r{ri}_long_rr_wick_a', '?')
             rr_b = regime_params.get(f'r{ri}_long_rr_wick_b', '?')
@@ -227,9 +237,16 @@ def main():
             print(f"  R{ri}: long_rr={rr_a}/{rr_b}/{rr_c}  short_rr_a={srr_a}")
     else:
         inst = strategy_cls()
-        print(f"Strategy: {STRATEGY_NAME}  [GLOBAL MODE]")
+        print(f"Strategy: {strategy_name}  [GLOBAL MODE]")
         print(f"  long_sl_pct_floor={inst.long_sl_pct_floor}  long_sl_wick_mult={inst.long_sl_wick_mult}  long_sl_pct_cap={inst.long_sl_pct_cap}")
         print(f"  short_sl_pct_floor={inst.short_sl_pct_floor}  short_sl_wick_mult={inst.short_sl_wick_mult}  short_sl_pct_cap={inst.short_sl_pct_cap}")
+        if float(getattr(inst, "regime_band_size", 0) or 0) > 0:
+            band_prefixes = sorted({
+                key.split("_", 1)[0]
+                for key in vars(type(inst))
+                if key.startswith("b") and "_" in key
+            })
+            print(f"  regime_band_size={inst.regime_band_size}  band_overrides={', '.join(band_prefixes) if band_prefixes else '(none)'}")
 
     def _make_strategy():
         s = strategy_cls()

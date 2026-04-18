@@ -1,0 +1,40 @@
+{
+  "source_reports": [
+    "docs\\reports\\wick_v5_price_bands_opt_high_long.json",
+    "docs\\reports\\wick_v5_price_bands_opt_misc_short.json"
+  ],
+  "accepted_bands": [
+    "b5_short",
+    "b8_long",
+    "b11_long"
+  ],
+  "combined_params": {
+    "enable_regime_mode": true,
+    "regime_band_floor": 0.0,
+    "regime_band_size": 10000.0,
+    "b5_short_sl_pct_floor": 0.001,
+    "b5_short_sl_wick_mult": 0.2,
+    "b5_short_sl_pct_cap": 0.003,
+    "b5_short_k0_vol_gate": 500.0,
+    "b5_short_rr_wick_a": 2.5,
+    "b5_short_rr_wick_b": 1.5,
+    "b5_short_rr_wick_c": 0.8,
+    "b5_short_min_fee_cover_ratio": 2.0,
+    "b8_long_sl_pct_floor": 0.0003,
+    "b8_long_sl_wick_mult": 0.2,
+    "b8_long_sl_pct_cap": 0.003,
+    "b8_long_k0_vol_gate": 800.0,
+    "b8_long_rr_wick_a": 3.0,
+    "b8_long_rr_wick_b": 2.0,
+    "b8_long_rr_wick_c": 1.0,
+    "b8_long_min_fee_cover_ratio": 1.2,
+    "b11_long_sl_pct_floor": 0.001,
+    "b11_long_sl_wick_mult": 0.2,
+    "b11_long_sl_pct_cap": 0.002,
+    "b11_long_k0_vol_gate": 800.0,
+    "b11_long_rr_wick_a": 3.0,
+    "b11_long_rr_wick_b": 1.5,
+    "b11_long_rr_wick_c": 1.0,
+    "b11_long_min_fee_cover_ratio": 1.2
+  }
+}

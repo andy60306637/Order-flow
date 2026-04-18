@@ -118,6 +118,8 @@ class WickReversalV5Strategy(StrategyBase):
     enable_regime_mode: bool = True
     regime_price_break_0: float = 50000.0
     regime_price_break_1: float = 85000.0
+    regime_band_size: float = 10000.0
+    regime_band_floor: float = 0.0
     # R0 long（低價區間 <50k，optimizer calibrated）
     r0_long_sl_pct_floor: float = 0.001
     r0_long_sl_wick_mult: float = 0.2
@@ -172,6 +174,32 @@ class WickReversalV5Strategy(StrategyBase):
     r2_short_rr_wick_b: float = 2.5
     r2_short_rr_wick_c: float = 2.0
     r2_short_min_fee_cover_ratio: float = 2.0
+    # Accepted price-band overrides (3-year tick optimization, 10k bands).
+    # Bands without b{idx}_* overrides fall back to legacy r0/r1/r2 profiles.
+    b5_short_sl_pct_floor: float = 0.001
+    b5_short_sl_wick_mult: float = 0.2
+    b5_short_sl_pct_cap: float = 0.003
+    b5_short_k0_vol_gate: float = 500.0
+    b5_short_rr_wick_a: float = 2.5
+    b5_short_rr_wick_b: float = 1.5
+    b5_short_rr_wick_c: float = 0.8
+    b5_short_min_fee_cover_ratio: float = 2.0
+    b8_long_sl_pct_floor: float = 0.0003
+    b8_long_sl_wick_mult: float = 0.2
+    b8_long_sl_pct_cap: float = 0.003
+    b8_long_k0_vol_gate: float = 800.0
+    b8_long_rr_wick_a: float = 3.0
+    b8_long_rr_wick_b: float = 2.0
+    b8_long_rr_wick_c: float = 1.0
+    b8_long_min_fee_cover_ratio: float = 1.2
+    b11_long_sl_pct_floor: float = 0.001
+    b11_long_sl_wick_mult: float = 0.2
+    b11_long_sl_pct_cap: float = 0.002
+    b11_long_k0_vol_gate: float = 800.0
+    b11_long_rr_wick_a: float = 3.0
+    b11_long_rr_wick_b: float = 1.5
+    b11_long_rr_wick_c: float = 1.0
+    b11_long_min_fee_cover_ratio: float = 1.2
 
     def on_history(
         self,
@@ -505,18 +533,32 @@ class WickReversalV5Strategy(StrategyBase):
     def _short_body_floor(self, price: float) -> float:
         return max(price * self.short_body_floor_pct, 1e-9)
 
-    def _get_regime(self, price: float) -> int:
+    def _get_legacy_regime(self, price: float) -> int:
         if price < self.regime_price_break_0:
             return 0
         if price < self.regime_price_break_1:
             return 1
         return 2
 
+    def _get_band_regime(self, price: float) -> int:
+        band_size = float(getattr(self, "regime_band_size", 0.0) or 0.0)
+        if band_size <= 0:
+            return -1
+        band_floor = float(getattr(self, "regime_band_floor", 0.0) or 0.0)
+        shifted = max(price - band_floor, 0.0)
+        return int(shifted // band_size)
+
     def _rp(self, name: str, price: float):
         """Return regime-specific param when enable_regime_mode=True, else global."""
         if self.enable_regime_mode:
-            r = self._get_regime(price)
-            regime_attr = f'r{r}_{name}'
+            band_regime = self._get_band_regime(price)
+            if band_regime >= 0:
+                band_attr = f'b{band_regime}_{name}'
+                if hasattr(self, band_attr):
+                    return getattr(self, band_attr)
+
+            legacy_regime = self._get_legacy_regime(price)
+            regime_attr = f'r{legacy_regime}_{name}'
             if hasattr(self, regime_attr):
                 return getattr(self, regime_attr)
         return getattr(self, name)
