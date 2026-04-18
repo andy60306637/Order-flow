@@ -1,0 +1,437 @@
+{
+  "generated_at_utc": "2026-04-18T06:55:43+00:00",
+  "alignment_samples": [
+    {
+      "label": "2023/06 Sample Week",
+      "symbol": "BTCUSDT_20230414_20240413",
+      "start": "2023-06-05",
+      "end_exclusive": "2023-06-12",
+      "bars_expected": 10080,
+      "bars_rebuilt": 10080,
+      "bars_exchange": 10080,
+      "ticks": 9317337,
+      "bars_with_any_mismatch": 2153,
+      "mismatch_rate_pct": 21.359127,
+      "field_mismatch_counts": {
+        "volume": 2148,
+        "taker_buy_volume": 1198,
+        "open": 709,
+        "high": 27,
+        "low": 31
+      },
+      "max_diffs": {
+        "open": 5.5,
+        "high": 0.9,
+        "low": 0.2,
+        "close": 0.0,
+        "volume": 17.781,
+        "taker_buy_volume": 17.781
+      },
+      "worst_days": [
+        {
+          "date": "2023-06-06",
+          "bars_with_mismatch": 371
+        },
+        {
+          "date": "2023-06-10",
+          "bars_with_mismatch": 369
+        },
+        {
+          "date": "2023-06-05",
+          "bars_with_mismatch": 331
+        },
+        {
+          "date": "2023-06-07",
+          "bars_with_mismatch": 331
+        },
+        {
+          "date": "2023-06-11",
+          "bars_with_mismatch": 257
+        }
+      ],
+      "worst_examples": [
+        {
+          "open_time_utc": "2023-06-09T14:19:00+00:00",
+          "diffs": {
+            "volume": 17.781,
+            "taker_buy_volume": 17.781
+          },
+          "rebuilt": {
+            "open": 26662.4,
+            "high": 26676.0,
+            "low": 26662.3,
+            "close": 26676.0,
+            "volume": 194.806,
+            "taker_buy_volume": 152.613
+          },
+          "exchange": {
+            "open": 26662.4,
+            "high": 26676.0,
+            "low": 26662.3,
+            "close": 26676.0,
+            "volume": 177.025,
+            "taker_buy_volume": 134.832
+          }
+        },
+        {
+          "open_time_utc": "2023-06-09T14:20:00+00:00",
+          "diffs": {
+            "open": 0.1,
+            "volume": 17.781,
+            "taker_buy_volume": 17.781
+          },
+          "rebuilt": {
+            "open": 26675.9,
+            "high": 26679.0,
+            "low": 26662.0,
+            "close": 26666.8,
+            "volume": 275.452,
+            "taker_buy_volume": 144.093
+          },
+          "exchange": {
+            "open": 26676.0,
+            "high": 26679.0,
+            "low": 26662.0,
+            "close": 26666.8,
+            "volume": 293.233,
+            "taker_buy_volume": 161.874
+          }
+        },
+        {
+          "open_time_utc": "2023-06-08T03:38:00+00:00",
+          "diffs": {
+            "open": 0.1,
+            "volume": 15.546,
+            "taker_buy_volume": 15.546
+          },
+          "rebuilt": {
+            "open": 26257.0,
+            "high": 26264.8,
+            "low": 26236.4,
+            "close": 26248.1,
+            "volume": 570.794,
+            "taker_buy_volume": 204.333
+          },
+          "exchange": {
+            "open": 26256.9,
+            "high": 26264.8,
+            "low": 26236.4,
+            "close": 26248.1,
+            "volume": 586.34,
+            "taker_buy_volume": 219.879
+          }
+        },
+        {
+          "open_time_utc": "2023-06-08T03:37:00+00:00",
+          "diffs": {
+            "volume": 15.546,
+            "taker_buy_volume": 15.546
+          },
+          "rebuilt": {
+            "open": 26271.1,
+            "high": 26276.6,
+            "low": 26251.7,
+            "close": 26256.9,
+            "volume": 245.984,
+            "taker_buy_volume": 114.902
+          },
+          "exchange": {
+            "open": 26271.1,
+            "high": 26276.6,
+            "low": 26251.7,
+            "close": 26256.9,
+            "volume": 230.438,
+            "taker_buy_volume": 99.356
+          }
+        },
+        {
+          "open_time_utc": "2023-06-05T20:59:00+00:00",
+          "diffs": {
+            "open": 0.1,
+            "low": 0.1,
+            "volume": 13.292,
+            "taker_buy_volume": 13.292
+          },
+          "rebuilt": {
+            "open": 25611.9,
+            "high": 25623.7,
+            "low": 25611.9,
+            "close": 25620.6,
+            "volume": 218.879,
+            "taker_buy_volume": 152.554
+          },
+          "exchange": {
+            "open": 25611.8,
+            "high": 25623.7,
+            "low": 25611.8,
+            "close": 25620.6,
+            "volume": 232.171,
+            "taker_buy_volume": 165.846
+          }
+        }
+      ],
+      "first_tick_delay_ms": {
+        "median": 80.0,
+        "p95": 296.0,
+        "max": 5292.0
+      },
+      "last_tick_gap_ms": {
+        "median": 101.0,
+        "p95": 581.1,
+        "max": 2490.0
+      },
+      "all_closes_match": true
+    },
+    {
+      "label": "2024/06 Sample Week",
+      "symbol": "BTCUSDT_20240414_20250413",
+      "start": "2024-06-03",
+      "end_exclusive": "2024-06-10",
+      "bars_expected": 10080,
+      "bars_rebuilt": 10080,
+      "bars_exchange": 10080,
+      "ticks": 6204437,
+      "bars_with_any_mismatch": 1462,
+      "mismatch_rate_pct": 14.503968,
+      "field_mismatch_counts": {
+        "volume": 1461,
+        "taker_buy_volume": 804,
+        "open": 487,
+        "high": 22,
+        "low": 24
+      },
+      "max_diffs": {
+        "open": 12.4,
+        "high": 2.4,
+        "low": 1.0,
+        "close": 0.0,
+        "volume": 11.218,
+        "taker_buy_volume": 11.218
+      },
+      "worst_days": [
+        {
+          "date": "2024-06-07",
+          "bars_with_mismatch": 282
+        },
+        {
+          "date": "2024-06-04",
+          "bars_with_mismatch": 245
+        },
+        {
+          "date": "2024-06-03",
+          "bars_with_mismatch": 225
+        },
+        {
+          "date": "2024-06-05",
+          "bars_with_mismatch": 211
+        },
+        {
+          "date": "2024-06-06",
+          "bars_with_mismatch": 202
+        }
+      ],
+      "worst_examples": [
+        {
+          "open_time_utc": "2024-06-07T18:15:00+00:00",
+          "diffs": {
+            "open": 12.4,
+            "volume": 0.022
+          },
+          "rebuilt": {
+            "open": 68555.4,
+            "high": 69055.7,
+            "low": 68516.5,
+            "close": 69044.0,
+            "volume": 3219.786,
+            "taker_buy_volume": 1745.291
+          },
+          "exchange": {
+            "open": 68543.0,
+            "high": 69055.7,
+            "low": 68516.5,
+            "close": 69044.0,
+            "volume": 3219.808,
+            "taker_buy_volume": 1745.291
+          }
+        },
+        {
+          "open_time_utc": "2024-06-07T17:49:00+00:00",
+          "diffs": {
+            "volume": 11.218,
+            "taker_buy_volume": 11.218
+          },
+          "rebuilt": {
+            "open": 70420.4,
+            "high": 70432.4,
+            "low": 70324.3,
+            "close": 70324.4,
+            "volume": 262.591,
+            "taker_buy_volume": 125.68
+          },
+          "exchange": {
+            "open": 70420.4,
+            "high": 70432.4,
+            "low": 70324.3,
+            "close": 70324.4,
+            "volume": 251.373,
+            "taker_buy_volume": 114.462
+          }
+        },
+        {
+          "open_time_utc": "2024-06-07T17:50:00+00:00",
+          "diffs": {
+            "open": 0.2,
+            "volume": 11.218,
+            "taker_buy_volume": 11.218
+          },
+          "rebuilt": {
+            "open": 70324.6,
+            "high": 70387.6,
+            "low": 70323.5,
+            "close": 70384.6,
+            "volume": 159.766,
+            "taker_buy_volume": 118.273
+          },
+          "exchange": {
+            "open": 70324.4,
+            "high": 70387.6,
+            "low": 70323.5,
+            "close": 70384.6,
+            "volume": 170.984,
+            "taker_buy_volume": 129.491
+          }
+        },
+        {
+          "open_time_utc": "2024-06-05T01:37:00+00:00",
+          "diffs": {
+            "volume": 7.513
+          },
+          "rebuilt": {
+            "open": 71136.6,
+            "high": 71282.1,
+            "low": 71133.1,
+            "close": 71258.9,
+            "volume": 370.269,
+            "taker_buy_volume": 226.271
+          },
+          "exchange": {
+            "open": 71136.6,
+            "high": 71282.1,
+            "low": 71133.1,
+            "close": 71258.9,
+            "volume": 362.756,
+            "taker_buy_volume": 226.271
+          }
+        },
+        {
+          "open_time_utc": "2024-06-05T01:38:00+00:00",
+          "diffs": {
+            "open": 0.9,
+            "volume": 7.513
+          },
+          "rebuilt": {
+            "open": 71258.0,
+            "high": 71272.9,
+            "low": 71250.0,
+            "close": 71251.3,
+            "volume": 176.749,
+            "taker_buy_volume": 87.712
+          },
+          "exchange": {
+            "open": 71258.9,
+            "high": 71272.9,
+            "low": 71250.0,
+            "close": 71251.3,
+            "volume": 184.262,
+            "taker_buy_volume": 87.712
+          }
+        }
+      ],
+      "first_tick_delay_ms": {
+        "median": 92.0,
+        "p95": 624.0,
+        "max": 3393.0
+      },
+      "last_tick_gap_ms": {
+        "median": 162.0,
+        "p95": 909.0,
+        "max": 5447.0
+      },
+      "all_closes_match": true
+    }
+  ],
+  "segment_summary": [
+    {
+      "dataset": "y2023",
+      "optimized_positive_segments": 1,
+      "total_segments": 4,
+      "baseline_avg_score": -109.738432,
+      "optimized_avg_score": -36.43985,
+      "avg_score_delta": 73.298582,
+      "best_plan": {
+        "name": "m8_to_m4",
+        "optimized_test_score": 33.366268,
+        "profit_factor": 1.438861,
+        "trades": 55
+      },
+      "worst_plan": {
+        "name": "h2_to_h1",
+        "optimized_test_score": -133.807729,
+        "profit_factor": 0.713692,
+        "trades": 210
+      }
+    },
+    {
+      "dataset": "y2024",
+      "optimized_positive_segments": 3,
+      "total_segments": 4,
+      "baseline_avg_score": 1.939537,
+      "optimized_avg_score": 9.765968,
+      "avg_score_delta": 7.826432,
+      "best_plan": {
+        "name": "m4_to_m8",
+        "optimized_test_score": 55.053226,
+        "profit_factor": 1.264757,
+        "trades": 137
+      },
+      "worst_plan": {
+        "name": "h2_to_h1",
+        "optimized_test_score": -52.839006,
+        "profit_factor": 0.877032,
+        "trades": 118
+      }
+    },
+    {
+      "dataset": "y2025",
+      "optimized_positive_segments": 4,
+      "total_segments": 4,
+      "baseline_avg_score": 159.951917,
+      "optimized_avg_score": 60.971782,
+      "avg_score_delta": -98.980135,
+      "best_plan": {
+        "name": "m4_to_m8",
+        "optimized_test_score": 88.359047,
+        "profit_factor": 1.326153,
+        "trades": 133
+      },
+      "worst_plan": {
+        "name": "h1_to_h2",
+        "optimized_test_score": 28.80068,
+        "profit_factor": 1.234436,
+        "trades": 102
+      }
+    }
+  ],
+  "conclusions": [
+    "樣本週的 tick 重建 1m K 棒與交易所快取存在顯著差異，問題集中在 open/high/low/volume，close 全數吻合。",
+    "這更像是 aggTrade 缺片或極值遺漏，而不是 bar 索引錯位；時間範圍內未觀察到跨分鐘漂移。",
+    "分段實驗顯示 2023 年優化後仍大多為負分，2025 年則全部維持正分，策略表現確實高度 regime-dependent。",
+    "同一組優化流程對 2025 年平均反而降分，說明目前參數搜尋無法產出穩定跨年份解。"
+  ],
+  "next_steps": [
+    "優先回補 BTCUSDT_20230414_20240413 的高差異日期：2023-06-06, 2023-06-10, 2023-06-05，先核對 shard/manifest，再針對原始 zip 重新匯入。",
+    "後續參數掃描先以 y2023 / y2024 的失敗段 (`h2_to_h1`) 當 canary，並保留 y2025 baseline 當控制組，避免對 2025 過度調參。",
+    "在資料回補完成前，先不要擴大全區間重優化；否則很可能只是對不完整 tick 序列做 overfit。",
+    "資料修正後，先重跑 `y2023:h2_to_h1` 與 `y2024:h2_to_h1`，只掃 `long/short_delta_eff_threshold` 與 `long/short_sl_offset` 的小網格。"
+  ]
+}

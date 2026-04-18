@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backtest.engine import BacktestConfig, simulate_trades
+from core import kline_cache
 from core.tick_cache import (
     build_bar_map,
     build_tick_slice_accessor,
@@ -132,9 +133,29 @@ def _run_once(args, days: int, tick_access: str) -> dict[str, Any]:
     if len(ticks) == 0:
         raise SystemExit(f"no ticks found for last {days} days of {args.symbol}")
 
-    klines, kline_time, _, rss_after_kline = _stage_timing(
-        lambda: _build_klines_from_ticks(args.symbol, ticks, interval=args.interval)
-    )
+    if args.bar_source == "exchange":
+        bar_ms = {
+            "1m": 60_000,
+            "3m": 180_000,
+            "5m": 300_000,
+            "15m": 900_000,
+            "30m": 1_800_000,
+            "1h": 3_600_000,
+            "4h": 14_400_000,
+        }.get(args.interval)
+        if bar_ms is None:
+            raise SystemExit(f"unsupported interval for exchange bar source: {args.interval}")
+        start_bar_ms = int(ticks[0, 0] // bar_ms) * bar_ms
+        end_bar_ms = int(ticks[-1, 0] // bar_ms) * bar_ms
+        klines, kline_time, _, rss_after_kline = _stage_timing(
+            lambda: kline_cache.load_range_as_klines(args.symbol, args.interval, start_bar_ms, end_bar_ms)
+        )
+    else:
+        klines, kline_time, _, rss_after_kline = _stage_timing(
+            lambda: _build_klines_from_ticks(args.symbol, ticks, interval=args.interval)
+        )
+    if not klines:
+        raise SystemExit("no klines available for selected benchmark window")
     kline_times = [(k.open_time, k.close_time) for k in klines]
 
     if tick_access == "range":
@@ -195,6 +216,7 @@ def _run_once(args, days: int, tick_access: str) -> dict[str, Any]:
         "days": days,
         "tick_access": tick_access,
         "load_mode": args.load_mode,
+        "bar_source": args.bar_source,
         "ticks": len(ticks),
         "bars": len(klines),
         "tick_coverage": len(tick_map),
@@ -227,6 +249,10 @@ def main() -> None:
     parser.add_argument("--days", default="7,90,365",
                         help="comma-separated day windows, default: 7,90,365")
     parser.add_argument("--tick-access", choices=["map", "range", "both"], default="both")
+    parser.add_argument(
+        "--bar-source", choices=["exchange", "tick"], default="exchange",
+        help="exchange=official cached klines as backbone, tick=rebuild bars from ticks",
+    )
     parser.add_argument(
         "--load-mode", choices=["auto", "legacy"], default="auto",
         help="auto=use shard-aware load_range, legacy=load full NPZ then slice",

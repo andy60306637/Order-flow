@@ -38,6 +38,7 @@ def _kline_delta_eff(k: Kline) -> float:
 @register
 class WickReversalV4Strategy(StrategyBase):
     name = "Wick Reversal 1m v4"
+    allow_bar_fallback_in_tick_mode: bool = True
 
     # ── 做多參數 ──────────────────────────────────────────────────────────────
     enable_long: bool = True                        # 啟用做多
@@ -123,6 +124,7 @@ class WickReversalV4Strategy(StrategyBase):
         self._trailing  = False
         self._td_consec = 0
         self._stop_price = 0.0
+        self._fallback_bar_count = 0
         self.k0_records: list = []   # 供外部分析用 (k0 特徵 + entry 資訊)
 
         for i, k in enumerate(klines):
@@ -177,7 +179,7 @@ class WickReversalV4Strategy(StrategyBase):
                 elif k.low < min(long_k0.open, long_k0.close):
                     long_k0 = None   # 實體低點守護線被破
                 else:
-                    if use_ticks and k.open_time in tick_map:
+                    if use_ticks:
                         entered, entry_price, stop_price, target_price = self._tick_entry(
                             k, i, klines, tick_map, signals, long_k0,
                         )
@@ -202,7 +204,7 @@ class WickReversalV4Strategy(StrategyBase):
                 elif k.high > max(short_k0.open, short_k0.close):
                     short_k0 = None  # 實體高點守護線被破
                 else:
-                    if use_ticks and k.open_time in tick_map:
+                    if use_ticks:
                         entered, entry_price, stop_price, target_price = self._tick_entry_short(
                             k, i, klines, tick_map, signals, short_k0,
                         )
@@ -336,6 +338,9 @@ class WickReversalV4Strategy(StrategyBase):
 
         ticks = tick_map.get(k.open_time)
         if ticks is None or len(ticks) == 0:
+            if not self.allow_bar_fallback_in_tick_mode:
+                return False, 0.0, 0.0, 0.0
+            self._fallback_bar_count += 1
             return self._bar_entry(k, i, klines, signals, k0)
 
         # Vol SMA 前置檢查：用前一根已收棒避免 look-ahead
@@ -537,6 +542,9 @@ class WickReversalV4Strategy(StrategyBase):
     ) -> bool:
         ticks = tick_map.get(k.open_time)
         if ticks is None or len(ticks) == 0:
+            if not self.allow_bar_fallback_in_tick_mode:
+                return False, 0.0, 0.0, 0.0
+            self._fallback_bar_count += 1
             return self._bar_exit_simple_long(k, signals, target_price)
 
         cum_buy_vol = 0.0
@@ -781,6 +789,9 @@ class WickReversalV4Strategy(StrategyBase):
 
         ticks = tick_map.get(k.open_time)
         if ticks is None or len(ticks) == 0:
+            if not self.allow_bar_fallback_in_tick_mode:
+                return False, 0.0, 0.0, 0.0
+            self._fallback_bar_count += 1
             return self._bar_entry_short(k, i, klines, signals, k0)
 
         prev_vol = klines[i - 1].volume if i > 0 else 0.0
@@ -843,6 +854,9 @@ class WickReversalV4Strategy(StrategyBase):
     ) -> bool:
         ticks = tick_map.get(k.open_time)
         if ticks is None or len(ticks) == 0:
+            if not self.allow_bar_fallback_in_tick_mode:
+                return False
+            self._fallback_bar_count += 1
             return self._bar_exit_simple_short(k, signals, target_price)
 
         cum_buy_vol = 0.0

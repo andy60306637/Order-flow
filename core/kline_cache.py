@@ -15,6 +15,8 @@ from typing import Optional
 
 import numpy as np
 
+from core.data_types import Kline
+
 logger = logging.getLogger(__name__)
 
 # 快取目錄（project root / data / klines）
@@ -112,6 +114,28 @@ def info(symbol: str, interval: str) -> Optional[dict]:
     except Exception as exc:
         logger.error("kline_cache info error [%s]: %s", path.name, exc)
         return None
+
+
+def load_range(symbol: str, interval: str, start_ms: int, end_ms: int) -> list[list]:
+    """讀取 open_time 落在 [start_ms, end_ms] 的 K 線列。"""
+    path = cache_path(symbol, interval)
+    if not path.exists():
+        return []
+    try:
+        arr = np.load(str(path), mmap_mode="r")
+        open_times = arr[:, 0].astype(np.int64)
+        lo = int(np.searchsorted(open_times, start_ms, side="left"))
+        hi = int(np.searchsorted(open_times, end_ms, side="right"))
+        return arr[lo:hi].tolist()
+    except Exception as exc:
+        logger.error("kline_cache load_range error [%s]: %s", path.name, exc)
+        return []
+
+
+def load_range_as_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> list[Kline]:
+    """讀取 open_time 落在 [start_ms, end_ms] 的 K 線並轉成 Kline 物件。"""
+    rows = load_range(symbol, interval, start_ms, end_ms)
+    return [Kline.from_rest(symbol.upper(), interval, row) for row in rows]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

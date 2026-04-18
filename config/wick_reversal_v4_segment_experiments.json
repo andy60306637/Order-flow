@@ -1,0 +1,139 @@
+{
+  "datasets": [
+    {
+      "name": "y2023",
+      "label": "2023-04-14 ~ 2024-04-13",
+      "symbol": "BTCUSDT_20230414_20240413",
+      "start": "2023-04-14",
+      "end": "2024-04-14"
+    },
+    {
+      "name": "y2024",
+      "label": "2024-04-14 ~ 2025-04-13",
+      "symbol": "BTCUSDT_20240414_20250413",
+      "start": "2024-04-14",
+      "end": "2025-04-14"
+    },
+    {
+      "name": "y2025",
+      "label": "2025-04-14 ~ 2026-04-13",
+      "symbol": "BTCUSDT",
+      "start": "2025-04-14",
+      "end": "2026-04-14"
+    }
+  ],
+  "plans": [
+    {
+      "name": "h1_to_h2",
+      "description": "前 6 個月優化，後 6 個月測試",
+      "train": {
+        "start_month": 0,
+        "end_month": 6
+      },
+      "test": {
+        "start_month": 6,
+        "end_month": 12
+      }
+    },
+    {
+      "name": "h2_to_h1",
+      "description": "後 6 個月優化，前 6 個月測試",
+      "train": {
+        "start_month": 6,
+        "end_month": 12
+      },
+      "test": {
+        "start_month": 0,
+        "end_month": 6
+      }
+    },
+    {
+      "name": "m8_to_m4",
+      "description": "前 8 個月優化，後 4 個月測試",
+      "train": {
+        "start_month": 0,
+        "end_month": 8
+      },
+      "test": {
+        "start_month": 8,
+        "end_month": 12
+      }
+    },
+    {
+      "name": "m4_to_m8",
+      "description": "前 4 個月優化，後 8 個月測試",
+      "train": {
+        "start_month": 0,
+        "end_month": 4
+      },
+      "test": {
+        "start_month": 4,
+        "end_month": 12
+      }
+    },
+    {
+      "name": "q1_to_q2",
+      "description": "第 1 季優化，第 2 季測試",
+      "train": {
+        "start_month": 0,
+        "end_month": 3
+      },
+      "test": {
+        "start_month": 3,
+        "end_month": 6
+      }
+    },
+    {
+      "name": "q2_to_q3",
+      "description": "第 2 季優化，第 3 季測試",
+      "train": {
+        "start_month": 3,
+        "end_month": 6
+      },
+      "test": {
+        "start_month": 6,
+        "end_month": 9
+      }
+    },
+    {
+      "name": "q3_to_q4",
+      "description": "第 3 季優化，第 4 季測試",
+      "train": {
+        "start_month": 6,
+        "end_month": 9
+      },
+      "test": {
+        "start_month": 9,
+        "end_month": 12
+      }
+    }
+  ],
+  "groups": {
+    "default": [
+      "h1_to_h2",
+      "h2_to_h1",
+      "m8_to_m4",
+      "m4_to_m8"
+    ],
+    "half_year": [
+      "h1_to_h2",
+      "h2_to_h1",
+      "m8_to_m4",
+      "m4_to_m8"
+    ],
+    "quarter_walk": [
+      "q1_to_q2",
+      "q2_to_q3",
+      "q3_to_q4"
+    ],
+    "all": [
+      "h1_to_h2",
+      "h2_to_h1",
+      "m8_to_m4",
+      "m4_to_m8",
+      "q1_to_q2",
+      "q2_to_q3",
+      "q3_to_q4"
+    ]
+  }
+}

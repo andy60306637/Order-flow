@@ -15,9 +15,19 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backtest.engine import BacktestConfig, simulate_trades
+from core import kline_cache
 from core.tick_cache import load_meta, load_range, build_bar_map
 from strategies.wick_reversal_v4 import WickReversalV4Strategy
-from utils.tick_data_backtest import _build_klines_from_ticks
+
+_INTERVAL_MS = {
+    "1m": 60_000,
+    "3m": 180_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "30m": 1_800_000,
+    "1h": 3_600_000,
+    "4h": 14_400_000,
+}
 
 
 def _dt_to_ms(s: str) -> int:
@@ -110,11 +120,30 @@ def _slice_ticks(ticks, start_ms: int, end_ms: int):
     return ticks[lo:hi]
 
 
+def _backbone_symbol(symbol: str) -> str:
+    return symbol.upper().split("_", 1)[0]
+
+
+def _load_backbone_klines(symbol: str, interval: str, start_ms: int, end_ms_inclusive: int) -> list:
+    bar_ms = _INTERVAL_MS.get(interval)
+    if bar_ms is None:
+        raise ValueError(f"unsupported interval for exchange bar source: {interval}")
+    start_bar_ms = (start_ms // bar_ms) * bar_ms
+    end_bar_ms = (end_ms_inclusive // bar_ms) * bar_ms
+    return kline_cache.load_range_as_klines(
+        _backbone_symbol(symbol),
+        interval,
+        start_bar_ms,
+        end_bar_ms,
+    )
+
+
 @dataclass
 class Dataset:
     name: str
     klines: list
     tick_map: dict
+    tick_count: int
 
 
 class StrategyRunner:
@@ -139,20 +168,22 @@ class StrategyRunner:
 
     def _build_dataset(self, name: str, start_ms: int, end_ms: int) -> Dataset:
         sub_ticks = load_range(self.symbol, start_ms, end_ms)
-        klines = _build_klines_from_ticks(self.symbol, sub_ticks, interval=self.interval)
+        klines = _load_backbone_klines(self.symbol, self.interval, start_ms, end_ms)
         tick_map = build_bar_map(sub_ticks, [(k.open_time, k.close_time) for k in klines])
-        return Dataset(name=name, klines=klines, tick_map=tick_map)
+        return Dataset(name=name, klines=klines, tick_map=tick_map, tick_count=int(len(sub_ticks)))
 
     def run(self, params: dict[str, Any], dataset: Dataset) -> dict[str, Any]:
         strategy = WickReversalV4Strategy()
         for key, value in params.items():
             setattr(strategy, key, value)
+        strategy.allow_bar_fallback_in_tick_mode = False
         signals = strategy.on_history(dataset.klines, tick_map=dataset.tick_map)
         stats = simulate_trades(signals, deepcopy(self.cfg))
         stats["score"] = _score_stats(stats)
         stats["side_long"] = _side_stats(stats["trade_list"], "long")
         stats["side_short"] = _side_stats(stats["trade_list"], "short")
         stats["label_breakdown"] = _label_breakdown(stats["trade_list"])
+        stats["fallback_bar_count"] = getattr(strategy, "_fallback_bar_count", 0)
         return _to_builtin(stats)
 
 
@@ -322,6 +353,7 @@ def _grid_for_side(side: str) -> dict[str, list[Any]]:
             "long_rr_wick_b": [1.5, 2.0, 2.3, 2.5],
             "long_rr_wick_c": [1.2, 1.5, 1.8, 2.0],
         }
+    if side == "short":
         return {
             "short_k0_vol_gate": [300.0, 500.0, 800.0, 1200.0],
             "short_delta_eff_threshold": [0.8, 1.0, 1.2, 1.4],
@@ -335,10 +367,11 @@ def _grid_for_side(side: str) -> dict[str, list[Any]]:
             "short_sl_offset": [5.0, 7.5, 10.0, 12.5],
             "short_td_consec_bars": [1, 2, 3],
             "short_min_fee_cover_ratio": [1.2, 1.5, 2.0, 2.5],
-        "short_rr_wick_a": [2.5, 3.0, 3.5, 4.5],
-        "short_rr_wick_b": [1.2, 1.5, 2.0, 2.5],
-        "short_rr_wick_c": [0.8, 1.0, 1.2, 1.5],
-    }
+            "short_rr_wick_a": [2.5, 3.0, 3.5, 4.5],
+            "short_rr_wick_b": [1.2, 1.5, 2.0, 2.5],
+            "short_rr_wick_c": [0.8, 1.0, 1.2, 1.5],
+        }
+    raise ValueError(f"unsupported side: {side}")
 
 
 def _brief(stats: dict[str, Any]) -> dict[str, Any]:
@@ -405,6 +438,8 @@ def main() -> None:
     report = {
         "meta": {
             "symbol": args.symbol.upper(),
+            "backbone_symbol": _backbone_symbol(args.symbol),
+            "bar_source": "exchange",
             "interval": args.interval,
             "train_start": args.train_start,
             "split_date": args.split_date,
@@ -414,6 +449,9 @@ def main() -> None:
             "train_bars": len(runner.train.klines),
             "validation_bars": len(runner.validation.klines),
             "full_bars": len(runner.full.klines),
+            "train_ticks": runner.train.tick_count,
+            "validation_ticks": runner.validation.tick_count,
+            "full_ticks": runner.full.tick_count,
         },
         "baseline": {
             "long_train": _brief(long_optimizer.evaluate(long_baseline, runner.train)),

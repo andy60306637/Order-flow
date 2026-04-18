@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Optional, List
@@ -41,7 +42,6 @@ from core.ws_client import WsWorkerThread
 from core.history_processor import HistoryProcessorThread
 from core import kline_cache, tick_cache
 from utils.ui_settings import ui_settings
-from utils.tick_data_backtest import _build_klines_from_ticks
 from strategies import STRATEGY_REGISTRY
 from strategies.base import StrategyBase, StrategySignal
 from ui.order_book_widget import OrderBookWidget
@@ -63,6 +63,10 @@ _INTERVAL_MS_MAP = {
 
 def _interval_ms(interval: str) -> int:
     return _INTERVAL_MS_MAP.get(interval, 60_000)
+
+
+def _format_utc_day(ms: int) -> str:
+    return QDateTime.fromMSecsSinceEpoch(int(ms), Qt.TimeSpec.UTC).toString("yyyy-MM-dd")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -958,6 +962,58 @@ class MainWindow(QMainWindow):
     # UI 建構
     # ══════════════════════════════════════════════════════════════
 
+    def _current_tick_backtest_symbol(self) -> str:
+        combo = getattr(self, "_bt_dataset_combo", None)
+        if combo is not None:
+            value = combo.currentData()
+            if isinstance(value, str) and value:
+                return value
+        return self._symbol
+
+    def _list_tick_backtest_symbols(self) -> list[str]:
+        symbols: list[str] = [self._symbol]
+        tick_dir = Path(__file__).resolve().parent.parent / "data" / "ticks"
+        alias_re = re.compile(rf"^{re.escape(self._symbol)}_\d{{8}}_\d{{8}}$")
+        for path in sorted(tick_dir.glob(f"{self._symbol}_*_shards.json")):
+            alias = path.name.removesuffix("_shards.json")
+            if alias_re.match(alias) and tick_cache.load_meta(alias) is not None:
+                symbols.append(alias)
+        return symbols
+
+    def _tick_dataset_label(self, symbol: str) -> str:
+        meta = tick_cache.load_meta(symbol)
+        if meta is None:
+            return symbol
+        start = _format_utc_day(int(meta["start_ms"]))
+        end = _format_utc_day(int(meta["end_ms"]))
+        if symbol == self._symbol:
+            return f"Current ({start} ~ {end})"
+        return f"{start} ~ {end}"
+
+    def _rebuild_tick_dataset_combo(self) -> None:
+        combo = getattr(self, "_bt_dataset_combo", None)
+        if combo is None:
+            return
+        previous = ui_settings.get("backtest_tick_symbol", self._symbol)
+        combo.blockSignals(True)
+        combo.clear()
+        symbols = self._list_tick_backtest_symbols()
+        for symbol in symbols:
+            combo.addItem(self._tick_dataset_label(symbol), symbol)
+        if previous in symbols:
+            combo.setCurrentIndex(symbols.index(previous))
+        else:
+            combo.setCurrentIndex(0)
+            ui_settings.set("backtest_tick_symbol", combo.currentData())
+        combo.blockSignals(False)
+
+    def _on_bt_dataset_changed(self, _label: str) -> None:
+        symbol = self._current_tick_backtest_symbol()
+        ui_settings.set("backtest_tick_symbol", symbol)
+        self._refresh_tick_label()
+        if self._bt_mode_combo.currentIndex() == 1:
+            self._rebuild_range_combo()
+
     def _build_toolbar(self) -> None:
         tb = QToolBar("主工具列", self)
         tb.setMovable(False)
@@ -1042,7 +1098,23 @@ class MainWindow(QMainWindow):
         self._run_btn.clicked.connect(self._on_run_strategy)
         tb.addWidget(self._run_btn)
 
+        self._bt_config_btn = QPushButton("⚙ 設定")
+        self._bt_config_btn.setToolTip("開啟回測參數設定")
+        self._bt_config_btn.setStyleSheet(_btn_style)
+        self._bt_config_btn.clicked.connect(self._on_open_bt_config)
+        tb.addWidget(self._bt_config_btn)
+
         # 回測範圍選擇（內容在 _build_toolbar 末尾由 _rebuild_range_combo 填充）
+        self._bt_dataset_label = QLabel("Tick Data")
+        tb.addWidget(self._bt_dataset_label)
+
+        self._bt_dataset_combo = QComboBox()
+        self._bt_dataset_combo.setToolTip("Select which tick dataset is used by Tick mode backtests.")
+        self._bt_dataset_combo.currentTextChanged.connect(self._on_bt_dataset_changed)
+        tb.addWidget(self._bt_dataset_combo)
+        self._bt_dataset_label.setVisible(False)
+        self._bt_dataset_combo.setVisible(False)
+
         self._bt_range_combo = QComboBox()
         self._bt_range_combo.setToolTip("回測資料範圍（點 ▶ 時自動載入不足的歷史）")
         tb.addWidget(self._bt_range_combo)
@@ -1099,12 +1171,6 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        self._bt_config_btn = QPushButton("⚙ 設定")
-        self._bt_config_btn.setToolTip("開啟回測參數設定")
-        self._bt_config_btn.setStyleSheet(_btn_style)
-        self._bt_config_btn.clicked.connect(self._on_open_bt_config)
-        tb.addWidget(self._bt_config_btn)
-
         self._rt_btn = QPushButton("⚡ 即時")
         self._rt_btn.setCheckable(True)
         self._rt_btn.setToolTip("開啟後，每根 K 棒收盤自動標註")
@@ -1138,6 +1204,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._price_lbl)
 
         # 初始化回測範圍下拉（需在 _bt_mode_combo 建立後）
+        self._rebuild_tick_dataset_combo()
         self._rebuild_range_combo()
 
     def _build_ui(self) -> None:
@@ -1599,6 +1666,9 @@ class MainWindow(QMainWindow):
             return
         self._symbol = sym
         ui_settings.set("symbol", sym)
+        self._rebuild_tick_dataset_combo()
+        self._refresh_tick_label()
+        self._rebuild_range_combo()
         self._refresh_cache_label()
         self._start_stream()
 
@@ -1654,7 +1724,8 @@ class MainWindow(QMainWindow):
         if use_tick:
             # ── Tick 模式：以 tick 快取的起訖時間（或使用者自訂區間）決定回測範圍 ──
             # K 棒由 _execute_backtest 從 tick 重建，不依賴 self._loaded_klines
-            ti = tick_cache.info(self._symbol)
+            tick_symbol = self._current_tick_backtest_symbol()
+            ti = tick_cache.info(tick_symbol)
             if not ti:
                 self._status_lbl.setText(
                     "⚠ Tick 模式：無 Tick 快取，請先匯入 aggTrades 檔案"
@@ -1812,7 +1883,10 @@ class MainWindow(QMainWindow):
         tick_map = None
         tick_coverage_pct = 0.0
         use_tick_mode = self._bt_mode_combo.currentIndex() == 1
+        had_allow_bar_fallback = False
+        prev_allow_bar_fallback = None
         if use_tick_mode:
+            tick_symbol = self._current_tick_backtest_symbol()
             # tick_start_ms/tick_end_ms 由呼叫方直接提供（完整 tick 快取範圍）；
             # 若未提供則回退到 bt_klines 的時間範圍（向後相容）。
             if tick_start_ms is not None:
@@ -1820,19 +1894,21 @@ class MainWindow(QMainWindow):
                 end_ms   = tick_end_ms
             elif bt_klines:
                 start_ms = bt_klines[0].open_time
-                end_ms   = bt_klines[-1].open_time + _interval_ms(self._interval)
+                end_ms   = bt_klines[-1].close_time
             else:
                 self._status_lbl.setText("⚠ Tick 模式：無 K 棒資料可回測")
                 return
-            ticks = tick_cache.load_range(self._symbol, start_ms, end_ms)
+            ticks = tick_cache.load_range(tick_symbol, start_ms, end_ms)
             if len(ticks) > 0:
-                # ── 從 tick 重建 kline，確保 tick/kline 完全一致 ──────
-                bt_klines = _build_klines_from_ticks(
-                    self._symbol, ticks, interval=self._interval,
+                bar_ms = _interval_ms(self._interval)
+                range_start_ms = (start_ms // bar_ms) * bar_ms
+                range_end_ms = (end_ms // bar_ms) * bar_ms
+                bt_klines = kline_cache.load_range_as_klines(
+                    self._symbol, self._interval, range_start_ms, range_end_ms,
                 )
                 if not bt_klines:
                     self._status_lbl.setText(
-                        "⚠ Tick 模式：無法從 tick 資料重建 K 棒"
+                        "⚠ Tick 模式：無法載入交易所 K 棒快取"
                     )
                     return
                 kline_times = [
@@ -1841,7 +1917,7 @@ class MainWindow(QMainWindow):
                 tick_map = tick_cache.build_bar_map(ticks, kline_times)
                 tick_coverage_pct = len(tick_map) / len(bt_klines) * 100
                 self._status_lbl.setText(
-                    f"🎯 Tick 模式：從 tick 重建 {len(bt_klines):,} 根 K 棒，"
+                    f"🎯 Tick 模式：載入交易所 K 棒 {len(bt_klines):,} 根，"
                     f"tick 覆蓋 {len(tick_map):,}/{len(bt_klines):,} "
                     f"({tick_coverage_pct:.0f}%)，開始回測…"
                 )
@@ -1851,9 +1927,24 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-        self._strategy_signals = self._strategy_engine.on_history(
-            bt_klines, tick_map=tick_map,
-        )
+        if use_tick_mode:
+            had_allow_bar_fallback = hasattr(
+                self._strategy_engine, "allow_bar_fallback_in_tick_mode"
+            )
+            prev_allow_bar_fallback = getattr(
+                self._strategy_engine, "allow_bar_fallback_in_tick_mode", None
+            )
+            self._strategy_engine.allow_bar_fallback_in_tick_mode = False
+        try:
+            self._strategy_signals = self._strategy_engine.on_history(
+                bt_klines, tick_map=tick_map,
+            )
+        finally:
+            if use_tick_mode:
+                if had_allow_bar_fallback:
+                    self._strategy_engine.allow_bar_fallback_in_tick_mode = prev_allow_bar_fallback
+                elif hasattr(self._strategy_engine, "allow_bar_fallback_in_tick_mode"):
+                    delattr(self._strategy_engine, "allow_bar_fallback_in_tick_mode")
 
         # 大回測（> 30d）不繪製圖表標記
         large_backtest = len(bt_klines) > config.BACKTEST_NO_CHART_BARS
@@ -1969,6 +2060,8 @@ class MainWindow(QMainWindow):
         is_tick = index == 1
         # 預載按鈕僅 Bar 模式有意義
         self._download_btn.setVisible(not is_tick)
+        self._bt_dataset_label.setVisible(is_tick)
+        self._bt_dataset_combo.setVisible(is_tick)
         self._rebuild_range_combo()
         self._refresh_tick_label()
 
@@ -2012,6 +2105,7 @@ class MainWindow(QMainWindow):
             self._tick_lbl.setText("❌ 匯入失敗")
         elif count:
             ti = tick_cache.info(self._symbol)
+            self._rebuild_tick_dataset_combo()
             self._refresh_tick_label()
             self._rebuild_range_combo()
             self._status_lbl.setText(
@@ -2024,16 +2118,20 @@ class MainWindow(QMainWindow):
 
     def _refresh_tick_label(self) -> None:
         """更新 tick 快取狀態標籤。"""
-        ti = tick_cache.info(self._symbol)
+        tick_symbol = self._current_tick_backtest_symbol()
+        ti = tick_cache.info(tick_symbol)
+        prefix = "🎯"
+        if tick_symbol != self._symbol:
+            prefix = f"🎯 [{self._tick_dataset_label(tick_symbol)}]"
         if ti:
             from datetime import datetime, timezone
             s = datetime.fromtimestamp(ti["start_ms"] / 1000, tz=timezone.utc).strftime("%y-%m-%d")
             e = datetime.fromtimestamp(ti["end_ms"]   / 1000, tz=timezone.utc).strftime("%y-%m-%d")
             self._tick_lbl.setText(
-                f"🎯 {ti['count']:,} 筆 | {s}~{e} | {ti['size_mb']:.0f}MB"
+                f"{prefix} {ti['count']:,} 筆 | {s}~{e} | {ti['size_mb']:.0f}MB"
             )
         else:
-            self._tick_lbl.setText("🎯 無 Tick 快取")
+            self._tick_lbl.setText(f"{prefix} 無 Tick 快取")
 
     def _rebuild_range_combo(self) -> None:
         """依目前模式重建回測範圍下拉選單。
@@ -2051,7 +2149,7 @@ class MainWindow(QMainWindow):
             self._bt_range_combo.addItem("🗓 自訂時間...")
         else:
             # ── Tick 模式 ─────────────────────────────────────────────────
-            ti = tick_cache.info(self._symbol)
+            ti = tick_cache.info(self._current_tick_backtest_symbol())
             if ti:
                 span_days = max(1, (ti["end_ms"] - ti["start_ms"]) / 86_400_000)
                 from datetime import datetime, timezone
@@ -2106,6 +2204,7 @@ class MainWindow(QMainWindow):
             self._tick_lbl.setText("❌ 匯入失敗")
         elif count:
             ti = tick_cache.info(self._symbol)
+            self._rebuild_tick_dataset_combo()
             self._refresh_tick_label()
             self._rebuild_range_combo()
             self._status_lbl.setText(
