@@ -296,7 +296,9 @@ def _default_side_params(side: str) -> dict[str, Any]:
         "enable_long",
         "enable_short",
         "long_zoom_bars",
-        "long_sl_offset",
+        "long_sl_pct_floor",
+        "long_sl_wick_mult",
+        "long_sl_pct_cap",
         "long_td_consec_bars",
         "long_k0_vol_gate",
         "long_delta_eff_threshold",
@@ -312,7 +314,9 @@ def _default_side_params(side: str) -> dict[str, Any]:
         "long_rr_wick_b",
         "long_rr_wick_c",
         "short_zoom_bars",
-        "short_sl_offset",
+        "short_sl_pct_floor",
+        "short_sl_wick_mult",
+        "short_sl_pct_cap",
         "short_td_consec_bars",
         "short_k0_vol_gate",
         "short_delta_eff_threshold",
@@ -341,20 +345,25 @@ def _default_side_params(side: str) -> dict[str, Any]:
 def _grid_for_side(side: str) -> dict[str, list[Any]]:
     if side == "long":
         return {
+            "long_sl_pct_floor": [0.0003, 0.0005, 0.0008, 0.001],
+            "long_sl_wick_mult": [0.05, 0.10, 0.15, 0.20],
+            "long_sl_pct_cap":   [0.002, 0.003, 0.004, 0.005],
             "long_k0_vol_gate": [300.0, 500.0, 800.0, 1200.0],
             "long_delta_eff_threshold": [0.8, 1.0, 1.2, 1.4],
             "long_vol_sma_mult": [1.0, 1.2, 1.4, 1.6],
             "lower_wick_absorption_min_vol_ratio": [0.10, 0.15, 0.20, 0.25],
             "lower_wick_absorption_delta_eff_max": [0.0, -0.05, -0.10, -0.15],
-            "long_sl_offset": [5.0, 7.5, 10.0, 12.5],
             "long_td_consec_bars": [1, 2, 3],
             "long_min_fee_cover_ratio": [1.2, 1.5, 2.0, 2.5],
-            "long_rr_wick_a": [2.5, 3.0, 3.5, 4.0],
-            "long_rr_wick_b": [1.5, 2.0, 2.3, 2.5],
-            "long_rr_wick_c": [1.2, 1.5, 1.8, 2.0],
+            "long_rr_wick_a": [2.0, 2.5, 3.0, 3.5],
+            "long_rr_wick_b": [1.0, 1.5, 2.0, 2.5],
+            "long_rr_wick_c": [0.8, 1.0, 1.5, 2.0],
         }
     if side == "short":
         return {
+            "short_sl_pct_floor": [0.0003, 0.0005, 0.0008, 0.001],
+            "short_sl_wick_mult": [0.05, 0.10, 0.15, 0.20],
+            "short_sl_pct_cap":   [0.002, 0.003, 0.004, 0.005],
             "short_k0_vol_gate": [300.0, 500.0, 800.0, 1200.0],
             "short_delta_eff_threshold": [0.8, 1.0, 1.2, 1.4],
             "short_vol_sma_mult": [1.0, 1.2, 1.4, 1.6],
@@ -364,12 +373,11 @@ def _grid_for_side(side: str) -> dict[str, list[Any]]:
             "enable_short_wick_b": [True],
             "enable_short_wick_c": [False, True],
             "short_a_min_upper_wick_pct": [0.0, 0.0008, 0.0010, 0.0011],
-            "short_sl_offset": [5.0, 7.5, 10.0, 12.5],
             "short_td_consec_bars": [1, 2, 3],
             "short_min_fee_cover_ratio": [1.2, 1.5, 2.0, 2.5],
-            "short_rr_wick_a": [2.5, 3.0, 3.5, 4.5],
-            "short_rr_wick_b": [1.2, 1.5, 2.0, 2.5],
-            "short_rr_wick_c": [0.8, 1.0, 1.2, 1.5],
+            "short_rr_wick_a": [2.0, 2.5, 3.0, 4.5],
+            "short_rr_wick_b": [1.0, 1.5, 2.0, 2.5],
+            "short_rr_wick_c": [0.5, 0.8, 1.0, 1.5],
         }
     raise ValueError(f"unsupported side: {side}")
 
