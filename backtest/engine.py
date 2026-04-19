@@ -148,8 +148,11 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
         equity += net_pnl
 
         # ── 維持保證金檢查（簡化爆倉）────────────────────
+        # compound=False 時倉位固定基於 initial_capital，實際可用資金不隨虧損縮減，
+        # 因此以 initial_capital 作為保證金比較基準，避免在帳面虧損時誤觸爆倉。
         maint_req = entry_notional * cfg.maint_margin
-        liquidated = equity < maint_req
+        ref_equity = equity if cfg.compound else cfg.initial_capital
+        liquidated = ref_equity < maint_req
 
         trade_list.append({
             "dir": d, "entry": entry_p, "exit": exit_p,
@@ -171,8 +174,9 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
             "liquidated": liquidated,
         })
 
-        if equity <= 0 or liquidated:
-            break  # 爆倉
+        # compound=True：帳戶資金耗盡即停止；compound=False 固定倉位模擬，不強制終止。
+        if cfg.compound and (equity <= 0 or liquidated):
+            break
 
     return _build_stats(trade_list, cfg, equity, open_count)
 
