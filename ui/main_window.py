@@ -1929,34 +1929,33 @@ class MainWindow(QMainWindow):
             else:
                 self._status_lbl.setText("⚠ Tick 模式：無 K 棒資料可回測")
                 return
-            ticks = tick_cache.load_range(tick_symbol, start_ms, end_ms)
-            if len(ticks) > 0:
-                bar_ms = _interval_ms(self._interval)
-                range_start_ms = (start_ms // bar_ms) * bar_ms
-                range_end_ms = (end_ms // bar_ms) * bar_ms
-                bt_klines = kline_cache.load_range_as_klines(
-                    self._symbol, self._interval, range_start_ms, range_end_ms,
-                )
-                if not bt_klines:
-                    self._status_lbl.setText(
-                        "⚠ Tick 模式：無法載入交易所 K 棒快取"
-                    )
-                    return
-                kline_times = [
-                    (k.open_time, k.close_time) for k in bt_klines
-                ]
-                tick_map = tick_cache.build_bar_map(ticks, kline_times)
-                tick_coverage_pct = len(tick_map) / len(bt_klines) * 100
+            ti = tick_cache.info(tick_symbol)
+            if not ti:
+                self._status_lbl.setText("No tick cache found. Please import/download tick data first.")
+                return
+            if end_ms < int(ti["start_ms"]) or start_ms > int(ti["end_ms"]):
+                self._status_lbl.setText("Selected backtest range does not overlap tick cache range.")
+                return
+
+            bar_ms = _interval_ms(self._interval)
+            range_start_ms = (start_ms // bar_ms) * bar_ms
+            range_end_ms = (end_ms // bar_ms) * bar_ms
+            bt_klines = kline_cache.load_range_as_klines(
+                self._symbol, self._interval, range_start_ms, range_end_ms,
+            )
+            if not bt_klines:
                 self._status_lbl.setText(
-                    f"🎯 Tick 模式：載入交易所 K 棒 {len(bt_klines):,} 根，"
-                    f"tick 覆蓋 {len(tick_map):,}/{len(bt_klines):,} "
-                    f"({tick_coverage_pct:.0f}%)，開始回測…"
-                )
-            else:
-                self._status_lbl.setText(
-                    "⚠ Tick 模式：無快取資料，請先匯入 aggTrades 檔案（點「📂 匯入 Tick」）"
+                    "No corresponding K-line data for the selected tick backtest range."
                 )
                 return
+            kline_times = [
+                (k.open_time, k.close_time) for k in bt_klines
+            ]
+            tick_map = tick_cache.build_lazy_bar_map([tick_symbol], kline_times)
+            self._status_lbl.setText(
+                f"Tick backtest started with {len(bt_klines):,} bars (lazy tick loading enabled)."
+            )
+
 
         if use_tick_mode:
             had_allow_bar_fallback = hasattr(
@@ -1978,6 +1977,11 @@ class MainWindow(QMainWindow):
                     delattr(self._strategy_engine, "allow_bar_fallback_in_tick_mode")
 
         # 大回測（> 30d）不繪製圖表標記
+        if use_tick_mode and tick_map is not None and hasattr(tick_map, "observed_coverage"):
+            covered_bars, total_bars = tick_map.observed_coverage()
+            if total_bars > 0:
+                tick_coverage_pct = covered_bars / total_bars * 100.0
+
         large_backtest = len(bt_klines) > config.BACKTEST_NO_CHART_BARS
         if not large_backtest:
             self._kline_chart.set_strategy_markers(self._strategy_signals)

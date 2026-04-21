@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,144 @@ class TickSliceAccessor(Mapping[int, np.ndarray]):
     @property
     def bar_ranges(self) -> dict[int, tuple[int, int]]:
         return self._bar_ranges
+
+
+class LazyCombinedTickBarMap(Mapping[int, np.ndarray]):
+    """Lazy bar->ticks map across multiple symbols.
+
+    The map only materializes ticks for the requested bar window [open_time, close_time].
+    This avoids loading and concatenating the full multi-month dataset in memory.
+    """
+
+    def __init__(
+        self,
+        symbols: list[str],
+        kline_times: list[tuple[int, int]],
+        *,
+        bar_cache_size: int = 64,
+        shard_cache_size_per_symbol: int = 2,
+    ) -> None:
+        uniq_symbols = list(dict.fromkeys(s.upper() for s in symbols if s))
+        self._symbols = uniq_symbols
+        self._open_to_close: dict[int, int] = {
+            int(ot): int(ct) for ot, ct in kline_times
+        }
+        self._bar_cache_size = max(1, int(bar_cache_size))
+        self._shard_cache_size_per_symbol = max(1, int(shard_cache_size_per_symbol))
+        self._bar_cache: OrderedDict[int, np.ndarray] = OrderedDict()
+        self._empty = np.empty((0, _NCOLS), dtype=np.float64)
+
+        # coverage stats collected while strategy is reading bars
+        self._queried_open_times: set[int] = set()
+        self._non_empty_open_times: set[int] = set()
+
+        self._symbol_states: dict[str, dict] = {}
+        for sym in self._symbols:
+            manifest = _load_shard_manifest(sym)
+            months = manifest.get("months", {}) if manifest is not None else None
+            self._symbol_states[sym] = {
+                "months": months if isinstance(months, dict) else None,
+                "shard_cache": OrderedDict(),
+            }
+
+    def __getitem__(self, open_time: int) -> np.ndarray:
+        arr = self.get(open_time)
+        if arr is None:
+            raise KeyError(open_time)
+        return arr
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._open_to_close)
+
+    def __len__(self) -> int:
+        # Keep non-zero length so strategy tick-mode gates remain enabled.
+        return len(self._open_to_close)
+
+    def get(self, open_time: int, default=None) -> np.ndarray | None:
+        ot = int(open_time)
+        ct = self._open_to_close.get(ot)
+        if ct is None:
+            return default
+
+        cached = self._bar_cache.get(ot)
+        if cached is not None:
+            self._bar_cache.move_to_end(ot)
+            return cached
+
+        self._queried_open_times.add(ot)
+        parts: list[np.ndarray] = []
+        for sym in self._symbols:
+            seg = self._load_symbol_bar_ticks(sym, ot, ct)
+            if len(seg) > 0:
+                parts.append(seg)
+
+        if not parts:
+            out = self._empty
+        elif len(parts) == 1:
+            out = parts[0]
+        else:
+            out = np.concatenate(parts, axis=0)
+            if len(out) > 1:
+                order = np.argsort(out[:, 0], kind="stable")
+                out = out[order]
+
+        if len(out) > 0:
+            self._non_empty_open_times.add(ot)
+
+        self._bar_cache[ot] = out
+        while len(self._bar_cache) > self._bar_cache_size:
+            self._bar_cache.popitem(last=False)
+        return out
+
+    def observed_coverage(self) -> tuple[int, int]:
+        """Returns (bars_with_ticks, total_bars)."""
+        return len(self._non_empty_open_times), len(self._open_to_close)
+
+    def observed_query_count(self) -> int:
+        return len(self._queried_open_times)
+
+    def _load_symbol_bar_ticks(self, symbol: str, start_ms: int, end_ms: int) -> np.ndarray:
+        st = self._symbol_states[symbol]
+        month_entries = st.get("months")
+        if not month_entries:
+            return load_range(symbol, start_ms, end_ms)
+
+        parts: list[np.ndarray] = []
+        for month_key in _iter_month_keys(start_ms, end_ms):
+            entry = month_entries.get(month_key)
+            if entry is None:
+                return load_range(symbol, start_ms, end_ms)
+
+            path = _CACHE_DIR / entry["path"]
+            if not path.exists():
+                return load_range(symbol, start_ms, end_ms)
+
+            shard = self._load_shard_cached(symbol, month_key, path)
+            times = shard[:, 0]
+            lo = int(np.searchsorted(times, start_ms, side="left"))
+            hi = int(np.searchsorted(times, end_ms, side="right"))
+            if lo < hi:
+                parts.append(np.array(shard[lo:hi], copy=True))
+
+        if not parts:
+            return self._empty
+        if len(parts) == 1:
+            return parts[0]
+        return np.concatenate(parts, axis=0)
+
+    def _load_shard_cached(self, symbol: str, month_key: str, path: Path) -> np.ndarray:
+        st = self._symbol_states[symbol]
+        cache: OrderedDict[str, np.ndarray] = st["shard_cache"]
+        shard = cache.get(month_key)
+        if shard is not None:
+            cache.move_to_end(month_key)
+            return shard
+
+        shard = np.load(str(path), mmap_mode="r")
+        cache[month_key] = shard
+        while len(cache) > self._shard_cache_size_per_symbol:
+            cache.popitem(last=False)
+        return shard
 
 
 def cache_path(symbol: str) -> Path:
@@ -473,6 +612,22 @@ def build_tick_slice_accessor(
 ) -> TickSliceAccessor:
     """建立 dict-like lazy accessor，保留舊策略的 get/contains/len 用法。"""
     return TickSliceAccessor(ticks, build_bar_ranges(ticks, kline_times))
+
+
+def build_lazy_bar_map(
+    symbols: list[str],
+    kline_times: list[tuple[int, int]],
+    *,
+    bar_cache_size: int = 64,
+    shard_cache_size_per_symbol: int = 2,
+) -> LazyCombinedTickBarMap:
+    """Build a lazy bar map that loads tick slices on demand."""
+    return LazyCombinedTickBarMap(
+        symbols,
+        kline_times,
+        bar_cache_size=bar_cache_size,
+        shard_cache_size_per_symbol=shard_cache_size_per_symbol,
+    )
 
 
 def info(symbol: str) -> Optional[dict]:
