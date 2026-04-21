@@ -334,7 +334,7 @@ class BacktestResultDialog(QDialog):
         # ── 交易明細表 ────────────────────────────────────────────────
         self._trade_cols = [
             "#", "方向", "入場時間", "入場價", "出場類型",
-            "出場價", "數量", "手續費", "資金費", "淨利(USDT)", "餘額",
+            "出場價", "數量", "手續費", "資金費", "淨利(USDT)", "餘額", "Regime",
         ]
         self._trade_table = QTableWidget(0, len(self._trade_cols))
         self._trade_table.setHorizontalHeaderLabels(self._trade_cols)
@@ -476,6 +476,25 @@ class BacktestResultDialog(QDialog):
             self._trade_table.setItem(i, 9, pnl_item)
             self._trade_table.setItem(i, 10, QTableWidgetItem(f"{t.get('equity_after', 0):,.2f}"))
 
+            _regime_colors = {
+                "trend_up":   "#26a69a",
+                "trend_down": "#ef5350",
+                "range":      "#ff9800",
+                "neutral":    "#9e9e9e",
+            }
+            _regime_labels = {
+                "trend_up":   "↑ 趨勢",
+                "trend_down": "↓ 趨勢",
+                "range":      "◈ 盤整",
+                "neutral":    "— 中性",
+            }
+            regime_val = t.get("regime", "")
+            regime_item = QTableWidgetItem(_regime_labels.get(regime_val, regime_val or "─"))
+            regime_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if regime_val in _regime_colors:
+                regime_item.setForeground(QtGui.QColor(_regime_colors[regime_val]))
+            self._trade_table.setItem(i, 11, regime_item)
+
     # ── Excel 匯出 ───────────────────────────────────────────────────
     def _export_excel(self) -> None:
         """將回測摘要與交易明細匯出為 Excel 檔案。"""
@@ -488,14 +507,25 @@ class BacktestResultDialog(QDialog):
                                 "請先安裝 openpyxl：\npip install openpyxl")
             return
 
+        s = self._stats
+        _strategy_raw = s.get("strategy_name", "backtest") or "backtest"
+        _strategy_safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in _strategy_raw)
+        from datetime import datetime as _dt2, timezone as _tz2
+        def _fmt_date(ms: int) -> str:
+            if not ms:
+                return "unknown"
+            return _dt2.fromtimestamp(ms / 1000, tz=_tz2.utc).strftime("%Y-%m-%d")
+        _start_date = _fmt_date(s.get("backtest_start_ms", 0))
+        _end_date   = _fmt_date(s.get("backtest_end_ms", 0))
+        _default_name = f"{_strategy_safe}_{_start_date}_{_end_date}.xlsx"
+
         path, _ = QFileDialog.getSaveFileName(
-            self, "匯出 Excel", "backtest_result.xlsx",
+            self, "匯出 Excel", _default_name,
             "Excel 檔案 (*.xlsx)"
         )
         if not path:
             return
 
-        s = self._stats
         h_font   = Font(bold=True, color="FFFFFF")
         h_fill   = PatternFill("solid", fgColor="2962FF")
         s_fill   = PatternFill("solid", fgColor="1e222d")
@@ -587,7 +617,7 @@ class BacktestResultDialog(QDialog):
         ws2 = wb.create_sheet("交易明細")
         trade_heads = ["#", "方向", "入場時間", "入場價", "出場類型",
                        "出場價", "數量", "手續費",
-                       "資金費", "淨利(USDT)", "餘額"]
+                       "資金費", "淨利(USDT)", "餘額", "Regime"]
         for col, h in enumerate(trade_heads, 1):
             c = ws2.cell(row=1, column=col, value=h)
             c.font, c.fill, c.alignment = h_font, h_fill, center
@@ -611,6 +641,7 @@ class BacktestResultDialog(QDialog):
                 round(t.get("funding_cost", 0), 2),
                 round(pv, 2),
                 round(t.get("equity_after", 0), 2),
+                t.get("regime", "─"),
             ]
             for col, val in enumerate(row_vals, 1):
                 cell = ws2.cell(row=i + 1, column=col, value=val)
@@ -1969,6 +2000,9 @@ class MainWindow(QMainWindow):
             compound=self._bt_config_dlg.compound_combo.currentIndex() == 0,
         )
         sim_stats = simulate_trades(self._strategy_signals, cfg)
+        if bt_klines:
+            from core.regime import enrich_trades_with_regime
+            enrich_trades_with_regime(sim_stats["trade_list"], bt_klines)
         sim_stats["strategy_name"]      = getattr(self._strategy_engine, "name", "策略")
         sim_stats["backtest_start_ms"]  = bt_klines[0].open_time  if bt_klines else 0
         sim_stats["backtest_end_ms"]    = bt_klines[-1].open_time if bt_klines else 0
