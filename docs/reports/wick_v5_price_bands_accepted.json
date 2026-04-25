@@ -1,9 +1,11 @@
 {
   "source_reports": [
     "docs\\reports\\wick_v5_price_bands_opt_high_long.json",
-    "docs\\reports\\wick_v5_price_bands_opt_misc_short.json"
+    "docs\\reports\\wick_v5_price_bands_opt_misc_short.json",
+    "docs\\reports\\wick_v5_b5_long_opt_2026-04-20_p3.json"
   ],
   "accepted_bands": [
+    "b5_long",
     "b5_short",
     "b8_long",
     "b11_long"
@@ -12,6 +14,14 @@
     "enable_regime_mode": true,
     "regime_band_floor": 0.0,
     "regime_band_size": 10000.0,
+    "b5_long_sl_pct_floor": 0.001,
+    "b5_long_sl_wick_mult": 0.2,
+    "b5_long_sl_pct_cap": 0.003,
+    "b5_long_k0_vol_gate": 1200.0,
+    "b5_long_rr_wick_a": 3.0,
+    "b5_long_rr_wick_b": 2.0,
+    "b5_long_rr_wick_c": 1.0,
+    "b5_long_min_fee_cover_ratio": 1.2,
     "b5_short_sl_pct_floor": 0.001,
     "b5_short_sl_wick_mult": 0.2,
     "b5_short_sl_pct_cap": 0.003,

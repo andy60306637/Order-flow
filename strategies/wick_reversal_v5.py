@@ -31,7 +31,10 @@ Regime switching (new in v5):
 """
 from __future__ import annotations
 
-from typing import List, Optional
+import json
+import re
+from pathlib import Path
+from typing import Any, List, Optional
 
 import numpy as np
 
@@ -50,10 +53,25 @@ def _kline_delta_eff(k: Kline) -> float:
     return _kline_delta(k) / k.volume
 
 
+_BAND_PARAM_KEY_RE = re.compile(r"^b\d+_[a-z0-9_]+$")
+_LEGACY_REGIME_PARAM_KEY_RE = re.compile(r"^r[0-2]_[a-z0-9_]+$")
+_BAND_TAG_RE = re.compile(r"^b(\d+)(?:_(long|short))?$")
+_REGIME_META_KEYS = {
+    "enable_regime_mode",
+    "regime_band_floor",
+    "regime_band_size",
+    "regime_price_break_0",
+    "regime_price_break_1",
+}
+
+
 @register
 class WickReversalV5Strategy(StrategyBase):
     name = "Wick Reversal 1m v5"
     allow_bar_fallback_in_tick_mode: bool = True
+    enable_band_params_json: bool = False
+    band_params_json_path: str = "docs/reports/wick_v5_price_bands_accepted.json"
+    band_params_json_strict: bool = False
 
     # ── 做多參數 ──────────────────────────────────────────────────────────────
     enable_long: bool = True                        # 啟用做多
@@ -176,6 +194,14 @@ class WickReversalV5Strategy(StrategyBase):
     r2_short_min_fee_cover_ratio: float = 2.0
     # Accepted price-band overrides (3-year tick optimization, 10k bands).
     # Bands without b{idx}_* overrides fall back to legacy r0/r1/r2 profiles.
+    b5_long_sl_pct_floor: float = 0.001
+    b5_long_sl_wick_mult: float = 0.2
+    b5_long_sl_pct_cap: float = 0.003
+    b5_long_k0_vol_gate: float = 1200.0
+    b5_long_rr_wick_a: float = 3.0
+    b5_long_rr_wick_b: float = 2.0
+    b5_long_rr_wick_c: float = 1.0
+    b5_long_min_fee_cover_ratio: float = 1.2
     b5_short_sl_pct_floor: float = 0.001
     b5_short_sl_wick_mult: float = 0.2
     b5_short_sl_pct_cap: float = 0.003
@@ -200,6 +226,157 @@ class WickReversalV5Strategy(StrategyBase):
     b11_long_rr_wick_b: float = 1.5
     b11_long_rr_wick_c: float = 1.0
     b11_long_min_fee_cover_ratio: float = 1.2
+
+    def __init__(self) -> None:
+        self._band_params_source_path: str = ""
+        if self.enable_band_params_json and self.band_params_json_path:
+            self.load_band_params_json(
+                self.band_params_json_path,
+                strict=self.band_params_json_strict,
+            )
+
+    @staticmethod
+    def _is_regime_param_key(key: str, *, allow_legacy_keys: bool = True) -> bool:
+        if key in _REGIME_META_KEYS:
+            return True
+        if _BAND_PARAM_KEY_RE.match(key):
+            return True
+        return allow_legacy_keys and bool(_LEGACY_REGIME_PARAM_KEY_RE.match(key))
+
+    @staticmethod
+    def _band_tag_sort_key(tag: str) -> tuple[int, int, str]:
+        m = _BAND_TAG_RE.match(tag)
+        if m is None:
+            return (10**9, 2, tag)
+        band_idx = int(m.group(1))
+        side = m.group(2)
+        side_rank = 0 if side == "long" else 1 if side == "short" else 2
+        return (band_idx, side_rank, tag)
+
+    @staticmethod
+    def _extract_params_from_band_report(payload: dict[str, Any]) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        bands = payload.get("bands")
+        if not isinstance(bands, list):
+            return params
+
+        for meta_key in _REGIME_META_KEYS:
+            if meta_key in payload:
+                params[meta_key] = payload[meta_key]
+
+        for band in bands:
+            if not isinstance(band, dict):
+                continue
+            band_idx = band.get("band_idx")
+            if not isinstance(band_idx, int):
+                continue
+            band_prefix = f"b{band_idx}_"
+
+            for side_key in ("long", "short"):
+                side_data = band.get(side_key)
+                if not isinstance(side_data, dict):
+                    continue
+
+                best_data = side_data.get("best")
+                if isinstance(best_data, dict) and isinstance(best_data.get("params"), dict):
+                    candidate_params = best_data["params"]
+                elif isinstance(side_data.get("params"), dict):
+                    candidate_params = side_data["params"]
+                else:
+                    continue
+
+                for key, value in candidate_params.items():
+                    if isinstance(key, str) and key.startswith(band_prefix):
+                        params[key] = value
+        return params
+
+    def load_band_params_json(
+        self,
+        path: str,
+        *,
+        strict: bool = True,
+        allow_legacy_keys: bool = True,
+    ) -> dict[str, Any]:
+        """Load band/regime overrides from JSON and apply to this strategy instance."""
+        target = Path(path)
+        if not target.is_absolute():
+            target = Path.cwd() / target
+        if not target.exists():
+            if strict:
+                raise FileNotFoundError(f"band params json not found: {target}")
+            return {}
+
+        with target.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            if strict:
+                raise ValueError(f"invalid json payload type: {type(payload)!r}")
+            return {}
+
+        raw_params: dict[str, Any]
+        combined_params = payload.get("combined_params")
+        if isinstance(combined_params, dict):
+            raw_params = combined_params
+        elif isinstance(payload.get("params"), dict):
+            raw_params = payload["params"]
+        else:
+            raw_params = self._extract_params_from_band_report(payload)
+
+        applied: dict[str, Any] = {}
+        for key, value in raw_params.items():
+            if not isinstance(key, str):
+                continue
+            if not self._is_regime_param_key(key, allow_legacy_keys=allow_legacy_keys):
+                continue
+            setattr(self, key, value)
+            applied[key] = value
+
+        if strict and not applied:
+            raise ValueError(f"no regime/band params loaded from: {target}")
+        if applied:
+            self._band_params_source_path = str(target)
+        return applied
+
+    def dump_band_params_json(
+        self,
+        path: str,
+        *,
+        include_legacy_keys: bool = False,
+    ) -> dict[str, Any]:
+        """Dump current band/regime overrides to a JSON file."""
+        keys = set(vars(type(self)).keys()) | set(vars(self).keys())
+        combined_params: dict[str, Any] = {}
+        accepted_tags: set[str] = set()
+
+        for key in sorted(keys):
+            if not isinstance(key, str):
+                continue
+            if not self._is_regime_param_key(key, allow_legacy_keys=include_legacy_keys):
+                continue
+            combined_params[key] = getattr(self, key)
+
+            if _BAND_PARAM_KEY_RE.match(key):
+                band_prefix, suffix = key.split("_", 1)
+                if suffix.startswith("long_"):
+                    accepted_tags.add(f"{band_prefix}_long")
+                elif suffix.startswith("short_"):
+                    accepted_tags.add(f"{band_prefix}_short")
+                else:
+                    accepted_tags.add(band_prefix)
+
+        payload: dict[str, Any] = {
+            "accepted_bands": sorted(accepted_tags, key=self._band_tag_sort_key),
+            "combined_params": combined_params,
+        }
+
+        target = Path(path)
+        if not target.is_absolute():
+            target = Path.cwd() / target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        return payload
 
     def on_history(
         self,
