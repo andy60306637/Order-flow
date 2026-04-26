@@ -36,3 +36,6 @@ from strategies import wick_reversal_v4_band_files as _wick_reversal_v4_band_fil
 from strategies import wick_reversal_v4_ratio as _wick_reversal_v4_ratio  # noqa: E402, F401, F811
 from strategies import wick_reversal_v5 as _wick_reversal_v5  # noqa: E402, F401
 from strategies import auction_value_sweep as _auction_value_sweep  # noqa: E402, F401
+from strategies import wick_reversal_v6 as _wick_reversal_v6  # noqa: E402, F401
+from strategies import wick_reversal_v4_dyn as _wick_reversal_v4_dyn  # noqa: E402, F401
+from strategies import wick_reversal_v6_1 as _wick_reversal_v6_1  # noqa: E402, F401
