@@ -81,6 +81,55 @@ class TestFeeCalculation(unittest.TestCase):
                            "手續費應基於名目價值，不是保證金")
 
 
+class TestResearchFields(unittest.TestCase):
+    def test_meta_fields_propagate_to_trade_list(self):
+        signals = [
+            StrategySignal(
+                open_time=1,
+                price=100.0,
+                signal_type="long_entry",
+                stop_price=90.0,
+                meta={
+                    "wick_type": "Absorb",
+                    "session_hour": 13,
+                    "atr_percentile": 75.0,
+                    "trend_regime": "trend_up",
+                    "entry_delay_bars": 1,
+                    "k0_range_atr": 1.4,
+                    "wick_volume_ratio": 0.25,
+                    "zoom_delta_eff": 0.8,
+                },
+            ),
+            StrategySignal(
+                open_time=2,
+                price=120.0,
+                signal_type="long_exit",
+                label="TP",
+                meta={"MAE": 0.2, "MFE": 2.1},
+            ),
+        ]
+        result = simulate_trades(signals, BacktestConfig(initial_capital=10_000))
+        trade = result["trade_list"][0]
+        self.assertEqual(trade["side"], "long")
+        self.assertEqual(trade["wick_type"], "Absorb")
+        self.assertEqual(trade["session_hour"], 13)
+        self.assertEqual(trade["trend_regime"], "trend_up")
+        self.assertAlmostEqual(trade["MAE"], 0.2)
+        self.assertAlmostEqual(trade["MFE"], 2.1)
+
+    def test_unsupported_research_fields_are_blank(self):
+        signals = [
+            StrategySignal(open_time=1, price=100.0, signal_type="short_entry", stop_price=110.0),
+            StrategySignal(open_time=2, price=90.0, signal_type="short_exit", label="TP"),
+        ]
+        result = simulate_trades(signals, BacktestConfig(initial_capital=10_000))
+        trade = result["trade_list"][0]
+        self.assertEqual(trade["side"], "short")
+        self.assertEqual(trade["wick_type"], "")
+        self.assertEqual(trade["trend_regime"], "")
+        self.assertEqual(trade["MAE"], "")
+
+
 class TestPositionSizingAndRisk(unittest.TestCase):
     """max_loss_pct 限制 & 槓桿限制。"""
 
