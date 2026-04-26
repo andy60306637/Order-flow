@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# OrderFlow — PyInstaller 打包設定（相容 PyInstaller 6.x）
+# Quantitative Analysis — PyInstaller 打包設定（相容 PyInstaller 6.x）
 # 使用方式：python -m PyInstaller orderflow.spec
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
@@ -16,6 +16,7 @@ all_hidden   = (
     + websockets_hidden
     + collect_submodules("numpy")
     + collect_submodules("strategies")
+    + collect_submodules("strategies.modules")
     + [
         "PyQt6.sip",
         "PyQt6.QtCore",
@@ -62,7 +63,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="OrderFlow",
+    name="QuantitativeAnalysis",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

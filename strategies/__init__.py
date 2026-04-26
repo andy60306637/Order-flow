@@ -17,13 +17,23 @@ from typing import TYPE_CHECKING, Dict, Type
 
 if TYPE_CHECKING:
     from strategies.base import StrategyBase
+    from strategies.modules.signal_trigger import SignalModule
 
 STRATEGY_REGISTRY: Dict[str, Type["StrategyBase"]] = {}
+
+# 訊號模組 Registry（與 STRATEGY_REGISTRY 並存，互不影響）
+SIGNAL_MODULE_REGISTRY: Dict[str, Type["SignalModule"]] = {}
 
 
 def register(cls: Type["StrategyBase"]) -> Type["StrategyBase"]:
     """Class decorator：將策略類別登錄至 STRATEGY_REGISTRY。"""
     STRATEGY_REGISTRY[cls.name] = cls
+    return cls
+
+
+def register_signal(cls: Type["SignalModule"]) -> Type["SignalModule"]:
+    """Class decorator：將 SignalModule 子類別登錄至 SIGNAL_MODULE_REGISTRY。"""
+    SIGNAL_MODULE_REGISTRY[cls.name] = cls
     return cls
 
 
@@ -39,3 +49,16 @@ from strategies import auction_value_sweep as _auction_value_sweep  # noqa: E402
 from strategies import wick_reversal_v6 as _wick_reversal_v6  # noqa: E402, F401
 from strategies import wick_reversal_v4_dyn as _wick_reversal_v4_dyn  # noqa: E402, F401
 from strategies import wick_reversal_v6_1 as _wick_reversal_v6_1  # noqa: E402, F401
+
+# ── 登錄 SignalModule 包裝器 ──────────────────────────────────────────────────
+def _register_signal_modules():
+    from strategies.modules.signal_trigger import _ensure_named_modules
+    _ensure_named_modules()
+    # 重新讀取（因為 _ensure_named_modules 可能更新了全域變數）
+    from strategies.modules import signal_trigger as _st
+    if _st.WickReversalV4Signal is not None:
+        SIGNAL_MODULE_REGISTRY[_st.WickReversalV4Signal.name] = _st.WickReversalV4Signal
+    if _st.WickReversalV6_1Signal is not None:
+        SIGNAL_MODULE_REGISTRY[_st.WickReversalV6_1Signal.name] = _st.WickReversalV6_1Signal
+
+_register_signal_modules()

@@ -552,6 +552,7 @@ def _build_stats(
         "entry_delay_bars_stats": entry_delay_bars_stats,
         "open_count": open_count,
         "trade_list": trade_list,
+        "sharpe_ratio": compute_sharpe_ratio(active, cfg.initial_capital),
     }
 
 
@@ -634,3 +635,84 @@ def compute_subset_stats(trades: list) -> dict:
         "long_trades": ln, "long_profit_factor": lpf,
         "short_trades": sn, "short_profit_factor": spf,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 延伸分析函式（純新增，不影響既有 API）
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_sharpe_ratio(
+    trade_list: list,
+    initial_capital: float = 10_000.0,
+    risk_free_rate: float = 0.0,
+    annualize: bool = True,
+    trades_per_year: int = 252,
+) -> float:
+    """
+    從逐筆交易的 net_pnl 計算 Sharpe Ratio。
+    以每筆交易報酬率（net_pnl / equity_before）計算。
+    少於 2 筆交易回傳 0.0。
+    """
+    active = [t for t in trade_list if not t.get("skipped")]
+    if len(active) < 2:
+        return 0.0
+
+    equity = initial_capital
+    returns: list[float] = []
+    for t in active:
+        eq_before = equity - t["net_pnl"]   # equity_after - net_pnl
+        if eq_before > 0:
+            r = t["net_pnl"] / eq_before
+            returns.append(r)
+        equity = t.get("equity_after", equity)
+
+    if len(returns) < 2:
+        return 0.0
+
+    import math as _math
+    n = len(returns)
+    mean_r = sum(returns) / n
+    excess = mean_r - risk_free_rate / max(trades_per_year, 1)
+    var = sum((r - mean_r) ** 2 for r in returns) / (n - 1)
+    std = _math.sqrt(var) if var > 0 else 0.0
+    if std == 0.0:
+        return 0.0
+
+    sharpe = excess / std
+    if annualize:
+        sharpe *= _math.sqrt(trades_per_year)
+    return round(sharpe, 4)
+
+
+def run_monte_carlo(
+    trade_list: list,
+    initial_equity: float,
+    n_iterations: int = 1000,
+    seed: Optional[int] = None,
+) -> list[float]:
+    """
+    Bootstrap 重抽樣交易序列 n_iterations 次，
+    回傳每次模擬後的最終資金列表。
+    """
+    import random as _random
+    active = [t for t in trade_list if not t.get("skipped")]
+    if not active:
+        return [initial_equity] * n_iterations
+
+    rng = _random.Random(seed)
+    results: list[float] = []
+
+    pnls = [t["net_pnl"] for t in active]
+    n = len(pnls)
+
+    for _ in range(n_iterations):
+        sample = rng.choices(pnls, k=n)
+        eq = initial_equity
+        for p in sample:
+            eq += p
+            if eq <= 0:
+                eq = 0.0
+                break
+        results.append(eq)
+
+    return results

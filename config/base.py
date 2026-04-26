@@ -1,6 +1,8 @@
 """共用基礎設定（零框架依賴）。所有端（Desktop / Server / Worker）共用。"""
 from datetime import timezone, timedelta
 
+APP_NAME = "Quantitative Analysis"
+
 # ── 顯示時區（UTC+8，Binance 預設）──────────────────────────────────────────────
 DISPLAY_TZ = timezone(timedelta(hours=8))
 

@@ -15,6 +15,7 @@ from PyQt6.QtCore import Qt
 
 import pyqtgraph as pg
 
+from config.base import APP_NAME
 from ui.main_window import MainWindow
 
 logging.basicConfig(
@@ -87,8 +88,8 @@ def main() -> None:
     )
 
     app = QApplication(sys.argv)
-    app.setApplicationName("OrderFlow")
-    app.setOrganizationName("OrderFlow")
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(APP_NAME)
 
     _apply_dark_palette(app)
 

@@ -938,7 +938,8 @@ class BarDateRangeDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("OrderFlow — Binance Futures")
+        import config.base as _cfg_base
+        self.setWindowTitle(f"{_cfg_base.APP_NAME} — Binance Futures")
         self.resize(1600, 900)
 
         # ── 狀態 ─────────────────────────────────────────────────────────────
@@ -1315,13 +1316,25 @@ class MainWindow(QMainWindow):
         right_splitter.addWidget(self._stats_panel)
         right_splitter.setSizes([600, 160, 82])
 
-        # ── 主橫向分割 ────────────────────────────────────────────────────────
+        # ── 主橫向分割（即時看盤頁面）────────────────────────────────────────────
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         main_splitter.addWidget(left_widget)
         main_splitter.addWidget(right_splitter)
         main_splitter.setSizes([230, 1370])
 
-        self.setCentralWidget(main_splitter)
+        # ── 頂層頁籤：Tab 0=回測分析  Tab 1=即時看盤 ─────────────────────────
+        from ui.backtest_dashboard import BacktestDashboard
+        self._backtest_dashboard = BacktestDashboard()
+
+        top_tabs = QTabWidget()
+        top_tabs.setTabPosition(QTabWidget.TabPosition.North)
+        top_tabs.setStyleSheet(
+            "QTabBar::tab { padding: 6px 20px; font-size: 12px; }"
+        )
+        top_tabs.addTab(self._backtest_dashboard, "📊 回測分析")
+        top_tabs.addTab(main_splitter,             "📈 即時看盤")
+
+        self.setCentralWidget(top_tabs)
 
     # ══════════════════════════════════════════════════════════════
     # WebSocket 管理
