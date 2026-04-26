@@ -55,6 +55,90 @@ FUNDING_INTERVAL_MS = 8 * 3600 * 1000   # 8 小時 (ms)
 # 核心：模擬交易
 # ═══════════════════════════════════════════════════════════════════════════
 
+TRADE_RESEARCH_FIELDS = [
+    "side",
+    "wick_type",
+    "session_hour",
+    "atr_percentile",
+    "trend_regime",
+    "entry_delay_bars",
+    "k0_range_atr",
+    "wick_volume_ratio",
+    "zoom_delta_eff",
+    "MAE",
+    "MFE",
+    # v6.1 additions
+    "mae_r",
+    "mfe_r",
+    "entry_risk",
+    "final_trade_delta",
+    "trailing_stop_mode",
+]
+
+
+def _research_defaults(direction: str = "") -> dict:
+    out = {field: "" for field in TRADE_RESEARCH_FIELDS}
+    out["side"] = direction
+    return out
+
+
+def _merge_research(direction: str, meta: Optional[dict]) -> dict:
+    out = _research_defaults(direction)
+    if meta:
+        for key in TRADE_RESEARCH_FIELDS:
+            if key in meta:
+                out[key] = meta[key]
+    out["side"] = direction
+    return out
+
+
+def _calc_r(t: dict) -> Optional[float]:
+    """R 值 = net_pnl / risk；無停損或停損距離 <= 0 時回傳 None。"""
+    stop = t.get("entry_stop")
+    if stop is None:
+        return None
+    d = t.get("dir", "long")
+    risk = (t["entry"] - stop) if d == "long" else (stop - t["entry"])
+    if risk <= 0:
+        return None
+    return t["net_pnl"] / risk
+
+
+def _group_stats(trades: list) -> dict:
+    """計算一組交易的基本統計（用於 exit / side / regime / wick_type / hour 分組）。"""
+    active = [t for t in trades if not t.get("skipped")]
+    n = len(active)
+    _empty: dict = {
+        "trades": 0, "win_rate": 0.0, "net_pnl": 0.0, "gross_pnl": 0.0,
+        "fees": 0.0, "avg_pnl": 0.0, "avg_R": 0.0,
+        "avg_mae_r": 0.0, "avg_mfe_r": 0.0, "pf": 0.0,
+    }
+    if n == 0:
+        return _empty
+    wins = sum(1 for t in active if t["net_pnl"] > 0)
+    net_pnl  = sum(t["net_pnl"] for t in active)
+    gross_pnl = sum(t.get("gross_pnl", 0.0) for t in active)
+    fees     = sum(t["total_fee"] for t in active)
+    gp = sum(t["net_pnl"] for t in active if t["net_pnl"] > 0)
+    gl = abs(sum(t["net_pnl"] for t in active if t["net_pnl"] < 0))
+    pf = gp / gl if gl > 0 else float("inf")
+    r_vals    = [r for t in active for r in [_calc_r(t)] if r is not None]
+    mae_vals  = [v for t in active for v in [t.get("mae_r")]  if isinstance(v, (int, float))]
+    mfe_vals  = [v for t in active for v in [t.get("mfe_r")]  if isinstance(v, (int, float))]
+    return {
+        "trades":    n,
+        "win_rate":  round(wins / n * 100, 2),
+        "net_pnl":   round(net_pnl, 4),
+        "gross_pnl": round(gross_pnl, 4),
+        "fees":      round(fees, 4),
+        "avg_pnl":   round(net_pnl / n, 4),
+        "avg_R":     round(sum(r_vals) / len(r_vals), 4) if r_vals else 0.0,
+        "avg_mae_r": round(sum(mae_vals) / len(mae_vals), 4) if mae_vals else 0.0,
+        "avg_mfe_r": round(sum(mfe_vals) / len(mfe_vals), 4) if mfe_vals else 0.0,
+        "pf":        pf,
+    }
+
+
 def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
     """
     依序配對進出場訊號，以 cfg 模擬倉位 / 手續費 / 權益變動。
@@ -77,6 +161,7 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
         exit_p  = rt["exit"]
         stop_p  = rt.get("stop")
         d       = rt["dir"]
+        research = _merge_research(d, rt.get("meta"))
         provisional_entry = entry_p   # 滑價前的原始進場價
 
         # ── 動態滑價（容量分析用）──────────────────────────────────
@@ -118,6 +203,7 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
                 "skipped": True,
                 "skip_reason": "資金不足或停損距離無效",
             })
+            trade_list[-1].update(research)
             continue
 
         entry_notional = qty * entry_p
@@ -173,6 +259,7 @@ def simulate_trades(signals: List[StrategySignal], cfg: BacktestConfig) -> dict:
             "skipped": False, "skip_reason": "",
             "liquidated": liquidated,
         })
+        trade_list[-1].update(research)
 
         # compound=True：帳戶資金耗盡即停止；compound=False 固定倉位模擬，不強制終止。
         if cfg.compound and (equity <= 0 or liquidated):
@@ -196,50 +283,69 @@ def _pair_signals(signals: List[StrategySignal]):
     short_time: int = 0
     long_label: str = ""
     short_label: str = ""
+    long_meta: dict = {}
+    short_meta: dict = {}
     open_count = 0
 
     for sig in signals:
         fp = sig.fill_price or sig.price   # 優先使用實際成交價
+        ts = sig.fill_time or sig.open_time  # 優先使用 tick 時間戳
         if sig.signal_type == "long_entry":
             if open_short is not None:
+                meta = dict(short_meta)
                 trades.append({"dir": "short", "entry": open_short,
                                "exit": fp, "stop": short_stop,
-                               "entry_time": short_time, "exit_time": sig.open_time,
-                               "entry_label": short_label})
+                               "entry_time": short_time, "exit_time": ts,
+                               "entry_label": short_label,
+                               "meta": meta})
                 open_short = None
+                short_meta = {}
             if open_long is None:
                 open_long = fp
                 long_stop = sig.stop_price
-                long_time = sig.open_time
+                long_time = ts
                 long_label = sig.label
+                long_meta = dict(getattr(sig, "meta", {}) or {})
         elif sig.signal_type == "long_exit":
             if open_long is not None:
+                meta = dict(long_meta)
+                meta.update(getattr(sig, "meta", {}) or {})
                 trades.append({"dir": "long", "entry": open_long,
                                "exit": fp, "stop": long_stop,
-                               "entry_time": long_time, "exit_time": sig.open_time,
+                               "entry_time": long_time, "exit_time": ts,
                                "entry_label": long_label,
-                               "exit_label": sig.label})
+                               "exit_label": sig.label,
+                               "meta": meta})
                 open_long = None
+                long_meta = {}
         elif sig.signal_type == "short_entry":
             if open_long is not None:
+                meta = dict(long_meta)
                 trades.append({"dir": "long", "entry": open_long,
                                "exit": fp, "stop": long_stop,
-                               "entry_time": long_time, "exit_time": sig.open_time,
-                               "entry_label": long_label})
+                               "entry_time": long_time, "exit_time": ts,
+                               "entry_label": long_label,
+                               "meta": meta})
                 open_long = None
+                long_meta = {}
             if open_short is None:
                 open_short = fp
                 short_stop = sig.stop_price
-                short_time = sig.open_time
+                short_time = ts
                 short_label = sig.label
+                short_meta = dict(getattr(sig, "meta", {}) or {})
         elif sig.signal_type == "short_exit":
             if open_short is not None:
+                meta = dict(short_meta)
+                meta.update(getattr(sig, "meta", {}) or {})
                 trades.append({"dir": "short", "entry": open_short,
                                "exit": fp, "stop": short_stop,
-                               "entry_time": short_time, "exit_time": sig.open_time,
+                               "entry_time": short_time, "exit_time": ts,
                                "entry_label": short_label,
-                               "exit_label": sig.label})
+                               "exit_label": sig.label,
+                               "meta": meta})
                 open_short = None
+                short_meta = {}
 
     if open_long is not None:
         open_count += 1
@@ -363,10 +469,55 @@ def _build_stats(
     avg_win  = sum(wins_pnl) / len(wins_pnl) if wins_pnl else 0.0
     avg_loss = sum(loss_pnl) / len(loss_pnl) if loss_pnl else 0.0
 
-    sl_count = sum(1 for t in active if t.get("exit_label") == "SL")
-    tp_count = sum(1 for t in active if t.get("exit_label") == "TP")
-    ts_count = sum(1 for t in active if t.get("exit_label") == "TS")
-    td_count = sum(1 for t in active if t.get("exit_label") == "TD")
+    sl_count  = sum(1 for t in active if t.get("exit_label") == "SL")
+    tp_count  = sum(1 for t in active if t.get("exit_label") == "TP")
+    ts_count  = sum(1 for t in active if t.get("exit_label") == "TS")
+    td_count  = sum(1 for t in active if t.get("exit_label") == "TD")
+    tdd_count = sum(1 for t in active if t.get("exit_label") == "TDD")
+
+    # ── 分組統計 ─────────────────────────────────────────────────────────
+    _EXIT_LABELS = ["SL", "TP", "TS", "TD", "TDD"]
+    exit_stats = {lbl: _group_stats([t for t in active if t.get("exit_label") == lbl])
+                  for lbl in _EXIT_LABELS}
+
+    side_stats = {
+        "long":  _group_stats([t for t in active if t["dir"] == "long"]),
+        "short": _group_stats([t for t in active if t["dir"] == "short"]),
+    }
+
+    _REGIMES = ["neutral", "range", "trend_up", "trend_down"]
+    regime_side_stats: dict = {}
+    for _side in ("long", "short"):
+        for _reg in _REGIMES:
+            key = f"{_side}_{_reg}"
+            regime_side_stats[key] = _group_stats(
+                [t for t in active if t["dir"] == _side and t.get("trend_regime") == _reg]
+            )
+
+    _all_wt = sorted({t.get("wick_type", "") for t in active} - {""})
+    wick_type_stats = {wt: _group_stats([t for t in active if t.get("wick_type") == wt])
+                       for wt in _all_wt}
+
+    side_wick_type_stats: dict = {}
+    for _side in ("long", "short"):
+        for wt in _all_wt:
+            key = f"{_side}_{wt}"
+            side_wick_type_stats[key] = _group_stats(
+                [t for t in active if t["dir"] == _side and t.get("wick_type") == wt]
+            )
+
+    session_hour_stats: dict = {}
+    for _h in range(24):
+        subset = [t for t in active if t.get("session_hour") == _h]
+        if subset:
+            session_hour_stats[_h] = _group_stats(subset)
+
+    _delays = sorted({t.get("entry_delay_bars") for t in active
+                      if isinstance(t.get("entry_delay_bars"), int)})
+    entry_delay_bars_stats = {
+        d: _group_stats([t for t in active if t.get("entry_delay_bars") == d])
+        for d in _delays
+    }
 
     return {
         "initial_capital": cfg.initial_capital,
@@ -388,9 +539,17 @@ def _build_stats(
         "max_drawdown_pct": max_dd,
         "avg_win": avg_win, "avg_loss": avg_loss,
         "sl_count": sl_count, "tp_count": tp_count,
-        "ts_count": ts_count, "td_count": td_count,
+        "ts_count": ts_count, "td_count": td_count, "tdd_count": tdd_count,
         "long_trades": ln, "long_win_rate": lwr, "long_profit_factor": lpf,
         "short_trades": sn, "short_win_rate": swr, "short_profit_factor": spf,
+        # detailed breakdowns
+        "exit_stats":             exit_stats,
+        "side_stats":             side_stats,
+        "regime_side_stats":      regime_side_stats,
+        "wick_type_stats":        wick_type_stats,
+        "side_wick_type_stats":   side_wick_type_stats,
+        "session_hour_stats":     session_hour_stats,
+        "entry_delay_bars_stats": entry_delay_bars_stats,
         "open_count": open_count,
         "trade_list": trade_list,
     }
@@ -467,10 +626,11 @@ def compute_subset_stats(trades: list) -> dict:
         "profit_factor": pf, "max_consec_loss": max_cl,
         "max_drawdown_pct": max_dd,
         "avg_win": avg_win, "avg_loss": avg_loss,
-        "sl_count": sum(1 for t in active if t.get("exit_label") == "SL"),
-        "tp_count": sum(1 for t in active if t.get("exit_label") == "TP"),
-        "ts_count": sum(1 for t in active if t.get("exit_label") == "TS"),
-        "td_count": sum(1 for t in active if t.get("exit_label") == "TD"),
+        "sl_count":  sum(1 for t in active if t.get("exit_label") == "SL"),
+        "tp_count":  sum(1 for t in active if t.get("exit_label") == "TP"),
+        "ts_count":  sum(1 for t in active if t.get("exit_label") == "TS"),
+        "td_count":  sum(1 for t in active if t.get("exit_label") == "TD"),
+        "tdd_count": sum(1 for t in active if t.get("exit_label") == "TDD"),
         "long_trades": ln, "long_profit_factor": lpf,
         "short_trades": sn, "short_profit_factor": spf,
     }

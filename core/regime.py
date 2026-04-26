@@ -497,16 +497,23 @@ def enrich_trades_with_regime(
         entry_time = trade.get("entry_time", 0)
         if not entry_time:
             trade["regime"] = "neutral"
+            if not trade.get("trend_regime"):
+                trade["trend_regime"] = "neutral"
             continue
 
         # 找到 entry_time 對應的 kline 位置（取 ≤ entry_time 的最後一根）
         idx = bisect.bisect_right(times, entry_time)
         if idx == 0:
             trade["regime"] = "neutral"
+            if not trade.get("trend_regime"):
+                trade["trend_regime"] = "neutral"
             continue
 
         window = klines[max(0, idx - lookback): idx]
-        trade["regime"] = detect_regime(window, **regime_params)
+        regime = detect_regime(window, **regime_params)
+        trade["regime"] = regime
+        if not trade.get("trend_regime"):
+            trade["trend_regime"] = regime
 
     return trade_list
 
