@@ -618,6 +618,12 @@ class BacktestResultDialog(QDialog):
         trade_heads = ["#", "方向", "入場時間", "入場價", "出場類型",
                        "出場價", "數量", "手續費",
                        "資金費", "淨利(USDT)", "餘額", "Regime"]
+        trade_heads += [
+            "side", "wick_type", "session_hour", "atr_percentile",
+            "trend_regime", "entry_delay_bars", "k0_range_atr",
+            "wick_volume_ratio", "zoom_delta_eff", "MAE", "MFE",
+            "exit_label",
+        ]
         for col, h in enumerate(trade_heads, 1):
             c = ws2.cell(row=1, column=col, value=h)
             c.font, c.fill, c.alignment = h_font, h_fill, center
@@ -642,6 +648,20 @@ class BacktestResultDialog(QDialog):
                 round(pv, 2),
                 round(t.get("equity_after", 0), 2),
                 t.get("regime", "─"),
+            ]
+            row_vals += [
+                t.get("side", ""),
+                t.get("wick_type", ""),
+                t.get("session_hour", ""),
+                t.get("atr_percentile", ""),
+                t.get("trend_regime", ""),
+                t.get("entry_delay_bars", ""),
+                t.get("k0_range_atr", ""),
+                t.get("wick_volume_ratio", ""),
+                t.get("zoom_delta_eff", ""),
+                t.get("MAE", ""),
+                t.get("MFE", ""),
+                t.get("exit_label", ""),
             ]
             for col, val in enumerate(row_vals, 1):
                 cell = ws2.cell(row=i + 1, column=col, value=val)
@@ -734,8 +754,8 @@ class BacktestConfigDialog(QDialog):
 
         self.capital_spin = QDoubleSpinBox()
         self.capital_spin.setRange(100, 10_000_000)
-        self.capital_spin.setValue(s.get("initial_capital", 10_000))
         self.capital_spin.setDecimals(0)
+        self.capital_spin.setValue(s.get("initial_capital", 10_000))
         self.capital_spin.setSuffix(" USDT")
         self.capital_spin.setStyleSheet(self._SPIN_STYLE)
         form.addRow("初始資金:", self.capital_spin)
@@ -788,8 +808,8 @@ class BacktestConfigDialog(QDialog):
 
         self.slippage_spin = QDoubleSpinBox()
         self.slippage_spin.setRange(0.0, 50.0)
-        self.slippage_spin.setValue(s.get("slippage_bps", 0.0))
         self.slippage_spin.setDecimals(1)
+        self.slippage_spin.setValue(s.get("slippage_bps", 0.0))
         self.slippage_spin.setSuffix(" bps")
         self.slippage_spin.setToolTip("滞dge (1 bps = 0.01%)")
         self.slippage_spin.setStyleSheet(self._SPIN_STYLE)
@@ -1331,6 +1351,7 @@ class MainWindow(QMainWindow):
         self._last_price = 0.0
         self._last_trade_time = 0.0
         self._data_stale = False
+        self._loaded_klines = []
         self._kline_timestamps = []
 
         # 重置 UI
@@ -1709,6 +1730,7 @@ class MainWindow(QMainWindow):
         self._interval = iv
         ui_settings.set("interval", iv)
         self._refresh_cache_label()
+        self._rebuild_range_combo()
         self._start_stream()
 
     def _on_fp_mode_changed(self, mode: str) -> None:
@@ -1747,7 +1769,8 @@ class MainWindow(QMainWindow):
 
     def _on_run_strategy(self) -> None:
         """對目前已載入的歷史 K 棒執行回測，繪製標記並顯示統計。"""
-        if not self._strategy_engine or not self._loaded_klines:
+        if not self._strategy_engine:
+            self._status_lbl.setText("Please select a strategy before running a backtest.")
             return
 
         use_tick = self._bt_mode_combo.currentIndex() == 1
@@ -1835,6 +1858,13 @@ class MainWindow(QMainWindow):
 
             if have < need:
                 cached = kline_cache.load(self._symbol, self._interval)
+                if cached and len(cached) < need:
+                    self._status_lbl.setText(
+                        f"Only {len(cached):,}/{need:,} cached {self._interval} bars available; "
+                        "running with cached data."
+                    )
+                    self._load_from_cache(cached, need)
+                    return
                 if len(cached) >= need:
                     self._status_lbl.setText("從本機快取載入資料…")
                     self._load_from_cache(cached, need)
@@ -1842,6 +1872,9 @@ class MainWindow(QMainWindow):
 
                 self._run_btn.setEnabled(False)
                 self._run_btn.setText("載入中…")
+                self._status_lbl.setText(
+                    f"Loading {need:,} {self._interval} bars before backtest."
+                )
                 if self._ws_thread:
                     self._ws_thread.request_backtest_history(need)
                 return
@@ -1957,6 +1990,24 @@ class MainWindow(QMainWindow):
             )
 
 
+        # ── Phase B: build cfg once, inject into strategy before on_history ──
+        from backtest.engine import BacktestConfig, simulate_trades, _resolve_fee_rate
+        cfg = BacktestConfig(
+            initial_capital=self._bt_config_dlg.capital_spin.value(),
+            max_loss_pct=self._bt_config_dlg.loss_spin.value() / 100.0,
+            leverage=self._bt_config_dlg.leverage_spin.value(),
+            fee_mode=self._bt_config_dlg.fee_combo.currentText(),
+            custom_fee_rate=self._bt_config_dlg.custom_fee_spin.value() / 100.0,
+            slippage_bps=self._bt_config_dlg.slippage_spin.value(),
+            funding_rate=self._bt_config_dlg.funding_spin.value(),
+            maint_margin=self._bt_config_dlg.maint_spin.value(),
+            compound=self._bt_config_dlg.compound_combo.currentIndex() == 0,
+        )
+        if hasattr(self._strategy_engine, "configure_backtest_costs"):
+            self._strategy_engine.configure_backtest_costs(
+                _resolve_fee_rate(cfg), cfg.slippage_bps
+            )
+
         if use_tick_mode:
             had_allow_bar_fallback = hasattr(
                 self._strategy_engine, "allow_bar_fallback_in_tick_mode"
@@ -1990,19 +2041,7 @@ class MainWindow(QMainWindow):
         basic_stats = self._strategy_engine.compute_stats(self._strategy_signals)
         self._show_strategy_stats_label(basic_stats)
 
-        # 完整模擬（資金/手續費/倉位）
-        from backtest.engine import BacktestConfig, simulate_trades
-        cfg = BacktestConfig(
-            initial_capital=self._bt_config_dlg.capital_spin.value(),
-            max_loss_pct=self._bt_config_dlg.loss_spin.value() / 100.0,
-            leverage=self._bt_config_dlg.leverage_spin.value(),
-            fee_mode=self._bt_config_dlg.fee_combo.currentText(),
-            custom_fee_rate=self._bt_config_dlg.custom_fee_spin.value() / 100.0,
-            slippage_bps=self._bt_config_dlg.slippage_spin.value(),
-            funding_rate=self._bt_config_dlg.funding_spin.value(),
-            maint_margin=self._bt_config_dlg.maint_spin.value(),
-            compound=self._bt_config_dlg.compound_combo.currentIndex() == 0,
-        )
+        # 完整模擬（資金/手續費/倉位）— cfg already built above
         sim_stats = simulate_trades(self._strategy_signals, cfg)
         if bt_klines:
             from core.regime import enrich_trades_with_regime

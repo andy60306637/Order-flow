@@ -140,9 +140,9 @@ class CapacityTab(QWidget):
 
         self._vpr_cap_spin = QDoubleSpinBox()
         self._vpr_cap_spin.setRange(0.01, 1.0)
-        self._vpr_cap_spin.setValue(0.05)
         self._vpr_cap_spin.setSingleStep(0.01)
         self._vpr_cap_spin.setDecimals(3)
+        self._vpr_cap_spin.setValue(0.05)
         self._vpr_cap_spin.setSuffix(" (5%)")
         self._vpr_cap_spin.setToolTip("VPR 上限門檻（超過視為容量瓶頸）")
         form2.addRow("VPR 上限:", self._vpr_cap_spin)

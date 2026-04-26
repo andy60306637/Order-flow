@@ -76,6 +76,11 @@ def _collect_contexts(
     k0_short_signals = [s for s in signals if s.signal_type == "k0_short"]
 
     result = []
+    # Calculate bar interval to align sub-bar trade times to bar open times
+    bar_ms = 60000 # default
+    if len(klines) > 1:
+        bar_ms = klines[1].open_time - klines[0].open_time
+
     for ti, trade in enumerate(trade_list):
         if trade.get("skipped"):
             continue
@@ -88,12 +93,16 @@ def _collect_contexts(
         else:
             entry_type, exit_type, k0_pool = "long_entry",  "long_exit",  k0_long_signals
 
+        # Align trade times to bar start to match signal.open_time
+        aligned_entry = (entry_time // bar_ms) * bar_ms
+        aligned_exit  = (exit_time // bar_ms) * bar_ms if exit_time else 0
+
         entry_sig = next(
-            (s for s in sig_by_time.get(entry_time, []) if s.signal_type == entry_type),
+            (s for s in sig_by_time.get(aligned_entry, []) if s.signal_type == entry_type),
             None,
         )
         exit_sig = next(
-            (s for s in sig_by_time.get(exit_time, []) if s.signal_type == exit_type),
+            (s for s in sig_by_time.get(aligned_exit, []) if s.signal_type == exit_type),
             None,
         )
         if entry_sig is None:
@@ -104,8 +113,9 @@ def _collect_contexts(
             None,
         )
 
-        entry_ki = _find_ki(klines, entry_time)
-        exit_ki  = _find_ki(klines, exit_time) if exit_time else None
+        # Use aligned times to find the correct kline index
+        entry_ki = _find_ki(klines, aligned_entry)
+        exit_ki  = _find_ki(klines, aligned_exit) if exit_time else None
         k0_ki    = _find_ki(klines, k0_sig.open_time) if k0_sig else None
 
         earliest = min(
