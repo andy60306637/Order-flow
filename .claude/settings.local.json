@@ -7,7 +7,11 @@
       "Bash(echo \"EXIT_CODE=$?\")",
       "Bash(python3:*)",
       "Bash(xargs grep:*)",
-      "Bash(grep -E \"\\\\.py$\")"
+      "Bash(grep -E \"\\\\.py$\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(git stash *)"
     ]
   }
 }

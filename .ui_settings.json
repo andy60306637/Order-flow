@@ -11,5 +11,7 @@
         "compound": false
     },
     "strategy_name": "Wick Reversal 1m v4",
-    "interval": "1m"
+    "interval": "1m",
+    "backtest_tick_symbol": "BTCUSDT",
+    "backtest_mode_index": 1
 }
