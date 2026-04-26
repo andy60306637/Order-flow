@@ -82,7 +82,48 @@ class OptimizationHeatmap(QWidget):
 
         vmax = np.nanmax(grid)
         self._bar.setLevels((vmin, vmax))
-        self._bar.setLabel(metric_label)
+        self._bar.setLabel("right", metric_label)
 
     def clear(self) -> None:
         self._img.clear()
+
+    def load_result(self, stats: dict) -> None:
+        """Render a compact post-backtest heatmap: side x UTC session hour."""
+        trades = [
+            t for t in stats.get("trade_list", [])
+            if not t.get("skipped")
+        ]
+        buckets: dict[tuple[int, int], list[float]] = {}
+        for t in trades:
+            side = t.get("dir")
+            if side not in ("long", "short"):
+                continue
+            hour = t.get("session_hour")
+            if not isinstance(hour, int):
+                ts = t.get("entry_time") or 0
+                if ts:
+                    from datetime import datetime, timezone
+                    hour = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).hour
+            if not isinstance(hour, int):
+                continue
+            x = 0 if side == "long" else 1
+            buckets.setdefault((x, hour), []).append(float(t.get("net_pnl", 0.0)))
+
+        if not buckets:
+            self.clear()
+            return
+
+        results = [
+            {
+                "x": x,
+                "y": hour,
+                "value": sum(values) / len(values),
+            }
+            for (x, hour), values in buckets.items()
+        ]
+        self.load_optimization(
+            results,
+            x_label="Side (0 long, 1 short)",
+            y_label="UTC Hour",
+            metric_label="Avg Net PnL",
+        )

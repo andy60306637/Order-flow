@@ -32,6 +32,7 @@ class TimeSlice:
     """一個邏輯時段，可能由多個不連續區段組成。"""
     label:    str
     segments: list[tuple[int, int]] = field(default_factory=list)  # [(start_ms, end_ms), ...]
+    segment_symbols: list[str] = field(default_factory=list)       # optional tick source per segment
 
     def total_ms(self) -> int:
         return sum(end - start for start, end in self.segments)

@@ -47,6 +47,7 @@ class TradeLedger(QWidget):
     """回測交易明細表。"""
 
     trade_selected = pyqtSignal(dict)
+    trade_activated = pyqtSignal(dict)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -95,6 +96,7 @@ class TradeLedger(QWidget):
             "QHeaderView::section { background-color: #1e222d; color: #d1d4dc; }"
         )
         self._table.itemSelectionChanged.connect(self._on_selection)
+        self._table.itemDoubleClicked.connect(self._on_activated)
         layout.addWidget(self._table)
 
         self._all_trades: list[dict] = []
@@ -158,6 +160,11 @@ class TradeLedger(QWidget):
             trade = rows[0].data(Qt.ItemDataRole.UserRole)
             if isinstance(trade, dict):
                 self.trade_selected.emit(trade)
+
+    def _on_activated(self, item: QTableWidgetItem) -> None:
+        trade = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(trade, dict):
+            self.trade_activated.emit(trade)
 
     def clear(self) -> None:
         self._all_trades = []

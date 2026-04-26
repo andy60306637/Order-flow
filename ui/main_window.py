@@ -69,6 +69,46 @@ def _format_utc_day(ms: int) -> str:
     return QDateTime.fromMSecsSinceEpoch(int(ms), Qt.TimeSpec.UTC).toString("yyyy-MM-dd")
 
 
+def _find_snapshot_bar_index(klines: list, ts_ms: int) -> Optional[int]:
+    if not klines or not ts_ms:
+        return None
+    lo, hi = 0, len(klines) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        k = klines[mid]
+        if k.open_time <= ts_ms <= k.close_time:
+            return mid
+        if ts_ms < k.open_time:
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    return max(0, min(lo, len(klines) - 1))
+
+
+def _fallback_snapshot_contexts(trade_list: list[dict], klines: list) -> list[dict]:
+    contexts: list[dict] = []
+    active_trades = [t for t in trade_list if not t.get("skipped")]
+    for idx, trade in enumerate(active_trades):
+        entry_ki = _find_snapshot_bar_index(klines, int(trade.get("entry_time", 0) or 0))
+        exit_ki = _find_snapshot_bar_index(klines, int(trade.get("exit_time", 0) or 0))
+        if entry_ki is None:
+            continue
+        latest = exit_ki if exit_ki is not None else entry_ki
+        contexts.append({
+            "trade": trade,
+            "trade_idx": idx,
+            "k0_signal": None,
+            "entry_signal": None,
+            "exit_signal": None,
+            "k0_ki": None,
+            "entry_ki": entry_ki,
+            "exit_ki": exit_ki,
+            "win_start": max(0, entry_ki - 10),
+            "win_end": min(len(klines) - 1, latest + 10),
+        })
+    return contexts
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tick 匯入執行緒（背景解析 CSV/ZIP 並寫入快取）
 # ─────────────────────────────────────────────────────────────────────────────
@@ -308,7 +348,7 @@ class BacktestResultDialog(QDialog):
         # ── 圖表快照按鈕 ─────────────────────────────────────────────
         self._snap_btn = QPushButton("📸 圖表快照")
         self._snap_btn.setToolTip("開啟所選交易的 K 棒快照視窗（雙擊表格列也可開啟）")
-        self._snap_btn.setEnabled(bool(self._klines and self._signals))
+        self._snap_btn.setEnabled(bool(self._klines and self._full_trade_list))
         self._snap_btn.setStyleSheet(
             "QPushButton { background:#1e222d; color:#80cbc4;"
             " border:1px solid #26a69a; border-radius:3px; padding:3px 10px; }"
@@ -679,17 +719,20 @@ class BacktestResultDialog(QDialog):
 
     def _open_snapshot_at(self, trade_row_idx: int) -> None:
         """Build contexts once and open TradeSnapshotDialog at trade_row_idx."""
-        if not self._klines or not self._signals:
+        if not self._klines:
             QMessageBox.information(
                 self, "無法開啟快照",
-                "快照功能需要 Tick 模式回測的 K 棒與訊號資料。\n"
-                "請切換至 🎯 Tick 模式後再執行回測。"
+                "此回測結果沒有可用的 K 棒快照資料，請重新執行新版回測。"
             )
             return
 
         from ui.trade_snapshot_dialog import TradeSnapshotDialog, _collect_contexts
         active_trades = [t for t in self._full_trade_list if not t.get("skipped")]
-        contexts = _collect_contexts(self._signals, active_trades, self._klines)
+        contexts = []
+        if self._signals:
+            contexts = _collect_contexts(self._signals, active_trades, self._klines)
+        if not contexts:
+            contexts = _fallback_snapshot_contexts(active_trades, self._klines)
         if not contexts:
             QMessageBox.information(self, "無快照資料", "找不到可顯示的交易快照。")
             return
@@ -700,7 +743,14 @@ class BacktestResultDialog(QDialog):
         if trade_row_idx < len(filtered_active):
             target_trade = filtered_active[trade_row_idx]
             ctx_idx = next(
-                (i for i, c in enumerate(contexts) if c["trade"] is target_trade),
+                (
+                    i for i, c in enumerate(contexts)
+                    if c["trade"] is target_trade or (
+                        c["trade"].get("entry_time") == target_trade.get("entry_time")
+                        and c["trade"].get("exit_time") == target_trade.get("exit_time")
+                        and c["trade"].get("dir") == target_trade.get("dir")
+                    )
+                ),
                 0,
             )
         else:
@@ -1071,6 +1121,7 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         tb.setStyleSheet("QToolBar { spacing: 8px; padding: 4px; }")
         self.addToolBar(tb)
+        self._main_toolbar = tb
 
         # Symbol
         tb.addWidget(QLabel("交易對 "))
@@ -1258,6 +1309,9 @@ class MainWindow(QMainWindow):
         # 初始化回測範圍下拉（需在 _bt_mode_combo 建立後）
         self._rebuild_tick_dataset_combo()
         self._rebuild_range_combo()
+        if hasattr(self, "_top_tabs"):
+            self._top_tabs.currentChanged.connect(self._on_top_tab_changed)
+            self._on_top_tab_changed(self._top_tabs.currentIndex())
 
     def _build_ui(self) -> None:
         # ── 左欄（OB + Heatmap）─────────────────────────────────────────────
@@ -1334,7 +1388,13 @@ class MainWindow(QMainWindow):
         top_tabs.addTab(self._backtest_dashboard, "📊 回測分析")
         top_tabs.addTab(main_splitter,             "📈 即時看盤")
 
+        self._top_tabs = top_tabs
         self.setCentralWidget(top_tabs)
+
+    def _on_top_tab_changed(self, index: int) -> None:
+        toolbar = getattr(self, "_main_toolbar", None)
+        if toolbar is not None:
+            toolbar.setVisible(index == 1)
 
     # ══════════════════════════════════════════════════════════════
     # WebSocket 管理

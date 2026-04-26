@@ -10,8 +10,10 @@ from typing import Optional
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
+    QHBoxLayout,
     QLabel,
     QMessageBox,
+    QPushButton,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -28,8 +30,48 @@ from ui.mfe_mae_chart import MfeMaeChart
 from ui.montecarlo_chart import MonteCarloChart
 from ui.optimization_heatmap import OptimizationHeatmap
 from ui.trade_ledger import TradeLedger
+from ui.trade_snapshot_dialog import TradeSnapshotDialog, _collect_contexts
 
 logger = logging.getLogger(__name__)
+
+
+def _find_bar_index(klines, ts_ms: int) -> Optional[int]:
+    if not klines or not ts_ms:
+        return None
+    lo, hi = 0, len(klines) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        k = klines[mid]
+        if k.open_time <= ts_ms <= k.close_time:
+            return mid
+        if ts_ms < k.open_time:
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    return max(0, min(lo, len(klines) - 1))
+
+
+def _fallback_snapshot_contexts(trade_list: list[dict], klines) -> list[dict]:
+    contexts: list[dict] = []
+    for idx, trade in enumerate([t for t in trade_list if not t.get("skipped")]):
+        entry_ki = _find_bar_index(klines, int(trade.get("entry_time", 0) or 0))
+        exit_ki = _find_bar_index(klines, int(trade.get("exit_time", 0) or 0))
+        if entry_ki is None:
+            continue
+        latest = exit_ki if exit_ki is not None else entry_ki
+        contexts.append({
+            "trade": trade,
+            "trade_idx": idx,
+            "k0_signal": None,
+            "entry_signal": None,
+            "exit_signal": None,
+            "k0_ki": None,
+            "entry_ki": entry_ki,
+            "exit_ki": exit_ki,
+            "win_start": max(0, entry_ki - 10),
+            "win_end": min(len(klines) - 1, latest + 10),
+        })
+    return contexts
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -53,7 +95,9 @@ class BacktestWorkerThread(QThread):
         bt_cfg:   BacktestConfig,
         slices,                    # list[TimeSlice] 或 list[tuple[TimeSlice, TimeSlice]]
         symbol:   str,
+        tick_symbol: str,
         interval: str,
+        use_tick_mode: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -61,7 +105,9 @@ class BacktestWorkerThread(QThread):
         self._bt_cfg   = bt_cfg
         self._slices   = slices
         self._symbol   = symbol
+        self._tick_symbol = tick_symbol
         self._interval = interval
+        self._use_tick_mode = use_tick_mode
         self._abort    = False
 
     def abort(self) -> None:
@@ -98,15 +144,18 @@ class BacktestWorkerThread(QThread):
         for sl in slices:
             if self._abort:
                 return {}
-            for start_ms, end_ms in sl.segments:
+            segment_symbols = getattr(sl, "segment_symbols", []) or []
+            for idx, (start_ms, end_ms) in enumerate(sl.segments):
+                tick_symbol = segment_symbols[idx] if idx < len(segment_symbols) else self._tick_symbol
                 self.progress.emit(f"Loading klines {sl.label}…")
                 klines = load_klines_fn(self._symbol, self._interval, start_ms, end_ms)
                 all_klines.extend(klines)
 
-                self.progress.emit(f"Loading ticks {sl.label}…")
-                ticks = load_ticks_fn(self._symbol, start_ms, end_ms)
-                if ticks is not None and len(ticks) > 0:
-                    all_tick_parts.append(ticks)
+                if self._use_tick_mode:
+                    self.progress.emit(f"Loading ticks {sl.label} ({tick_symbol})…")
+                    ticks = load_ticks_fn(tick_symbol, start_ms, end_ms)
+                    if ticks is not None and len(ticks) > 0:
+                        all_tick_parts.append(ticks)
 
         if not all_klines:
             raise ValueError("No klines loaded for the selected time range.")
@@ -131,6 +180,14 @@ class BacktestWorkerThread(QThread):
         self.progress.emit("Simulating trades…")
         result = simulate_trades(signals, self._bt_cfg)
         result["mode"] = "single"
+        result["strategy_name"] = getattr(self._strategy, "name", self._strategy.__class__.__name__)
+        result["backtest_start_ms"] = all_klines[0].open_time if all_klines else 0
+        result["backtest_end_ms"] = all_klines[-1].open_time if all_klines else 0
+        result["tick_coverage_pct"] = None
+        result["fallback_bar_count"] = 0
+        result["_snapshot_klines"] = all_klines
+        result["_snapshot_tick_map"] = tick_map
+        result["_snapshot_signals"] = signals
         return result
 
     def _run_walk_forward(self, load_klines_fn, load_ticks_fn, bar_map_fn) -> dict:
@@ -154,6 +211,7 @@ class BacktestWorkerThread(QThread):
                 max_loss_pct    = self._bt_cfg.max_loss_pct,
                 leverage        = self._bt_cfg.leverage,
                 fee_mode        = self._bt_cfg.fee_mode,
+                custom_fee_rate = self._bt_cfg.custom_fee_rate,
                 slippage_bps    = self._bt_cfg.slippage_bps,
                 compound        = self._bt_cfg.compound,
             )
@@ -211,6 +269,12 @@ class BacktestDashboard(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._worker: Optional[BacktestWorkerThread] = None
+        self._last_stats: dict | None = None
+        self._selected_trade: dict | None = None
+        self._snapshot_contexts: list[dict] = []
+        self._snapshot_klines = []
+        self._snapshot_tick_map = None
+        self._snapshot_dialog: Optional[TradeSnapshotDialog] = None
         self._setup_ui()
         self._connect_signals()
 
@@ -232,12 +296,36 @@ class BacktestDashboard(QWidget):
         self._metrics = MetricsPanel()
         right_layout.addWidget(self._metrics)
 
-        # 狀態標籤（回測進行中提示）
+        # 狀態與結果工具列
+        status_row = QWidget()
+        status_layout = QHBoxLayout(status_row)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(6)
         self._status_label = QLabel("")
         self._status_label.setStyleSheet(
             "color: #787b86; font-size: 11px; padding: 2px 8px;"
         )
-        right_layout.addWidget(self._status_label)
+        status_layout.addWidget(self._status_label, stretch=1)
+
+        self._result_btn = QPushButton("Result / Excel")
+        self._result_btn.setEnabled(False)
+        self._result_btn.setStyleSheet(
+            "QPushButton { background:#1e222d; color:#d1d4dc; border:1px solid #2a2e39; "
+            "border-radius:3px; padding:2px 8px; }"
+            "QPushButton:hover { background:#2a2e39; }"
+            "QPushButton:disabled { color:#555; }"
+        )
+        self._snapshot_btn = QPushButton("Snapshot")
+        self._snapshot_btn.setEnabled(False)
+        self._snapshot_btn.setStyleSheet(
+            "QPushButton { background:#1e222d; color:#80cbc4; border:1px solid #26a69a; "
+            "border-radius:3px; padding:2px 8px; }"
+            "QPushButton:hover { background:#1a3a3a; }"
+            "QPushButton:disabled { color:#555; border-color:#333; }"
+        )
+        status_layout.addWidget(self._snapshot_btn)
+        status_layout.addWidget(self._result_btn)
+        right_layout.addWidget(status_row)
 
         # 中間：資金曲線 + MFE/MAE + 交易明細
         center_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -292,6 +380,10 @@ class BacktestDashboard(QWidget):
         self._config.run_requested.connect(self._on_run_backtest)
         self._config.cancel_requested.connect(self._on_cancel)
         self._mfe_mae.trade_selected.connect(self._ledger.trade_selected)
+        self._ledger.trade_selected.connect(self._on_trade_selected)
+        self._ledger.trade_activated.connect(self._on_trade_snapshot_requested)
+        self._snapshot_btn.clicked.connect(self._open_selected_snapshot)
+        self._result_btn.clicked.connect(self._open_result_dialog)
 
     # ── 回測執行 ──────────────────────────────────────────────────────────────
 
@@ -305,6 +397,9 @@ class BacktestDashboard(QWidget):
             return
 
         self._config.set_running(True)
+        self._result_btn.setEnabled(False)
+        self._snapshot_btn.setEnabled(False)
+        self._selected_trade = None
         self._status_label.setText("Loading data…")
 
         self._worker = BacktestWorkerThread(
@@ -312,7 +407,9 @@ class BacktestDashboard(QWidget):
             bt_cfg   = bt_cfg,
             slices   = slices,
             symbol   = self._config.symbol(),
+            tick_symbol = self._config.tick_symbol(),
             interval = self._config.interval(),
+            use_tick_mode = self._config.use_tick_mode(),
             parent   = self,
         )
         self._worker.result_ready.connect(self._on_result_ready)
@@ -329,6 +426,10 @@ class BacktestDashboard(QWidget):
         self._status_label.setText("Cancelled.")
 
     def _on_result_ready(self, stats: dict) -> None:
+        self._last_stats = stats
+        self._result_btn.setEnabled(True)
+        self._prepare_snapshot_contexts(stats)
+        self._snapshot_btn.setEnabled(bool(self._snapshot_contexts))
         self._status_label.setText(
             f"Done — {stats.get('trades', 0)} trades | "
             f"Win: {stats.get('win_rate', 0):.1f}% | "
@@ -339,6 +440,7 @@ class BacktestDashboard(QWidget):
         self._equity.load_result(stats)
         self._mfe_mae.load_result(stats)
         self._ledger.load_result(stats)
+        self._heatmap.load_result(stats)
 
         trade_list = stats.get("trade_list", [])
         if trade_list:
@@ -351,6 +453,80 @@ class BacktestDashboard(QWidget):
         self._status_label.setText(f"Error: {msg}")
         QMessageBox.critical(self, "Backtest Error", msg)
         self._config.set_running(False)
+        self._snapshot_btn.setEnabled(False)
+
+    def _prepare_snapshot_contexts(self, stats: dict) -> None:
+        self._snapshot_contexts = []
+        self._snapshot_klines = stats.get("_snapshot_klines", []) or []
+        self._snapshot_tick_map = stats.get("_snapshot_tick_map")
+        signals = stats.get("_snapshot_signals", []) or []
+        trade_list = stats.get("trade_list", []) or []
+        if self._snapshot_klines and signals and trade_list:
+            self._snapshot_contexts = _collect_contexts(
+                signals,
+                trade_list,
+                self._snapshot_klines,
+            )
+        if not self._snapshot_contexts and self._snapshot_klines and trade_list:
+            self._snapshot_contexts = _fallback_snapshot_contexts(
+                trade_list,
+                self._snapshot_klines,
+            )
+
+    def _on_trade_snapshot_requested(self, trade: dict) -> None:
+        if not self._snapshot_contexts and self._last_stats:
+            self._prepare_snapshot_contexts(self._last_stats)
+            self._snapshot_btn.setEnabled(bool(self._snapshot_contexts))
+        if not self._snapshot_contexts:
+            QMessageBox.information(self, "Snapshot", "No snapshot context is available for this result.")
+            return
+        start_idx = 0
+        for idx, ctx in enumerate(self._snapshot_contexts):
+            ctx_trade = ctx.get("trade", {})
+            if ctx_trade is trade or (
+                ctx_trade.get("entry_time") == trade.get("entry_time")
+                and ctx_trade.get("exit_time") == trade.get("exit_time")
+                and ctx_trade.get("dir") == trade.get("dir")
+            ):
+                start_idx = idx
+                break
+        self._snapshot_dialog = TradeSnapshotDialog(
+            self._snapshot_contexts,
+            self._snapshot_klines,
+            self._snapshot_tick_map,
+            start_idx=start_idx,
+            parent=self,
+        )
+        self._snapshot_dialog.show()
+        self._snapshot_dialog.raise_()
+        self._snapshot_dialog.activateWindow()
+
+    def _on_trade_selected(self, trade: dict) -> None:
+        self._selected_trade = trade
+        self._snapshot_btn.setEnabled(bool(self._snapshot_contexts))
+
+    def _open_selected_snapshot(self) -> None:
+        trade = self._selected_trade
+        if trade is None and self._last_stats:
+            trade = next(
+                (t for t in self._last_stats.get("trade_list", []) if not t.get("skipped")),
+                None,
+            )
+        if trade is not None:
+            self._on_trade_snapshot_requested(trade)
+
+    def _open_result_dialog(self) -> None:
+        if not self._last_stats:
+            return
+        from ui.main_window import BacktestResultDialog
+        dlg = BacktestResultDialog(
+            self._last_stats,
+            klines=self._snapshot_klines or None,
+            tick_map=self._snapshot_tick_map,
+            signals=self._last_stats.get("_snapshot_signals") or None,
+            parent=self,
+        )
+        dlg.exec()
 
     # ── 熱力圖（外部調用）────────────────────────────────────────────────────
 

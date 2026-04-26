@@ -68,6 +68,8 @@ TRADE_RESEARCH_FIELDS = [
     "MAE",
     "MFE",
     # v6.1 additions
+    "mae",
+    "mfe",
     "mae_r",
     "mfe_r",
     "entry_risk",

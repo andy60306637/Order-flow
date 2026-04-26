@@ -40,9 +40,13 @@ class WickReversalV6_1Strategy(WickReversalV6Strategy):
 
     def _exit_meta(self) -> dict:
         risk = self._entry_risk
+        mae = self._mae * risk
+        mfe = self._mfe * risk
         return {
-            "mae":        self._mae * risk,
-            "mfe":        self._mfe * risk,
+            "MAE":        self._mae,
+            "MFE":        self._mfe,
+            "mae":        mae,
+            "mfe":        mfe,
             "mae_r":      self._mae,
             "mfe_r":      self._mfe,
             "entry_risk": risk,
