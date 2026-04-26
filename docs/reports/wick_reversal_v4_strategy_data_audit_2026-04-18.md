@@ -1,6 +1,6 @@
 # Wick Reversal v4 稽核進度
 
-- 產生時間（UTC）：2026-04-18T06:55:43+00:00
+- 產生時間（UTC）：2026-04-26T10:08:30+00:00
 - 分段報表來源：`D:\program\OrderFlow\docs\reports\wick_reversal_v4_segment_experiments.json`
 
 ## 階段 1：資料對齊確認
