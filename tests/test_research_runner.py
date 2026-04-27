@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 
 from core.data_types import Kline
-from research.registry import ensure_builtin_factors, list_factors
+from research.base import GROUP_MEAN_REVERSION, GROUP_MICROSTRUCTURE
+from research.registry import ensure_builtin_factors, get_factor_info, list_factors
 from research.runner import analyze_factors
 
 
@@ -35,6 +36,22 @@ class ResearchRunnerTests(unittest.TestCase):
         self.assertIn("delta_eff", names)
         self.assertIn("wick_delta_eff", names)
 
+    def test_builtin_factor_metadata_classifies_side_and_group(self) -> None:
+        lower = get_factor_info("lower_wick_ratio")
+        upper = get_factor_info("upper_wick_ratio")
+        delta = get_factor_info("delta_eff")
+
+        self.assertIsNotNone(lower)
+        self.assertIsNotNone(upper)
+        self.assertIsNotNone(delta)
+        assert lower is not None
+        assert upper is not None
+        assert delta is not None
+        self.assertEqual(lower["side"], "Long")
+        self.assertEqual(upper["side"], "Short")
+        self.assertEqual(lower["group"], GROUP_MEAN_REVERSION)
+        self.assertEqual(delta["group"], GROUP_MICROSTRUCTURE)
+
     def test_analyze_factors_computes_ic_and_quantiles(self) -> None:
         closes = [100, 101, 103, 106, 110, 115, 121, 128]
         klines = [_k(i, close, volume=100 + i * 10, buy=55 + i) for i, close in enumerate(closes)]
@@ -50,6 +67,8 @@ class ResearchRunnerTests(unittest.TestCase):
 
         self.assertEqual(result.rows, len(klines))
         self.assertGreaterEqual(len(result.summary), 3)
+        self.assertIn("side", result.summary[0])
+        self.assertIn("group", result.summary[0])
         metric = next(
             row for row in result.metrics
             if row["factor"] == "return_1" and row["horizon"] == 1

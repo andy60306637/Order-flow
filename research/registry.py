@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Type
 
-from research.base import FactorBase
+from research.base import FactorBase, factor_sides_label
 
 _FACTOR_REGISTRY: dict[str, Type[FactorBase]] = {}
 
@@ -23,6 +23,28 @@ def list_factors(include_tick: bool = True) -> list[str]:
         if include_tick or not cls.requires_ticks:
             names.append(name)
     return sorted(names)
+
+
+def get_factor_info(name: str) -> dict[str, object] | None:
+    factor = get_factor(name)
+    if factor is None:
+        return None
+    return {
+        "name": factor.name,
+        "requires_ticks": factor.requires_ticks,
+        "sides": factor.sides,
+        "side": factor_sides_label(factor.sides),
+        "group": factor.group,
+    }
+
+
+def list_factor_infos(include_tick: bool = True) -> list[dict[str, object]]:
+    infos: list[dict[str, object]] = []
+    for name in list_factors(include_tick=include_tick):
+        info = get_factor_info(name)
+        if info is not None:
+            infos.append(info)
+    return infos
 
 
 def ensure_builtin_factors() -> None:

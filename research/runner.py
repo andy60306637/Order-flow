@@ -7,7 +7,7 @@ import numpy as np
 
 from backtest.time_slice import TimeSlice
 from core.data_types import Kline
-from research.base import klines_to_arrays
+from research.base import factor_sides_label, klines_to_arrays
 from research.registry import ensure_builtin_factors, get_factor
 from strategies.base import TickBarMap
 
@@ -132,7 +132,13 @@ def analyze_factors(
             qrows.extend(_quantile_rows(name, horizon, values, returns, quantiles))
             monthly.extend(_stability_rows(name, horizon, values, returns, open_times, "month", quantiles))
             yearly.extend(_stability_rows(name, horizon, values, returns, open_times, "year", quantiles))
-        summary.append(_summary_row(name, factor.requires_ticks, factor_metrics))
+        summary.append(_summary_row(
+            name,
+            factor.requires_ticks,
+            factor.sides,
+            factor.group,
+            factor_metrics,
+        ))
 
     summary.sort(key=lambda r: abs(r.get("best_rank_ic", 0.0)), reverse=True)
     return ResearchResult(
@@ -167,11 +173,19 @@ def _metric_row(factor: str, horizon: int, values: np.ndarray, returns: np.ndarr
     }
 
 
-def _summary_row(factor: str, requires_ticks: bool, metrics: list[dict[str, Any]]) -> dict[str, Any]:
+def _summary_row(
+    factor: str,
+    requires_ticks: bool,
+    sides: tuple[str, ...],
+    group: str,
+    metrics: list[dict[str, Any]],
+) -> dict[str, Any]:
     if not metrics:
         return {
             "factor": factor,
             "requires_ticks": requires_ticks,
+            "side": factor_sides_label(sides),
+            "group": group,
             "best_horizon": "",
             "best_ic": 0.0,
             "best_rank_ic": 0.0,
@@ -182,6 +196,8 @@ def _summary_row(factor: str, requires_ticks: bool, metrics: list[dict[str, Any]
     return {
         "factor": factor,
         "requires_ticks": requires_ticks,
+        "side": factor_sides_label(sides),
+        "group": group,
         "best_horizon": best["horizon"],
         "best_ic": best["ic"],
         "best_rank_ic": best["rank_ic"],

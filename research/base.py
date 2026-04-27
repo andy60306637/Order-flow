@@ -8,11 +8,44 @@ from core.data_types import Kline
 from strategies.base import TickBarMap
 
 
+FACTOR_SIDE_LONG = "long"
+FACTOR_SIDE_SHORT = "short"
+FACTOR_SIDES = (FACTOR_SIDE_LONG, FACTOR_SIDE_SHORT)
+FACTOR_SIDE_LABELS = {
+    FACTOR_SIDE_LONG: "Long",
+    FACTOR_SIDE_SHORT: "Short",
+}
+
+GROUP_MICROSTRUCTURE = "Micro-structure & Order Flow Factors"
+GROUP_REGIME = "Regime & Condition Filters"
+GROUP_VOLUME = "Volume & Liquidity Factors"
+GROUP_MOMENTUM = "Momentum & Trend Factors"
+GROUP_MEAN_REVERSION = "Mean-Reversion & Extreme Factors"
+GROUP_VOLATILITY = "Volatility & Compression Factors"
+GROUP_CRYPTO_DERIVATIVES = "Crypto Derivatives & Alternative Factors"
+FACTOR_GROUPS = (
+    GROUP_MICROSTRUCTURE,
+    GROUP_REGIME,
+    GROUP_VOLUME,
+    GROUP_MOMENTUM,
+    GROUP_MEAN_REVERSION,
+    GROUP_VOLATILITY,
+    GROUP_CRYPTO_DERIVATIVES,
+)
+
+
+def factor_sides_label(sides: tuple[str, ...]) -> str:
+    labels = [FACTOR_SIDE_LABELS.get(side, side) for side in sides]
+    return "/".join(labels) if labels else ""
+
+
 class FactorBase(ABC):
     """Base interface for vectorized research factors."""
 
     name: str = "Unnamed"
     requires_ticks: bool = False
+    sides: tuple[str, ...] = FACTOR_SIDES
+    group: str = GROUP_REGIME
 
     @abstractmethod
     def compute(

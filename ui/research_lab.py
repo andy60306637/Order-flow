@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 from config import base as cfg_base
+from research.base import FACTOR_GROUPS, FACTOR_SIDE_LABELS, FACTOR_SIDES, factor_sides_label
 from research.registry import ensure_builtin_factors, get_factor, list_factors
 from research.runner import ResearchConfig, run_research
 from ui.time_slice_widget import TimeSliceWidget
@@ -98,10 +99,39 @@ class ResearchLab(QWidget):
 
         factor_box = QGroupBox("Factors")
         factor_layout = QVBoxLayout(factor_box)
+        self._factor_side_filter = QComboBox()
+        self._factor_side_filter.addItem("All Directions", "")
+        for side in FACTOR_SIDES:
+            self._factor_side_filter.addItem(FACTOR_SIDE_LABELS[side], side)
+        side_idx = self._factor_side_filter.findData(self._saved.get("factor_side_filter", ""))
+        self._factor_side_filter.setCurrentIndex(max(0, side_idx))
+
+        self._factor_group_filter = QComboBox()
+        self._factor_group_filter.addItem("All Groups", "")
+        for group in FACTOR_GROUPS:
+            self._factor_group_filter.addItem(group, group)
+        group_idx = self._factor_group_filter.findData(self._saved.get("factor_group_filter", ""))
+        self._factor_group_filter.setCurrentIndex(max(0, group_idx))
+
+        factor_layout.addWidget(QLabel("Side"))
+        factor_layout.addWidget(self._factor_side_filter)
+        factor_layout.addWidget(QLabel("Group"))
+        factor_layout.addWidget(self._factor_group_filter)
+
+        factor_button_row = QHBoxLayout()
+        self._check_visible_btn = QPushButton("Check Visible")
+        self._clear_visible_btn = QPushButton("Clear Visible")
+        self._check_visible_btn.clicked.connect(lambda: self._set_visible_factor_checks(Qt.CheckState.Checked))
+        self._clear_visible_btn.clicked.connect(lambda: self._set_visible_factor_checks(Qt.CheckState.Unchecked))
+        factor_button_row.addWidget(self._check_visible_btn)
+        factor_button_row.addWidget(self._clear_visible_btn)
+        factor_layout.addLayout(factor_button_row)
+
         self._factor_list = QListWidget()
         self._factor_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self._load_factor_list()
         factor_layout.addWidget(self._factor_list)
+        self._apply_factor_filters()
         controls_layout.addWidget(factor_box, stretch=1)
 
         param_box = QGroupBox("Research Parameters")
@@ -163,14 +193,50 @@ class ResearchLab(QWidget):
         selected = set(self._saved.get("factors", []))
         if not selected:
             selected = set(list_factors(include_tick=True))
-        for name in list_factors(include_tick=True):
+        group_order = {group: idx for idx, group in enumerate(FACTOR_GROUPS)}
+
+        def sort_key(name: str) -> tuple[int, str]:
+            factor = get_factor(name)
+            group_idx = group_order.get(factor.group if factor is not None else "", len(group_order))
+            return group_idx, name
+
+        for name in sorted(list_factors(include_tick=True), key=sort_key):
             factor = get_factor(name)
             suffix = " [tick]" if factor is not None and factor.requires_ticks else ""
-            item = QListWidgetItem(f"{name}{suffix}")
+            side = factor_sides_label(factor.sides) if factor is not None else ""
+            group = factor.group if factor is not None else ""
+            item = QListWidgetItem(f"{name}{suffix}\n{side} | {group}")
+            item.setToolTip(f"{side} | {group}")
             item.setData(Qt.ItemDataRole.UserRole, name)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked if name in selected else Qt.CheckState.Unchecked)
             self._factor_list.addItem(item)
+
+    def _on_factor_filter_changed(self) -> None:
+        self._apply_factor_filters()
+        self._save_config()
+
+    def _apply_factor_filters(self) -> None:
+        side_filter = self._factor_side_filter.currentData() or ""
+        group_filter = self._factor_group_filter.currentData() or ""
+        for i in range(self._factor_list.count()):
+            item = self._factor_list.item(i)
+            factor = get_factor(str(item.data(Qt.ItemDataRole.UserRole)))
+            hidden = False
+            if factor is None:
+                hidden = True
+            elif side_filter and side_filter not in factor.sides:
+                hidden = True
+            elif group_filter and factor.group != group_filter:
+                hidden = True
+            item.setHidden(hidden)
+
+    def _set_visible_factor_checks(self, state: Qt.CheckState) -> None:
+        for i in range(self._factor_list.count()):
+            item = self._factor_list.item(i)
+            if not item.isHidden():
+                item.setCheckState(state)
+        self._save_config()
 
     def _connect_persistence(self) -> None:
         save = lambda *_: self._save_config()
@@ -181,6 +247,8 @@ class ResearchLab(QWidget):
         self._quantile_spin.valueChanged.connect(save)
         self._time_slice.selection_changed.connect(save)
         self._factor_list.itemChanged.connect(save)
+        self._factor_side_filter.currentIndexChanged.connect(self._on_factor_filter_changed)
+        self._factor_group_filter.currentIndexChanged.connect(self._on_factor_filter_changed)
 
     def _on_symbol_changed(self, symbol: str) -> None:
         self._time_slice.load_symbol(symbol)
@@ -329,5 +397,7 @@ class ResearchLab(QWidget):
             "horizons": self._horizon_edit.currentText(),
             "quantiles": self._quantile_spin.value(),
             "factors": self._selected_factors(),
+            "factor_side_filter": self._factor_side_filter.currentData() or "",
+            "factor_group_filter": self._factor_group_filter.currentData() or "",
             "selected_months": self._time_slice.selected_months(),
         })

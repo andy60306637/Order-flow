@@ -12,6 +12,41 @@
     },
     "strategy_name": "Wick Reversal 1m v4",
     "interval": "1m",
-    "backtest_tick_symbol": "BTCUSDT",
-    "backtest_mode_index": 1
+    "backtest_tick_symbol": "BTCUSDT_20211101_20220413",
+    "backtest_mode_index": 1,
+    "backtest_dashboard_config": {
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "strategy": "Wick Reversal 1m v6.1",
+        "mode": "Tick",
+        "initial_capital": 10000.0,
+        "leverage": 20,
+        "max_risk_pct": 2.0,
+        "fee_mode": "自訂",
+        "custom_fee_pct": 0.032,
+        "slippage_bps": 0.2,
+        "compound": false,
+        "selected_months": [
+            "202601",
+            "202602",
+            "202603",
+            "202604"
+        ]
+    },
+    "research_lab_config": {
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "use_tick_features": true,
+        "horizons": "1,3,6,12",
+        "quantiles": 5,
+        "factors": [
+            "return_1",
+            "upper_wick_ratio"
+        ],
+        "factor_side_filter": "short",
+        "factor_group_filter": "Momentum & Trend Factors",
+        "selected_months": [
+            "202601"
+        ]
+    }
 }

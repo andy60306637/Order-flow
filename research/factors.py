@@ -3,7 +3,20 @@ from __future__ import annotations
 import numpy as np
 
 from core.data_types import Kline
-from research.base import FactorBase, klines_to_arrays, safe_divide
+from research.base import (
+    FACTOR_SIDE_LONG,
+    FACTOR_SIDE_SHORT,
+    FACTOR_SIDES,
+    GROUP_MEAN_REVERSION,
+    GROUP_MICROSTRUCTURE,
+    GROUP_MOMENTUM,
+    GROUP_REGIME,
+    GROUP_VOLATILITY,
+    GROUP_VOLUME,
+    FactorBase,
+    klines_to_arrays,
+    safe_divide,
+)
 from research.registry import register_factor
 from strategies.base import TickBarMap
 
@@ -60,6 +73,8 @@ def _tick_metric(
 @register_factor
 class Return1Factor(FactorBase):
     name = "return_1"
+    sides = FACTOR_SIDES
+    group = GROUP_MOMENTUM
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         close = klines_to_arrays(klines)["close"]
@@ -72,6 +87,8 @@ class Return1Factor(FactorBase):
 @register_factor
 class RangePctFactor(FactorBase):
     name = "range_pct"
+    sides = FACTOR_SIDES
+    group = GROUP_VOLATILITY
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -81,6 +98,8 @@ class RangePctFactor(FactorBase):
 @register_factor
 class BodyPctFactor(FactorBase):
     name = "body_pct"
+    sides = FACTOR_SIDES
+    group = GROUP_REGIME
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -90,6 +109,8 @@ class BodyPctFactor(FactorBase):
 @register_factor
 class UpperWickRatioFactor(FactorBase):
     name = "upper_wick_ratio"
+    sides = (FACTOR_SIDE_SHORT,)
+    group = GROUP_MEAN_REVERSION
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -100,6 +121,8 @@ class UpperWickRatioFactor(FactorBase):
 @register_factor
 class LowerWickRatioFactor(FactorBase):
     name = "lower_wick_ratio"
+    sides = (FACTOR_SIDE_LONG,)
+    group = GROUP_MEAN_REVERSION
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -110,6 +133,8 @@ class LowerWickRatioFactor(FactorBase):
 @register_factor
 class VolumeZscoreFactor(FactorBase):
     name = "volume_zscore"
+    sides = FACTOR_SIDES
+    group = GROUP_VOLUME
     window = 20
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
@@ -122,6 +147,8 @@ class VolumeZscoreFactor(FactorBase):
 @register_factor
 class AtrRatioFactor(FactorBase):
     name = "atr_ratio"
+    sides = FACTOR_SIDES
+    group = GROUP_VOLATILITY
     window = 14
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
@@ -133,6 +160,8 @@ class AtrRatioFactor(FactorBase):
 @register_factor
 class DeltaEffFactor(FactorBase):
     name = "delta_eff"
+    sides = FACTOR_SIDES
+    group = GROUP_MICROSTRUCTURE
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -142,6 +171,8 @@ class DeltaEffFactor(FactorBase):
 @register_factor
 class TakerBuyRatioFactor(FactorBase):
     name = "taker_buy_ratio"
+    sides = FACTOR_SIDES
+    group = GROUP_MICROSTRUCTURE
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -152,6 +183,8 @@ class TakerBuyRatioFactor(FactorBase):
 class TickVolumeRatioFactor(FactorBase):
     name = "tick_volume_ratio"
     requires_ticks = True
+    sides = FACTOR_SIDES
+    group = GROUP_VOLUME
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         return _tick_metric(
@@ -165,6 +198,8 @@ class TickVolumeRatioFactor(FactorBase):
 class WickVolumeRatioFactor(FactorBase):
     name = "wick_volume_ratio"
     requires_ticks = True
+    sides = FACTOR_SIDES
+    group = GROUP_MICROSTRUCTURE
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         def calc(k: Kline, ticks: np.ndarray) -> float:
@@ -183,6 +218,8 @@ class WickVolumeRatioFactor(FactorBase):
 class WickDeltaEffFactor(FactorBase):
     name = "wick_delta_eff"
     requires_ticks = True
+    sides = FACTOR_SIDES
+    group = GROUP_MICROSTRUCTURE
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         def calc(k: Kline, ticks: np.ndarray) -> float:
