@@ -158,7 +158,7 @@ class LowerWickDeltaEffFactor(FactorBase):
             if wick_vol <= 0:
                 return np.nan
             wick_buy_vol = float(np.sum(wick_ticks[wick_ticks[:, 3] < 0.5, 2]))
-            return (2.0 * wick_buy_vol - wick_vol) / wick_vol
+            return -(2.0 * wick_buy_vol - wick_vol) / wick_vol
 
         return _tick_metric(klines, tick_map, calc)
 
