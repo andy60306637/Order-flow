@@ -67,7 +67,8 @@ class FactorPerformanceChart(QWidget):
         self._lines = {}
         self._data = {} # {name: (x, y)}
         self._timestamps = []
-        
+        self._cutoff_line: pg.InfiniteLine | None = None
+
         self._hover_label = pg.TextItem(anchor=(0, 0), color="#d1d4dc")
         self._plot.addItem(self._hover_label, ignoreBounds=True)
 
@@ -75,16 +76,16 @@ class FactorPerformanceChart(QWidget):
         self.clear()
         if not ts_data:
             return
-            
+
         self._timestamps = ts_data.get("timestamps", [])
         if not self._timestamps:
             return
-            
+
         x = np.array(self._timestamps) / 1000.0 # Convert to seconds for Axis
         self._plot.setAxisItems({'bottom': pg.DateAxisItem()})
-        
+
         colors = ["#26a69a", "#ef5350", "#2196f3", "#ff9800", "#9c27b0", "#e91e63", "#4caf50", "#ffeb3b"]
-        
+
         factors = ts_data.get("factors", {})
         for i, (name, y_list) in enumerate(factors.items()):
             if not y_list:
@@ -94,6 +95,19 @@ class FactorPerformanceChart(QWidget):
             line = self._plot.plot(x, y, pen=pg.mkPen(color, width=1.5), name=name)
             self._lines[name] = line
             self._data[name] = (x, y)
+
+        # IS/OOS boundary vertical line
+        cut_ts = ts_data.get("train_cutoff_ts", 0)
+        if cut_ts:
+            self._cutoff_line = pg.InfiniteLine(
+                pos=cut_ts / 1000.0,
+                angle=90,
+                movable=False,
+                pen=pg.mkPen("#f59e0b", width=1, style=Qt.PenStyle.DashLine),
+                label="IS | OOS",
+                labelOpts={"color": "#f59e0b", "position": 0.95},
+            )
+            self._plot.addItem(self._cutoff_line, ignoreBounds=True)
 
     def _mouse_moved(self, evt):
         pos = evt[0]
@@ -127,6 +141,9 @@ class FactorPerformanceChart(QWidget):
     def clear(self) -> None:
         for line in self._lines.values():
             self._plot.removeItem(line)
+        if self._cutoff_line is not None:
+            self._plot.removeItem(self._cutoff_line)
+            self._cutoff_line = None
         self._lines = {}
         self._data = {}
         self._timestamps = []

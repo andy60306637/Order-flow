@@ -31,7 +31,7 @@ class ResearchConfig:
     entry_lag: int = 1
     # Minimum sample size required within a stability sub-period to report metrics.
     min_period_samples: int = 30
-    # Fraction of valid samples used as the in-sample (train) split for OOS quantile evaluation.
+    # Fraction of total bars used as the in-sample (train) split. Shared across all functions.
     train_ratio: float = 0.5
     # Granularity used to derive rolling-IC-based IR / t-stat.
     ic_period_granularity: str = "month"
@@ -47,7 +47,6 @@ class ResearchResult:
     factor_correlations: list[dict[str, Any]]
     unavailable: list[dict[str, str]]
     rows: int
-    # New fields
     timeseries_ic: dict[str, Any] = field(default_factory=dict)
     orthogonal_summary: list[dict[str, Any]] = field(default_factory=list)
 
@@ -136,6 +135,16 @@ def analyze_factors(
     close = arr.get("close", np.array([], dtype=np.float64))
     open_times = arr.get("open_time", np.array([], dtype=np.int64))
     fwd = {h: _forward_return(close, h, entry_lag) for h in horizons}
+
+    # --- Global IS/OOS temporal split (shared across all functions) ---
+    n_times = len(open_times)
+    train_ratio_c = max(0.1, min(0.9, float(train_ratio)))
+    time_cut_idx = int(n_times * train_ratio_c)
+    is_time_mask = np.zeros(n_times, dtype=bool)
+    is_time_mask[:time_cut_idx] = True
+    oos_time_mask = ~is_time_mask
+    cut_time = int(open_times[time_cut_idx]) if time_cut_idx < n_times else 0
+
     summary: list[dict[str, Any]] = []
     metrics: list[dict[str, Any]] = []
     qrows: list[dict[str, Any]] = []
@@ -144,8 +153,6 @@ def analyze_factors(
     unavailable: list[dict[str, str]] = []
     factor_values: dict[str, np.ndarray] = {}
     factor_orientations: dict[str, int] = {}
-    factor_groups: dict[str, str] = {}
-    factor_sides: dict[str, tuple[str, ...]] = {}
 
     for name in factor_names:
         factor = get_factor(name)
@@ -160,24 +167,40 @@ def analyze_factors(
         factor_values[name] = values
         orientation = _factor_orientation(factor.sides)
         factor_orientations[name] = orientation
-        factor_groups[name] = factor.group
-        factor_sides[name] = factor.sides
-        
+
         factor_metrics: list[dict[str, Any]] = []
         for horizon, returns in fwd.items():
-            period_ic = _per_period_ic(
+            is_period_ic = _per_period_ic(
                 values, returns, open_times,
                 granularity=ic_period_granularity,
                 min_samples=min_period_samples,
+                restrict_mask=is_time_mask,
             )
-            metric = _metric_row(name, horizon, values, returns, orientation, period_ic)
+            oos_period_ic = _per_period_ic(
+                values, returns, open_times,
+                granularity=ic_period_granularity,
+                min_samples=min_period_samples,
+                restrict_mask=oos_time_mask,
+            )
+            metric = _metric_row(
+                name, horizon, values, returns, orientation,
+                is_period_ic, oos_period_ic, oos_time_mask,
+            )
             metrics.append(metric)
             factor_metrics.append(metric)
-            qrows.extend(_quantile_rows_in_sample(name, horizon, values, returns, quantiles, orientation))
-            qrows.extend(_quantile_rows_out_of_sample(name, horizon, values, returns, quantiles, orientation, train_ratio))
-            monthly.extend(_stability_rows(name, horizon, values, returns, open_times, "month", quantiles, min_period_samples))
-            yearly.extend(_stability_rows(name, horizon, values, returns, open_times, "year", quantiles, min_period_samples))
-        
+            qrows.extend(_quantile_rows_in_sample(
+                name, horizon, values, returns, quantiles, orientation, is_time_mask,
+            ))
+            qrows.extend(_quantile_rows_out_of_sample(
+                name, horizon, values, returns, quantiles, orientation, is_time_mask, oos_time_mask,
+            ))
+            monthly.extend(_stability_rows(
+                name, horizon, values, returns, open_times, "month", quantiles, min_period_samples, cut_time,
+            ))
+            yearly.extend(_stability_rows(
+                name, horizon, values, returns, open_times, "year", quantiles, min_period_samples, cut_time,
+            ))
+
         summary.append(_summary_row(
             name,
             factor.requires_ticks,
@@ -187,13 +210,9 @@ def analyze_factors(
             factor_metrics,
         ))
 
-    # --- Time-series IC ---
-    ts_ic = _calculate_timeseries_ic(factor_values, fwd, open_times, factor_orientations)
-
-    # --- Orthogonalization ---
-    ortho_summary = _orthogonalize_factors(factor_values, fwd, factor_orientations)
-
-    correlations = _factor_correlations(factor_values)
+    ts_ic = _calculate_timeseries_ic(factor_values, fwd, open_times, factor_orientations, cut_time=cut_time)
+    ortho_summary = _orthogonalize_factors(factor_values, fwd, factor_orientations, is_time_mask, oos_time_mask)
+    correlations = _factor_correlations(factor_values, is_time_mask, oos_time_mask)
     summary.sort(key=lambda r: float(r.get("oriented_rank_ic", 0.0)), reverse=True)
     return ResearchResult(
         summary=summary,
@@ -209,32 +228,34 @@ def analyze_factors(
     )
 
 
+# ---------------------------------------------------------------------------
+# Time-series IC
+# ---------------------------------------------------------------------------
+
 def _calculate_timeseries_ic(
     factor_values: dict[str, np.ndarray],
     fwd_returns: dict[int, np.ndarray],
     open_times: np.ndarray,
     orientations: dict[str, int],
+    cut_time: int = 0,
 ) -> dict[str, Any]:
-    """Calculate stepped rolling Rank IC for each factor."""
+    """Stepped rolling Rank IC. Includes train_cutoff_ts for IS/OOS boundary rendering."""
     if not factor_values or not fwd_returns:
         return {}
-    
-    # Use best horizon for simplicity in chart
+
     best_horizon = min(fwd_returns.keys())
     returns = fwd_returns[best_horizon]
-    
+
     n = len(open_times)
-    # Step size to reduce number of points on chart (e.g. 100 bars)
-    step = max(1, n // 200) 
+    step = max(1, n // 200)
     indices = np.arange(0, n, step)
-    
-    # Window for rolling IC (e.g. 10% of total data or at least 100 bars)
     window = max(100, n // 10)
-    
-    ts_data = {
+
+    ts_data: dict[str, Any] = {
         "timestamps": open_times[indices].tolist(),
         "factors": {},
-        "horizon": best_horizon
+        "horizon": best_horizon,
+        "train_cutoff_ts": cut_time,
     }
 
     for name, values in factor_values.items():
@@ -249,64 +270,91 @@ def _calculate_timeseries_ic(
             if mask.sum() < 20:
                 ic_series.append(0.0)
                 continue
-            
             ic = _corr(_rank(v_win[mask]), _rank(r_win[mask]))
             ic_series.append(_orient(ic, orientation))
-        
         ts_data["factors"][name] = ic_series
 
     return ts_data
 
 
+# ---------------------------------------------------------------------------
+# Orthogonalization  (IS basis → OOS projection)
+# ---------------------------------------------------------------------------
+
 def _orthogonalize_factors(
     factor_values: dict[str, np.ndarray],
     fwd_returns: dict[int, np.ndarray],
     orientations: dict[str, int],
+    is_mask: np.ndarray,
+    oos_mask: np.ndarray,
 ) -> list[dict[str, Any]]:
-    """Gram-Schmidt orthogonalization based on factor correlations."""
+    """QR orthogonalization on IS data; project OOS data onto same basis for evaluation."""
     names = list(factor_values.keys())
     if not names:
         return []
-    
-    # We only orthogonalize factors that have values
-    mat = []
-    valid_names = []
-    for name in names:
-        v = factor_values[name]
-        # Fill NaNs with mean to allow matrix ops
-        v_clean = v.copy()
-        v_clean[np.isnan(v_clean)] = np.nanmean(v_clean) if not np.all(np.isnan(v_clean)) else 0.0
-        mat.append(v_clean)
-        valid_names.append(name)
-    
-    if not mat:
-        return []
-    
-    X = np.column_stack(mat)
-    # Orthogonalize X
-    Q, R = np.linalg.qr(X)
-    
-    ortho_summary = []
-    # Evaluate each orthogonalized column against returns
+
     best_h = min(fwd_returns.keys()) if fwd_returns else 1
     returns = fwd_returns[best_h]
-    
-    for i, name in enumerate(valid_names):
-        ortho_v = Q[:, i]
-        mask = _valid_mask(ortho_v, returns)
-        if not mask.any():
-            continue
-            
-        rank_ic = _corr(_rank(ortho_v[mask]), _rank(returns[mask]))
+
+    is_valid = is_mask & np.isfinite(returns)
+    oos_valid = oos_mask & np.isfinite(returns)
+    is_ret = returns[is_valid]
+    oos_ret = returns[oos_valid]
+
+    def _clean(v: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        sub = v[mask]
+        mean = float(np.nanmean(sub)) if not np.all(np.isnan(sub)) else 0.0
+        out = sub.copy()
+        out[np.isnan(out)] = mean
+        return out
+
+    mat_is = [_clean(factor_values[n], is_valid) for n in names]
+    mat_oos = [_clean(factor_values[n], oos_valid) for n in names]
+
+    if not mat_is or len(mat_is[0]) < len(names):
+        return []
+
+    X_is = np.column_stack(mat_is)
+    Q, R = np.linalg.qr(X_is)
+
+    # Project OOS onto IS orthogonal basis: X_oos_ortho = X_oos @ R^{-1}
+    X_oos_ortho: np.ndarray | None = None
+    if len(mat_oos[0]) >= len(names):
+        try:
+            X_oos_ortho = np.column_stack(mat_oos) @ np.linalg.inv(R)
+        except np.linalg.LinAlgError:
+            pass
+
+    ortho_summary = []
+    for i, name in enumerate(names):
+        v_is = Q[:, i]
+        is_m = _valid_mask(v_is, is_ret)
+        is_rank_ic = _corr(_rank(v_is[is_m]), _rank(is_ret[is_m])) if is_m.sum() >= 3 else 0.0
+
+        oos_rank_ic: float = float("nan")
+        oos_oriented: float = float("nan")
+        if X_oos_ortho is not None:
+            v_oos = X_oos_ortho[:, i]
+            oos_m = _valid_mask(v_oos, oos_ret)
+            if oos_m.sum() >= 3:
+                oos_rank_ic = _corr(_rank(v_oos[oos_m]), _rank(oos_ret[oos_m]))
+                oos_oriented = _orient(oos_rank_ic, orientations.get(name, 0))
+
         ortho_summary.append({
             "factor": name,
             "horizon": best_h,
-            "rank_ic": rank_ic,
-            "oriented_rank_ic": _orient(rank_ic, orientations.get(name, 0)),
+            "rank_ic": is_rank_ic,
+            "oriented_rank_ic": _orient(is_rank_ic, orientations.get(name, 0)),
+            "oos_rank_ic": oos_rank_ic,
+            "oos_oriented_rank_ic": oos_oriented,
         })
-    
+
     return ortho_summary
 
+
+# ---------------------------------------------------------------------------
+# Core helpers
+# ---------------------------------------------------------------------------
 
 def _factor_orientation(sides: tuple[str, ...]) -> int:
     """+1 = higher value -> long edge, -1 = higher value -> short edge, 0 = ambiguous."""
@@ -325,6 +373,15 @@ def _orient(value: float, orientation: int) -> float:
     if orientation == 0:
         return abs(value)
     return value * orientation
+
+
+def _fval(v: Any, default: float = 0.0) -> float:
+    """Return float, substituting NaN/None with default."""
+    try:
+        f = float(v)
+        return default if not np.isfinite(f) else f
+    except (TypeError, ValueError):
+        return default
 
 
 def _forward_return(close: np.ndarray, horizon: int, entry_lag: int) -> np.ndarray:
@@ -353,14 +410,17 @@ def _per_period_ic(
     open_times: np.ndarray,
     granularity: str,
     min_samples: int,
+    restrict_mask: np.ndarray | None = None,
 ) -> list[float]:
-    """Rank IC per sub-period. Used to compute IR and t-stat for the (factor, horizon) pair."""
+    """Rank IC per sub-period, optionally restricted to IS or OOS bars."""
     if len(open_times) == 0:
         return []
     keys = np.array([_period_key(int(ts), granularity) for ts in open_times], dtype=object)
     out: list[float] = []
     for period in sorted(set(keys)):
         mask = (keys == period) & _valid_mask(values, returns)
+        if restrict_mask is not None:
+            mask = mask & restrict_mask
         if int(mask.sum()) < min_samples:
             continue
         ic = _corr(_rank(values[mask]), _rank(returns[mask]))
@@ -369,30 +429,44 @@ def _per_period_ic(
     return out
 
 
-def _metric_row(
-    factor: str,
-    horizon: int,
-    values: np.ndarray,
-    returns: np.ndarray,
-    orientation: int,
-    period_ic: list[float],
-) -> dict[str, Any]:
-    mask = _valid_mask(values, returns)
-    x = values[mask]
-    y = returns[mask]
-    ic = _corr(x, y)
-    rank_ic = _corr(_rank(x), _rank(y))
+def _ir_tstat(period_ic: list[float]) -> tuple[float, float, float, float]:
+    """Return (mean, std, IR, t-stat) from a list of per-period ICs."""
     if len(period_ic) >= 3:
         arr = np.array(period_ic, dtype=np.float64)
         mean_p = float(np.mean(arr))
         std_p = float(np.std(arr, ddof=1))
         ir = mean_p / std_p if std_p > 0 else 0.0
         t_stat = ir * np.sqrt(len(arr))
-    else:
-        mean_p = 0.0
-        std_p = 0.0
-        ir = 0.0
-        t_stat = 0.0
+        return mean_p, std_p, ir, t_stat
+    return 0.0, 0.0, 0.0, 0.0
+
+
+def _metric_row(
+    factor: str,
+    horizon: int,
+    values: np.ndarray,
+    returns: np.ndarray,
+    orientation: int,
+    is_period_ic: list[float],
+    oos_period_ic: list[float],
+    oos_mask: np.ndarray,
+) -> dict[str, Any]:
+    # Full-sample IC (kept for reference / backward compat)
+    mask = _valid_mask(values, returns)
+    x = values[mask]
+    y = returns[mask]
+    ic = _corr(x, y)
+    rank_ic = _corr(_rank(x), _rank(y))
+
+    mean_p, std_p, ir, t_stat = _ir_tstat(is_period_ic)
+    oos_mean_p, oos_std_p, oos_ir, oos_t_stat = _ir_tstat(oos_period_ic)
+
+    oos_valid = oos_mask & _valid_mask(values, returns)
+    x_oos = values[oos_valid]
+    y_oos = returns[oos_valid]
+    oos_ic = _corr(x_oos, y_oos)
+    oos_rank_ic = _corr(_rank(x_oos), _rank(y_oos))
+
     return {
         "factor": factor,
         "horizon": horizon,
@@ -403,8 +477,17 @@ def _metric_row(
         "ic_period_std": std_p,
         "ic_ir": float(ir),
         "ic_t_stat": float(t_stat),
-        "ic_periods": len(period_ic),
+        "ic_periods": len(is_period_ic),
         "sample_count": int(mask.sum()),
+        # OOS fields
+        "oos_ic": oos_ic,
+        "oos_rank_ic": oos_rank_ic,
+        "oos_oriented_rank_ic": _orient(oos_rank_ic, orientation),
+        "oos_ic_period_mean": oos_mean_p,
+        "oos_ic_ir": float(oos_ir),
+        "oos_ic_t_stat": float(oos_t_stat),
+        "oos_ic_periods": len(oos_period_ic),
+        "oos_sample_count": int(oos_valid.sum()),
     }
 
 
@@ -432,9 +515,15 @@ def _summary_row(
             "ic_t_stat": 0.0,
             "avg_abs_rank_ic": 0.0,
             "sample_count": 0,
+            "oos_best_rank_ic": 0.0,
+            "oos_oriented_rank_ic": 0.0,
+            "oos_ic_ir": 0.0,
+            "oos_ic_t_stat": 0.0,
+            "oos_sample_count": 0,
         })
         return base
-    best = max(metrics, key=lambda r: float(r["oriented_rank_ic"]))
+    best = max(metrics, key=lambda r: _fval(r["oriented_rank_ic"]))
+    oos_best = max(metrics, key=lambda r: _fval(r.get("oos_oriented_rank_ic")))
     base.update({
         "best_horizon": best["horizon"],
         "best_rank_ic": best["rank_ic"],
@@ -443,9 +532,18 @@ def _summary_row(
         "ic_t_stat": best["ic_t_stat"],
         "avg_abs_rank_ic": float(np.nanmean([abs(float(r["rank_ic"])) for r in metrics])),
         "sample_count": max(int(r["sample_count"]) for r in metrics),
+        "oos_best_rank_ic": oos_best.get("oos_rank_ic", 0.0),
+        "oos_oriented_rank_ic": oos_best.get("oos_oriented_rank_ic", 0.0),
+        "oos_ic_ir": oos_best.get("oos_ic_ir", 0.0),
+        "oos_ic_t_stat": oos_best.get("oos_ic_t_stat", 0.0),
+        "oos_sample_count": max(int(r.get("oos_sample_count", 0)) for r in metrics),
     })
     return base
 
+
+# ---------------------------------------------------------------------------
+# Quantile analysis
+# ---------------------------------------------------------------------------
 
 def _quantile_rows_from_buckets(
     factor: str,
@@ -489,8 +587,10 @@ def _quantile_rows_in_sample(
     returns: np.ndarray,
     quantiles: int,
     orientation: int,
+    is_mask: np.ndarray,
 ) -> list[dict[str, Any]]:
-    mask = _valid_mask(values, returns)
+    """Bucket and evaluate entirely within IS bars."""
+    mask = is_mask & _valid_mask(values, returns)
     if int(mask.sum()) < quantiles or quantiles < 2:
         return []
     x = values[mask]
@@ -507,32 +607,30 @@ def _quantile_rows_out_of_sample(
     returns: np.ndarray,
     quantiles: int,
     orientation: int,
-    train_ratio: float,
+    is_mask: np.ndarray,
+    oos_mask: np.ndarray,
 ) -> list[dict[str, Any]]:
-    """Build buckets from the temporal first `train_ratio` slice, evaluate on the remainder."""
+    """Compute quantile edges from IS bars; evaluate on OOS bars."""
     if quantiles < 2:
         return []
-    mask = _valid_mask(values, returns)
-    valid_idx = np.where(mask)[0]
-    if len(valid_idx) < quantiles * 4:
+    is_valid = is_mask & _valid_mask(values, returns)
+    oos_valid = oos_mask & _valid_mask(values, returns)
+    if int(is_valid.sum()) < quantiles or int(oos_valid.sum()) < quantiles:
         return []
-    train_ratio = max(0.1, min(0.9, float(train_ratio)))
-    cut = int(len(valid_idx) * train_ratio)
-    if cut < quantiles or len(valid_idx) - cut < quantiles:
-        return []
-    train_idx = valid_idx[:cut]
-    test_idx = valid_idx[cut:]
-    train_x = values[train_idx]
-    edges = np.quantile(train_x, np.linspace(0.0, 1.0, quantiles + 1)[1:-1])
-    test_x = values[test_idx]
-    test_y = returns[test_idx]
+    edges = np.quantile(values[is_valid], np.linspace(0.0, 1.0, quantiles + 1)[1:-1])
+    test_x = values[oos_valid]
+    test_y = returns[oos_valid]
     bucket_assignment = np.searchsorted(edges, test_x, side="right")
-    buckets: list[np.ndarray] = []
-    for q in range(quantiles):
-        sel = np.where(bucket_assignment == q)[0]
-        buckets.append(sel.astype(np.int64))
+    buckets: list[np.ndarray] = [
+        np.where(bucket_assignment == q)[0].astype(np.int64)
+        for q in range(quantiles)
+    ]
     return _quantile_rows_from_buckets(factor, horizon, "out_of_sample", buckets, test_y, orientation)
 
+
+# ---------------------------------------------------------------------------
+# Stability (per-period IC)
+# ---------------------------------------------------------------------------
 
 def _stability_rows(
     factor: str,
@@ -543,6 +641,7 @@ def _stability_rows(
     granularity: str,
     quantiles: int,
     min_samples: int,
+    cut_time: int,
 ) -> list[dict[str, Any]]:
     if len(open_times) == 0:
         return []
@@ -555,12 +654,16 @@ def _stability_rows(
         y = returns[mask]
         if len(x) < min_samples:
             continue
-        # Per-period quantile spread is intentionally global within the period —
-        # it's a diagnostic, not an OOS prediction.
-        order = np.argsort(x, kind="stable")
+        period_times = open_times[period_mask]
+        if np.all(period_times < cut_time):
+            split = "train"
+        elif np.all(period_times >= cut_time):
+            split = "test"
+        else:
+            split = "mixed"
         means: list[float] = []
         if len(x) >= quantiles:
-            for bucket in np.array_split(order, quantiles):
+            for bucket in np.array_split(np.argsort(x, kind="stable"), quantiles):
                 vals = y[bucket]
                 means.append(float(np.mean(vals)) if len(vals) else float("nan"))
         spread = (means[-1] - means[0]) if len(means) >= 2 else float("nan")
@@ -572,12 +675,21 @@ def _stability_rows(
             "rank_ic": _corr(_rank(x), _rank(y)),
             "spread_qhigh_qlow": spread,
             "sample_count": int(len(x)),
+            "split": split,
         })
     return rows
 
 
-def _factor_correlations(factor_values: dict[str, np.ndarray]) -> list[dict[str, Any]]:
-    """Pairwise Pearson + Spearman correlation across factor value series."""
+# ---------------------------------------------------------------------------
+# Factor correlations
+# ---------------------------------------------------------------------------
+
+def _factor_correlations(
+    factor_values: dict[str, np.ndarray],
+    is_mask: np.ndarray,
+    oos_mask: np.ndarray,
+) -> list[dict[str, Any]]:
+    """Pairwise Pearson + Spearman correlations for full / IS / OOS windows."""
     names = list(factor_values.keys())
     rows: list[dict[str, Any]] = []
     for i in range(len(names)):
@@ -586,21 +698,34 @@ def _factor_correlations(factor_values: dict[str, np.ndarray]) -> list[dict[str,
             b = factor_values[names[j]]
             if len(a) != len(b):
                 continue
-            mask = _valid_mask(a, b)
-            if int(mask.sum()) < 30:
+            full_m = _valid_mask(a, b)
+            if int(full_m.sum()) < 30:
                 continue
-            x = a[mask]
-            y = b[mask]
+            is_m = is_mask & full_m
+            oos_m = oos_mask & full_m
+            x_f, y_f = a[full_m], b[full_m]
+            x_is, y_is = a[is_m], b[is_m]
+            x_oos, y_oos = a[oos_m], b[oos_m]
             rows.append({
                 "factor_a": names[i],
                 "factor_b": names[j],
-                "pearson": _corr(x, y),
-                "spearman": _corr(_rank(x), _rank(y)),
-                "sample_count": int(mask.sum()),
+                "pearson": _corr(x_f, y_f),
+                "spearman": _corr(_rank(x_f), _rank(y_f)),
+                "pearson_is": _corr(x_is, y_is) if len(x_is) >= 30 else float("nan"),
+                "spearman_is": _corr(_rank(x_is), _rank(y_is)) if len(x_is) >= 30 else float("nan"),
+                "pearson_oos": _corr(x_oos, y_oos) if len(x_oos) >= 30 else float("nan"),
+                "spearman_oos": _corr(_rank(x_oos), _rank(y_oos)) if len(x_oos) >= 30 else float("nan"),
+                "sample_count": int(full_m.sum()),
+                "is_sample_count": int(is_m.sum()),
+                "oos_sample_count": int(oos_m.sum()),
             })
     rows.sort(key=lambda r: abs(float(r.get("spearman", 0.0))), reverse=True)
     return rows
 
+
+# ---------------------------------------------------------------------------
+# Low-level utilities
+# ---------------------------------------------------------------------------
 
 def _period_key(ts_ms: int, granularity: str) -> str:
     from datetime import datetime, timezone
