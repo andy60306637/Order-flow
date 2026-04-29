@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Optional, List
@@ -23,14 +22,14 @@ from typing import Optional, List
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QTabWidget,
-    QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QLabel,
-    QToolBar, QFrame, QSizePolicy, QPushButton,
-    QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSpinBox, QDoubleSpinBox, QFileDialog, QMessageBox, QDateTimeEdit,
+    QVBoxLayout, QHBoxLayout, QComboBox, QLabel,
+    QFrame, QPushButton,
+    QDialog, QTableWidget, QTableWidgetItem, QHeaderView,
+    QFileDialog, QMessageBox, QDateTimeEdit,
 )
 from PyQt6.QtCore import QDateTime
 
-from PyQt6.QtGui import QAction, QColor
+from PyQt6.QtGui import QColor
 from PyQt6 import QtGui
 
 import config
@@ -40,7 +39,7 @@ from core.cvd_calculator import CvdCalculator
 from core.footprint_builder import FootprintBuilder
 from core.ws_client import WsWorkerThread
 from core.history_processor import HistoryProcessorThread
-from core import kline_cache, tick_cache
+from core import kline_cache
 from utils.ui_settings import ui_settings
 from strategies import STRATEGY_REGISTRY
 from strategies.base import StrategyBase, StrategySignal
@@ -107,46 +106,6 @@ def _fallback_snapshot_contexts(trade_list: list[dict], klines: list) -> list[di
             "win_end": min(len(klines) - 1, latest + 10),
         })
     return contexts
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Tick 匯入執行緒（背景解析 CSV/ZIP 並寫入快取）
-# ─────────────────────────────────────────────────────────────────────────────
-class TickImportThread(QThread):
-    """將 data.binance.vision aggTrades CSV/ZIP 檔案匯入到本機 tick 快取。"""
-    progress_signal = pyqtSignal(str)       # 狀態訊息
-    done_signal     = pyqtSignal(int, str)  # (total_count, error_message)
-
-    def __init__(self, symbol: str,
-                 paths: list, parent=None) -> None:
-        super().__init__(parent)
-        self._symbol = symbol
-        self._paths  = paths
-
-    def run(self) -> None:
-        from core import tick_cache as _tc
-        total = 0
-        for idx, raw_path in enumerate(self._paths, 1):
-            p = Path(raw_path)
-            self.progress_signal.emit(
-                f"匯入 {p.name}… ({idx}/{len(self._paths)})"
-            )
-            try:
-                if p.suffix.lower() == ".zip":
-                    arr = _tc.from_zip_file(p)
-                else:
-                    arr = _tc.from_csv_file(p)
-                if len(arr) == 0:
-                    continue
-                st = int(arr[:, 0].min())
-                et = int(arr[:, 0].max())
-                total = _tc.merge_and_save_array(
-                    self._symbol, arr, st, et
-                )
-            except Exception as exc:
-                self.done_signal.emit(0, f"{p.name}: {exc}")
-                return
-        self.done_signal.emit(total, "")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -772,217 +731,6 @@ class BacktestResultDialog(QDialog):
         self._open_snapshot_at(index.row())
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 回測參數設定對話框
-# ═══════════════════════════════════════════════════════════════════
-
-class BacktestConfigDialog(QDialog):
-    """回測參數設定子頁面（可重複呼叫，非強制 modal）。"""
-
-    _SPIN_STYLE = (
-        "QDoubleSpinBox, QSpinBox, QComboBox {"
-        " background:#1e222d; color:#d1d4dc;"
-        " border:1px solid #2a2e39; border-radius:3px;"
-        " padding:2px 6px; min-width:120px; }"
-    )
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("回測參數設定")
-        self.setMinimumWidth(340)
-        self.setStyleSheet(
-            f"QDialog {{ background: {config.COLOR_BG}; color: {config.COLOR_FG}; }}"
-            "QLabel { font-size: 13px; }"
-        )
-
-        form = QFormLayout(self)
-        form.setContentsMargins(20, 16, 20, 16)
-        form.setVerticalSpacing(10)
-
-        # 載入先前儲存的設定
-        s = ui_settings.get("backtest_config", {})
-
-        self.capital_spin = QDoubleSpinBox()
-        self.capital_spin.setRange(100, 10_000_000)
-        self.capital_spin.setDecimals(0)
-        self.capital_spin.setValue(s.get("initial_capital", 10_000))
-        self.capital_spin.setSuffix(" USDT")
-        self.capital_spin.setStyleSheet(self._SPIN_STYLE)
-        form.addRow("初始資金:", self.capital_spin)
-
-        self.loss_spin = QDoubleSpinBox()
-        self.loss_spin.setRange(0.1, 50.0)
-        self.loss_spin.setValue(s.get("max_loss_pct", 2.0))
-        self.loss_spin.setDecimals(1)
-        self.loss_spin.setSuffix(" %")
-        self.loss_spin.setStyleSheet(self._SPIN_STYLE)
-        form.addRow("每筆最高損失:", self.loss_spin)
-
-        self.leverage_spin = QSpinBox()
-        self.leverage_spin.setRange(1, 125)
-        self.leverage_spin.setValue(s.get("leverage", 20))
-        self.leverage_spin.setSuffix(" x")
-        self.leverage_spin.setStyleSheet(self._SPIN_STYLE)
-        form.addRow("槓桿:", self.leverage_spin)
-
-        self.fee_combo = QComboBox()
-        self.fee_combo.addItems(["Taker", "Maker", "100% Maker", "70M/30T", "50M/50T", "自訂"])
-        self.fee_combo.setCurrentText(s.get("fee_mode", "Taker"))
-        self.fee_combo.setToolTip(
-            "Taker=0.05%  Maker=0.02%\n"
-            "成本情境測試:\n"
-            "  100% Maker = 0.02%\n"
-            "  70M/30T = 0.029%\n"
-            "  50M/50T = 0.035%\n"
-            "自訂：直接輸入費率（%）"
-        )
-        self.fee_combo.setStyleSheet(self._SPIN_STYLE)
-        form.addRow("費率模式:", self.fee_combo)
-
-        self.custom_fee_spin = QDoubleSpinBox()
-        self.custom_fee_spin.setRange(0.0, 1.0)
-        self.custom_fee_spin.setValue(s.get("custom_fee_rate", 0.05))
-        self.custom_fee_spin.setDecimals(4)
-        self.custom_fee_spin.setSingleStep(0.001)
-        self.custom_fee_spin.setSuffix(" %")
-        self.custom_fee_spin.setToolTip("自訂手續費率（例：0.05 = 0.05%）")
-        self.custom_fee_spin.setStyleSheet(self._SPIN_STYLE)
-        self._custom_fee_row_label = QLabel("自訂費率:")
-        form.addRow(self._custom_fee_row_label, self.custom_fee_spin)
-        
-        mode = self.fee_combo.currentText()
-        self._custom_fee_row_label.setVisible(mode == "自訂")
-        self.custom_fee_spin.setVisible(mode == "自訂")
-
-        self.fee_combo.currentTextChanged.connect(self._on_fee_mode_changed)
-
-        self.slippage_spin = QDoubleSpinBox()
-        self.slippage_spin.setRange(0.0, 50.0)
-        self.slippage_spin.setDecimals(1)
-        self.slippage_spin.setValue(s.get("slippage_bps", 0.0))
-        self.slippage_spin.setSuffix(" bps")
-        self.slippage_spin.setToolTip("滞dge (1 bps = 0.01%)")
-        self.slippage_spin.setStyleSheet(self._SPIN_STYLE)
-        form.addRow("滑價:", self.slippage_spin)
-
-        self.funding_spin = QDoubleSpinBox()
-        self.funding_spin.setRange(0.0, 1.0)
-        self.funding_spin.setValue(s.get("funding_rate", 0.0))
-        self.funding_spin.setDecimals(4)
-        self.funding_spin.setSingleStep(0.0001)
-        self.funding_spin.setSuffix(" /8h")
-        self.funding_spin.setToolTip("資金費率 (0.01% = 0.0001)；正値多付空收")
-        self.funding_spin.setStyleSheet(self._SPIN_STYLE)
-        form.addRow("資金費率:", self.funding_spin)
-
-        self.maint_spin = QDoubleSpinBox()
-        self.maint_spin.setRange(0.001, 0.5)
-        self.maint_spin.setValue(s.get("maint_margin", 0.005))
-        self.maint_spin.setDecimals(3)
-        self.maint_spin.setSingleStep(0.001)
-        self.maint_spin.setToolTip("維持保證金率 (0.5% = 0.005)")
-        self.maint_spin.setStyleSheet(self._SPIN_STYLE)
-        form.addRow("維持保證金率:", self.maint_spin)
-
-        self.compound_combo = QComboBox()
-        self.compound_combo.addItems(["複利（動態資金）", "固定（初始資金）"])
-        self.compound_combo.setCurrentIndex(0 if s.get("compound", True) else 1)
-        self.compound_combo.setToolTip(
-            "複利：每筆依當前資產計算倉位 (equity) — PnL 複利\n"
-            "固定：每筆依初始資金計算倉位，不受盈虧影響"
-        )
-        self.compound_combo.setStyleSheet(self._SPIN_STYLE)
-        form.addRow("倉位模式:", self.compound_combo)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        btn_box.rejected.connect(self.hide)
-        form.addRow(btn_box)
-
-    def _on_fee_mode_changed(self, mode: str) -> None:
-        visible = (mode == "自訂")
-        self._custom_fee_row_label.setVisible(visible)
-        self.custom_fee_spin.setVisible(visible)
-
-    def save_settings(self) -> None:
-        """將目前 UI 設定儲存至 UiSettingsManager。"""
-        cfg = {
-            "initial_capital": self.capital_spin.value(),
-            "max_loss_pct":    self.loss_spin.value(),
-            "leverage":        self.leverage_spin.value(),
-            "fee_mode":        self.fee_combo.currentText(),
-            "custom_fee_rate": self.custom_fee_spin.value(),
-            "slippage_bps":    self.slippage_spin.value(),
-            "funding_rate":    self.funding_spin.value(),
-            "maint_margin":    self.maint_spin.value(),
-            "compound":        self.compound_combo.currentIndex() == 0,
-        }
-        ui_settings.set("backtest_config", cfg)
-
-    def hideEvent(self, event) -> None:  # noqa: N802
-        self.save_settings()
-        super().hideEvent(event)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Bar 模式自訂回測區間對話框
-# ═══════════════════════════════════════════════════════════════════
-
-class BarDateRangeDialog(QDialog):
-    """Bar 模式自訂回測起訖時間選擇器。"""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("自訂回測區間")
-        self.setFixedWidth(340)
-        self.setStyleSheet(
-            f"QDialog {{ background: {config.COLOR_BG}; color: {config.COLOR_FG}; }}"
-            "QLabel { font-size: 13px; }"
-            "QDateTimeEdit { background:#1e222d; color:#d1d4dc;"
-            " border:1px solid #2a2e39; border-radius:3px; padding:2px 6px;"
-            " min-width:190px; }"
-        )
-
-        form = QFormLayout(self)
-        form.setContentsMargins(20, 16, 20, 16)
-        form.setVerticalSpacing(10)
-
-        # 嘗試載入上次選擇的時間
-        last_start = ui_settings.get("last_custom_start_ms")
-        last_end   = ui_settings.get("last_custom_end_ms")
-
-        now             = QDateTime.currentDateTime()
-        thirty_days_ago = now.addDays(-30)
-
-        dt_start = QDateTime.fromMSecsSinceEpoch(last_start) if last_start else thirty_days_ago
-        dt_end   = QDateTime.fromMSecsSinceEpoch(last_end)   if last_end   else now
-
-        self.start_edit = QDateTimeEdit(dt_start, self)
-        self.start_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.start_edit.setCalendarPopup(True)
-        form.addRow("起始時間:", self.start_edit)
-
-        self.end_edit = QDateTimeEdit(dt_end, self)
-        self.end_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.end_edit.setCalendarPopup(True)
-        form.addRow("結束時間:", self.end_edit)
-
-        btn_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        form.addRow(btn_box)
-
-    def get_range_ms(self) -> tuple[int, int]:
-        """回傳 (start_ms, end_ms)，以本機時間轉 UTC ms。"""
-        start_ms = self.start_edit.dateTime().toMSecsSinceEpoch()
-        end_ms   = self.end_edit.dateTime().toMSecsSinceEpoch()
-        
-        # 儲存選擇的時間
-        ui_settings.set("last_custom_start_ms", start_ms, autosave=False)
-        ui_settings.set("last_custom_end_ms",   end_ms,   autosave=True)
-        
-        return start_ms, end_ms
 
 
 class MainWindow(QMainWindow):
@@ -1018,12 +766,10 @@ class MainWindow(QMainWindow):
         self._strategy_engine: Optional[StrategyBase] = None
         self._strategy_realtime: bool = False
         self._strategy_signals: List[StrategySignal] = []
-        self._tick_import_thread: Optional[TickImportThread] = None
+        self._jump_target_ms: Optional[int] = None   # 時間跳轉的待處理目標
         # ── UI ────────────────────────────────────────────────────────────────
         self._build_ui()
         self._build_toolbar()
-        self._refresh_tick_label()
-        self._bt_config_dlg = BacktestConfigDialog(self)
 
         # 還原策略選擇
         last_strat = ui_settings.get("strategy_name")
@@ -1058,102 +804,72 @@ class MainWindow(QMainWindow):
             chart.crosshair_left.connect(self._hide_all_crosshairs)
 
         self._start_stream()
-        self._refresh_cache_label()
 
     # ══════════════════════════════════════════════════════════════
     # UI 建構
     # ══════════════════════════════════════════════════════════════
 
-    def _current_tick_backtest_symbol(self) -> str:
-        combo = getattr(self, "_bt_dataset_combo", None)
-        if combo is not None:
-            value = combo.currentData()
-            if isinstance(value, str) and value:
-                return value
-        return self._symbol
-
-    def _list_tick_backtest_symbols(self) -> list[str]:
-        symbols: list[str] = [self._symbol]
-        tick_dir = Path(__file__).resolve().parent.parent / "data" / "ticks"
-        alias_re = re.compile(rf"^{re.escape(self._symbol)}_\d{{8}}_\d{{8}}$")
-        for path in sorted(tick_dir.glob(f"{self._symbol}_*_shards.json")):
-            alias = path.name.removesuffix("_shards.json")
-            if alias_re.match(alias) and tick_cache.load_meta(alias) is not None:
-                symbols.append(alias)
-        return symbols
-
-    def _tick_dataset_label(self, symbol: str) -> str:
-        meta = tick_cache.load_meta(symbol)
-        if meta is None:
-            return symbol
-        start = _format_utc_day(int(meta["start_ms"]))
-        end = _format_utc_day(int(meta["end_ms"]))
-        if symbol == self._symbol:
-            return f"Current ({start} ~ {end})"
-        return f"{start} ~ {end}"
-
-    def _rebuild_tick_dataset_combo(self) -> None:
-        combo = getattr(self, "_bt_dataset_combo", None)
-        if combo is None:
-            return
-        previous = ui_settings.get("backtest_tick_symbol", self._symbol)
-        combo.blockSignals(True)
-        combo.clear()
-        symbols = self._list_tick_backtest_symbols()
-        for symbol in symbols:
-            combo.addItem(self._tick_dataset_label(symbol), symbol)
-        if previous in symbols:
-            combo.setCurrentIndex(symbols.index(previous))
-        else:
-            combo.setCurrentIndex(0)
-            ui_settings.set("backtest_tick_symbol", combo.currentData())
-        combo.blockSignals(False)
-
-    def _on_bt_dataset_changed(self, _label: str) -> None:
-        symbol = self._current_tick_backtest_symbol()
-        ui_settings.set("backtest_tick_symbol", symbol)
-        self._refresh_tick_label()
-        if self._bt_mode_combo.currentIndex() == 1:
-            self._rebuild_range_combo()
-
     def _build_toolbar(self) -> None:
-        tb = QToolBar("主工具列", self)
-        tb.setMovable(False)
-        tb.setStyleSheet("QToolBar { spacing: 8px; padding: 4px; }")
-        self.addToolBar(tb)
-        self._main_toolbar = tb
+        # 嵌入式控制列（置於即時看盤分頁頂部）
+        ctrl = QHBoxLayout(self._live_ctrl_bar)
+        ctrl.setContentsMargins(6, 2, 6, 2)
+        ctrl.setSpacing(4)
+
+        _lbl_style = "color:#aaa; font-size:11px;"
+        _sep_style  = "background:#2a2e39;"
+        _btn_style  = (
+            "QPushButton { background:#1e222d; color:#d1d4dc; border:1px solid #2a2e39;"
+            " border-radius:3px; padding:1px 6px; font-size:11px; }"
+            "QPushButton:checked { background:#2962ff; color:#fff; }"
+            "QPushButton:hover   { background:#2a2e39; }"
+        )
+
+        def _sep() -> QFrame:
+            f = QFrame()
+            f.setFrameShape(QFrame.Shape.VLine)
+            f.setFixedWidth(1)
+            f.setStyleSheet(_sep_style)
+            return f
 
         # Symbol
-        tb.addWidget(QLabel("交易對 "))
+        _l = QLabel("交易對")
+        _l.setStyleSheet(_lbl_style)
+        ctrl.addWidget(_l)
         self._sym_combo = QComboBox()
         self._sym_combo.addItems(config.SYMBOLS)
         self._sym_combo.setCurrentText(self._symbol)
         self._sym_combo.currentTextChanged.connect(self._on_symbol_changed)
-        tb.addWidget(self._sym_combo)
+        ctrl.addWidget(self._sym_combo)
 
-        tb.addSeparator()
+        ctrl.addWidget(_sep())
 
         # Interval
-        tb.addWidget(QLabel("週期 "))
+        _l = QLabel("週期")
+        _l.setStyleSheet(_lbl_style)
+        ctrl.addWidget(_l)
         self._iv_combo = QComboBox()
         self._iv_combo.addItems(config.INTERVALS)
         self._iv_combo.setCurrentText(self._interval)
         self._iv_combo.currentTextChanged.connect(self._on_interval_changed)
-        tb.addWidget(self._iv_combo)
+        ctrl.addWidget(self._iv_combo)
 
-        tb.addSeparator()
+        ctrl.addWidget(_sep())
 
         # Footprint mode
-        tb.addWidget(QLabel("Footprint "))
+        _l = QLabel("Footprint")
+        _l.setStyleSheet(_lbl_style)
+        ctrl.addWidget(_l)
         self._fp_combo = QComboBox()
         self._fp_combo.addItems(config.FOOTPRINT_MODES)
         self._fp_combo.currentTextChanged.connect(self._on_fp_mode_changed)
-        tb.addWidget(self._fp_combo)
+        ctrl.addWidget(self._fp_combo)
 
-        tb.addSeparator()
+        ctrl.addWidget(_sep())
 
         # Tick 聚合倍數
-        tb.addWidget(QLabel("Tick "))
+        _l = QLabel("Tick")
+        _l.setStyleSheet(_lbl_style)
+        ctrl.addWidget(_l)
         self._tick_combo = QComboBox()
         for m in config.TICK_MULTIPLIERS:
             self._tick_combo.addItem(f"{m}x")
@@ -1161,157 +877,90 @@ class MainWindow(QMainWindow):
             config.TICK_MULTIPLIERS.index(config.DEFAULT_TICK_MULTIPLIER)
         )
         self._tick_combo.currentIndexChanged.connect(self._on_tick_multiplier_changed)
-        tb.addWidget(self._tick_combo)
+        ctrl.addWidget(self._tick_combo)
 
-        tb.addSeparator()
+        ctrl.addWidget(_sep())
 
         # Log scale 切換按鈕
         self._log_btn = QPushButton("Log")
         self._log_btn.setCheckable(True)
-        self._log_btn.setFixedWidth(46)
+        self._log_btn.setFixedWidth(40)
         self._log_btn.setToolTip("切換 K 線 Y 軸：線性 ↔ 對數")
-        self._log_btn.setStyleSheet(
-            "QPushButton { background:#1e222d; color:#d1d4dc; border:1px solid #2a2e39;"
-            " border-radius:3px; padding:2px 6px; }"
-            "QPushButton:checked { background:#2962ff; color:#fff; }"
-        )
+        self._log_btn.setStyleSheet(_btn_style)
         self._log_btn.toggled.connect(self._on_log_toggled)
-        tb.addWidget(self._log_btn)
+        ctrl.addWidget(self._log_btn)
 
-        tb.addSeparator()
+        ctrl.addWidget(_sep())
 
-        # ── 策略測試區域 ────────────────────────────────────────────────────
-        tb.addWidget(QLabel("策略 "))
+        # ── 即時策略標注 ────────────────────────────────────────────────────
+        _l = QLabel("策略")
+        _l.setStyleSheet(_lbl_style)
+        ctrl.addWidget(_l)
         self._strategy_combo = QComboBox()
         self._strategy_combo.addItem("── 無 ──")
         self._strategy_combo.addItems(list(STRATEGY_REGISTRY.keys()))
         self._strategy_combo.currentTextChanged.connect(self._on_strategy_changed)
-        tb.addWidget(self._strategy_combo)
+        ctrl.addWidget(self._strategy_combo)
 
-        _btn_style = (
-            "QPushButton { background:#1e222d; color:#d1d4dc; border:1px solid #2a2e39;"
-            " border-radius:3px; padding:2px 7px; }"
-            "QPushButton:checked { background:#2962ff; color:#fff; }"
-            "QPushButton:hover   { background:#2a2e39; }"
-        )
-
-        self._run_btn = QPushButton("▶ 執行")
-        self._run_btn.setToolTip("對目前歷史 K 棒執行回測")
-        self._run_btn.setStyleSheet(_btn_style)
-        self._run_btn.clicked.connect(self._on_run_strategy)
-        tb.addWidget(self._run_btn)
-
-        self._bt_config_btn = QPushButton("⚙ 設定")
-        self._bt_config_btn.setToolTip("開啟回測參數設定")
-        self._bt_config_btn.setStyleSheet(_btn_style)
-        self._bt_config_btn.clicked.connect(self._on_open_bt_config)
-        tb.addWidget(self._bt_config_btn)
-
-        # 回測範圍選擇（內容在 _build_toolbar 末尾由 _rebuild_range_combo 填充）
-        self._bt_dataset_label = QLabel("Tick Data")
-        tb.addWidget(self._bt_dataset_label)
-
-        self._bt_dataset_combo = QComboBox()
-        self._bt_dataset_combo.setToolTip("Select which tick dataset is used by Tick mode backtests.")
-        self._bt_dataset_combo.currentTextChanged.connect(self._on_bt_dataset_changed)
-        tb.addWidget(self._bt_dataset_combo)
-        self._bt_dataset_label.setVisible(False)
-        self._bt_dataset_combo.setVisible(False)
-
-        self._bt_range_combo = QComboBox()
-        self._bt_range_combo.setToolTip("回測資料範圍（點 ▶ 時自動載入不足的歷史）")
-        tb.addWidget(self._bt_range_combo)
-
-        self._download_btn = QPushButton("💾 預載")
-        self._download_btn.setToolTip("下載並儲存所選範圍的 K 線至本機，下次回測可直接讀取")
-        self._download_btn.setStyleSheet(_btn_style)
-        self._download_btn.clicked.connect(self._on_download_cache)
-        tb.addWidget(self._download_btn)
-
-        tb.addSeparator()
-
-        # ── 回測資料模式 ────────────────────────────────────────────────────
-        self._bt_mode_combo = QComboBox()
-        self._bt_mode_combo.addItems(["📊 Bar 模式", "🎯 Tick 模式"])
-        self._bt_mode_combo.setToolTip(
-            "Bar 模式：用 K 棒收盤值判斷（快速，適合長週期）\n"
-            "Tick 模式：用匯入的 aggTrades 逐 tick 模擬（無 look-ahead，適合精確驗證）"
-        )
-        self._bt_mode_combo.currentIndexChanged.connect(self._on_bt_mode_changed)
-        tb.addWidget(self._bt_mode_combo)
-
-        self._import_tick_btn = QPushButton("📂 匯入 Tick")
-        self._import_tick_btn.setToolTip(
-            "匯入從 data.binance.vision 下載的 aggTrades CSV/ZIP\n"
-            "可 Ctrl+點選多個檔案同時匯入，自動合併至本機快取"
-        )
-        self._import_tick_btn.setStyleSheet(_btn_style)
-        self._import_tick_btn.clicked.connect(self._on_import_ticks)
-        tb.addWidget(self._import_tick_btn)
-
-        self._import_tick_dir_btn = QPushButton("📁 資料夾")
-        self._import_tick_dir_btn.setToolTip(
-            "選取資料夾，自動匯入其中所有的 aggTrades CSV/ZIP\n"
-            "（適合將 data.binance.vision 下載的月份檔案集中放在同一資料夾）"
-        )
-        self._import_tick_dir_btn.setStyleSheet(_btn_style)
-        self._import_tick_dir_btn.clicked.connect(self._on_import_ticks_folder)
-        tb.addWidget(self._import_tick_dir_btn)
-
-        self._clear_tick_btn = QPushButton("🗑")
-        self._clear_tick_btn.setToolTip("刪除本機 Tick 快取檔案以釋放磁碟空間")
-        self._clear_tick_btn.setStyleSheet(_btn_style)
-        self._clear_tick_btn.clicked.connect(self._on_clear_tick_cache)
-        tb.addWidget(self._clear_tick_btn)
-
-        self._tick_lbl = QLabel()
-        self._tick_lbl.setStyleSheet("color:#80cbc4; font-size:10px; padding-left:4px;")
-        tb.addWidget(self._tick_lbl)
-
-        self._cache_lbl = QLabel()
-        self._cache_lbl.setStyleSheet("color:#4fc3f7; font-size:10px; padding-left:4px;")
-        tb.addWidget(self._cache_lbl)
-
-        tb.addSeparator()
+        ctrl.addWidget(_sep())
 
         self._rt_btn = QPushButton("⚡ 即時")
         self._rt_btn.setCheckable(True)
         self._rt_btn.setToolTip("開啟後，每根 K 棒收盤自動標註")
         self._rt_btn.setStyleSheet(_btn_style)
         self._rt_btn.toggled.connect(self._on_realtime_toggled)
-        tb.addWidget(self._rt_btn)
+        ctrl.addWidget(self._rt_btn)
 
         self._clear_btn = QPushButton("✕ 清除")
         self._clear_btn.setToolTip("清除標記與統計")
         self._clear_btn.setStyleSheet(_btn_style)
         self._clear_btn.clicked.connect(self._on_clear_strategy)
-        tb.addWidget(self._clear_btn)
+        ctrl.addWidget(self._clear_btn)
 
         self._strategy_stats_lbl = QLabel()
         self._strategy_stats_lbl.setStyleSheet(
-            "color:#f0c040; font-size:11px; padding-left:8px;"
+            "color:#f0c040; font-size:11px; padding-left:6px;"
         )
         self._strategy_stats_lbl.setVisible(False)
-        tb.addWidget(self._strategy_stats_lbl)
+        ctrl.addWidget(self._strategy_stats_lbl)
 
-        tb.addSeparator()
+        ctrl.addWidget(_sep())
+
         self._status_lbl = QLabel("初始化中 …")
         self._status_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
-        tb.addWidget(self._status_lbl)
+        ctrl.addWidget(self._status_lbl)
 
-        # 最新價
         self._price_lbl = QLabel("─")
         self._price_lbl.setStyleSheet(
-            "color: #d1d4dc; font-size: 14px; font-weight: bold; padding-left: 16px;"
+            "color: #d1d4dc; font-size: 13px; font-weight: bold; padding-left: 10px;"
         )
-        tb.addWidget(self._price_lbl)
+        ctrl.addWidget(self._price_lbl)
 
-        # 初始化回測範圍下拉（需在 _bt_mode_combo 建立後）
-        self._rebuild_tick_dataset_combo()
-        self._rebuild_range_combo()
+        # ── 時間跳轉（置右）────────────────────────────────────────────────
+        ctrl.addStretch(1)
+
+        ctrl.addWidget(_sep())
+
+        _l = QLabel("跳轉至")
+        _l.setStyleSheet(_lbl_style)
+        ctrl.addWidget(_l)
+
+        self._jump_dt_edit = QDateTimeEdit()
+        self._jump_dt_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self._jump_dt_edit.setTimeSpec(Qt.TimeSpec.UTC)
+        self._jump_dt_edit.setDateTime(QDateTime.currentDateTimeUtc())
+        self._jump_dt_edit.setToolTip("指定要跳轉的 K 棒時間（UTC）")
+        self._jump_dt_edit.setFixedWidth(138)
+        ctrl.addWidget(self._jump_dt_edit)
+
+        self._jump_btn = QPushButton("跳轉")
+        self._jump_btn.setToolTip("跳轉到指定時間的 K 棒")
+        self._jump_btn.setStyleSheet(_btn_style)
+        self._jump_btn.clicked.connect(self._on_jump_to_time)
+        ctrl.addWidget(self._jump_btn)
+
         if hasattr(self, "_top_tabs"):
             self._top_tabs.currentChanged.connect(self._on_top_tab_changed)
-            self._on_top_tab_changed(self._top_tabs.currentIndex())
 
     def _build_ui(self) -> None:
         # ── 左欄（OB + Heatmap）─────────────────────────────────────────────
@@ -1376,6 +1025,20 @@ class MainWindow(QMainWindow):
         main_splitter.addWidget(right_splitter)
         main_splitter.setSizes([230, 1370])
 
+        # ── 即時看盤分頁容器（含嵌入控制列）────────────────────────────────────
+        live_tab_widget = QWidget()
+        live_tab_layout = QVBoxLayout(live_tab_widget)
+        live_tab_layout.setContentsMargins(0, 0, 0, 0)
+        live_tab_layout.setSpacing(0)
+
+        self._live_ctrl_bar = QFrame()
+        self._live_ctrl_bar.setStyleSheet(
+            "QFrame { background: #1a1f2e; border-bottom: 1px solid #2a2e39; }"
+        )
+        self._live_ctrl_bar.setFixedHeight(36)
+        live_tab_layout.addWidget(self._live_ctrl_bar)
+        live_tab_layout.addWidget(main_splitter, stretch=1)
+
         # ── 頂層頁籤：Tab 0=回測分析  Tab 1=即時看盤 ─────────────────────────
         from ui.backtest_dashboard import BacktestDashboard
         from ui.research_lab import ResearchLab
@@ -1388,7 +1051,7 @@ class MainWindow(QMainWindow):
             "QTabBar::tab { padding: 6px 20px; font-size: 12px; }"
         )
         top_tabs.addTab(self._backtest_dashboard, "📊 回測分析")
-        top_tabs.addTab(main_splitter,             "📈 即時看盤")
+        top_tabs.addTab(live_tab_widget,           "📈 即時看盤")
 
         top_tabs.addTab(self._research_lab,        "Research Lab")
 
@@ -1396,9 +1059,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(top_tabs)
 
     def _on_top_tab_changed(self, index: int) -> None:
-        toolbar = getattr(self, "_main_toolbar", None)
-        if toolbar is not None:
-            toolbar.setVisible(index == 1)
+        pass  # 各分頁控制列已嵌入於分頁內，無需切換顯示
 
     # ══════════════════════════════════════════════════════════════
     # WebSocket 管理
@@ -1455,7 +1116,6 @@ class MainWindow(QMainWindow):
         self._ws_thread.more_agg_history_signal.connect(self._on_more_agg_history)
         self._ws_thread.exchange_info_signal.connect(self._on_exchange_info)
         self._ws_thread.status_signal.connect(self._on_status)
-        self._ws_thread.backtest_history_signal.connect(self._on_backtest_history)
         self._ws_thread.cache_ready_signal.connect(self._on_cache_ready)
         self._ws_thread.start()
 
@@ -1697,6 +1357,16 @@ class MainWindow(QMainWindow):
         if self._strategy_signals:
             self._kline_chart.set_strategy_markers(self._strategy_signals)
 
+        # 時間跳轉：若目標已在載入範圍內則執行跳轉，否則繼續載入更早的歷史
+        if self._jump_target_ms is not None:
+            oldest_ms = self._loaded_klines[0].open_time if self._loaded_klines else 0
+            if oldest_ms <= self._jump_target_ms:
+                self._kline_chart.scroll_to_time(self._jump_target_ms)
+                self._jump_target_ms = None
+            else:
+                if self._ws_thread:
+                    self._ws_thread.request_more_history(oldest_ms)
+
     def _on_more_agg_history(self, payload_list: list) -> None:
         """WsWorkerThread 完成更早 aggTrades 載入後回調，連同處理 Footprint。"""
         self._on_agg_history(payload_list)
@@ -1795,10 +1465,6 @@ class MainWindow(QMainWindow):
             return
         self._symbol = sym
         ui_settings.set("symbol", sym)
-        self._rebuild_tick_dataset_combo()
-        self._refresh_tick_label()
-        self._rebuild_range_combo()
-        self._refresh_cache_label()
         self._start_stream()
 
     def _on_interval_changed(self, iv: str) -> None:
@@ -1806,8 +1472,6 @@ class MainWindow(QMainWindow):
             return
         self._interval = iv
         ui_settings.set("interval", iv)
-        self._refresh_cache_label()
-        self._rebuild_range_combo()
         self._start_stream()
 
     def _on_fp_mode_changed(self, mode: str) -> None:
@@ -1843,569 +1507,46 @@ class MainWindow(QMainWindow):
         else:
             cls = STRATEGY_REGISTRY.get(name)
             self._strategy_engine = cls() if cls else None
-
-    def _on_run_strategy(self) -> None:
-        """對目前已載入的歷史 K 棒執行回測，繪製標記並顯示統計。"""
-        if not self._strategy_engine:
-            self._status_lbl.setText("Please select a strategy before running a backtest.")
-            return
-
-        use_tick = self._bt_mode_combo.currentIndex() == 1
-
-        if use_tick:
-            # ── Tick 模式：以 tick 快取的起訖時間（或使用者自訂區間）決定回測範圍 ──
-            # K 棒由 _execute_backtest 從 tick 重建，不依賴 self._loaded_klines
-            tick_symbol = self._current_tick_backtest_symbol()
-            ti = tick_cache.info(tick_symbol)
-            if not ti:
-                self._status_lbl.setText(
-                    "⚠ Tick 模式：無 Tick 快取，請先匯入 aggTrades 檔案"
-                )
-                return
-
-            range_label = self._bt_range_combo.currentText()
-            if range_label == "🗓 自訂時間...":
-                # 以 tick 快取的實際範圍預設日期對話框
-                from PyQt6.QtCore import QDateTime
-                dlg = BarDateRangeDialog(self)
-                # 預設為 tick 快取的起訖時間
-                dlg.start_edit.setDateTime(
-                    QDateTime.fromMSecsSinceEpoch(int(ti["start_ms"]))
-                )
-                dlg.end_edit.setDateTime(
-                    QDateTime.fromMSecsSinceEpoch(int(ti["end_ms"]))
-                )
-                if dlg.exec() != QDialog.DialogCode.Accepted:
-                    return
-                start_ms, end_ms = dlg.get_range_ms()
-                if start_ms >= end_ms:
-                    self._status_lbl.setText("⚠ 起始時間需早於結束時間")
-                    return
-                # 限制在快取實際範圍內
-                start_ms = max(start_ms, ti["start_ms"])
-                end_ms   = min(end_ms,   ti["end_ms"])
-                if start_ms >= end_ms:
-                    self._status_lbl.setText("⚠ 選取時間超出 Tick 快取範圍")
-                    return
-                self._execute_backtest(tick_start_ms=start_ms, tick_end_ms=end_ms)
-            else:
-                # 全部：使用 tick 快取完整範圍
-                self._execute_backtest(
-                    tick_start_ms=ti["start_ms"],
-                    tick_end_ms=ti["end_ms"],
-                )
-        else:
-            # ── Bar 模式：原始邏輯 ──────────────────────────────────────
-            range_label = self._bt_range_combo.currentText()
-
-            # ── 自訂時間區間 ──────────────────────────────────────────────
-            if range_label == "🗓 自訂時間...":
-                dlg = BarDateRangeDialog(self)
-                if dlg.exec() != QDialog.DialogCode.Accepted:
-                    return
-                start_ms, end_ms = dlg.get_range_ms()
-                if start_ms >= end_ms:
-                    self._status_lbl.setText("⚠ 起始時間需早於結束時間")
-                    return
-                # 先嘗試從 _loaded_klines 篩選
-                bt_klines = [
-                    k for k in self._loaded_klines
-                    if start_ms <= k.open_time <= end_ms
-                ]
-                if not bt_klines:
-                    # 嘗試從 kline 快取篩選
-                    cached = kline_cache.load(self._symbol, self._interval)
-                    if cached:
-                        from core.data_types import Kline as _Kline
-                        all_k = [
-                            _Kline.from_rest(self._symbol, self._interval, r)
-                            for r in cached
-                        ]
-                        bt_klines = [k for k in all_k if start_ms <= k.open_time <= end_ms]
-                if not bt_klines:
-                    self._status_lbl.setText(
-                        "⚠ 自訂區間內無 K 棒資料，請先使用「💾 預載」下載對應期間"
-                    )
-                    return
-                self._execute_backtest(klines=bt_klines)
-                return
-
-            need = config.BACKTEST_RANGE_OPTIONS.get(range_label, 200)
-            have = len(self._loaded_klines)
-
-            if have < need:
-                cached = kline_cache.load(self._symbol, self._interval)
-                if cached and len(cached) < need:
-                    self._status_lbl.setText(
-                        f"Only {len(cached):,}/{need:,} cached {self._interval} bars available; "
-                        "running with cached data."
-                    )
-                    self._load_from_cache(cached, need)
-                    return
-                if len(cached) >= need:
-                    self._status_lbl.setText("從本機快取載入資料…")
-                    self._load_from_cache(cached, need)
-                    return
-
-                self._run_btn.setEnabled(False)
-                self._run_btn.setText("載入中…")
-                self._status_lbl.setText(
-                    f"Loading {need:,} {self._interval} bars before backtest."
-                )
-                if self._ws_thread:
-                    self._ws_thread.request_backtest_history(need)
-                return
-
-            self._execute_backtest(klines=self._loaded_klines[-need:])
-
-    def _on_backtest_history(self, rows: list) -> None:
-        """批量歷史載入完成後的回調。"""
-        self._run_btn.setEnabled(True)
-        self._run_btn.setText("▶ 執行")
-
-        if not rows:
-            self._status_lbl.setText("回測歷史載入失敗")
-            return
-
-        from core.data_types import Kline as _Kline
-        klines = [
-            _Kline.from_rest(self._symbol, self._interval, row)
-            for row in rows
-        ]
-
-        # 合併：將現有即時 K 棒中較新的資料附加在歷史之後
-        if self._loaded_klines:
-            latest_hist_ot = klines[-1].open_time
-            newer = [k for k in self._loaded_klines if k.open_time > latest_hist_ot]
-            if newer:
-                klines.extend(newer)
-
-        self._loaded_klines = klines
-        self._kline_timestamps = [k.open_time for k in klines]
-
-        # 大回測（> 30d）不更新圖表，避免渲染大量資料
-        large_backtest = len(klines) > config.BACKTEST_NO_CHART_BARS
-
-        if not large_backtest:
-            # 更新 KlineChart 以顯示完整歷史
-            self._kline_chart.set_history(klines)
-            self._fp_chart.set_kline_timestamps(self._kline_timestamps)
-            self._fp_builder.set_kline_open_times(self._kline_timestamps)
-
-            # 重新計算 CVD
-            self._cvd_calc.seed_history(klines[:-1])
-            self._cvd_calc.on_new_candle(klines[-1].open_time)
-            self._current_kline_open_time = klines[-1].open_time
-            ot_map = self._kline_chart.get_open_time_index_map()
-            self._cvd_chart.update_cvd(self._cvd_calc.get_series(), ot_map)
-
-        n = len(klines)
-        self._status_lbl.setText(f"已載入 {n} 根 K 棒，開始回測…")
-
-        # 自動接續回測
-        if self._strategy_engine:
-            self._execute_backtest()
-
-    def _execute_backtest(
-        self,
-        klines: list | None = None,
-        tick_start_ms: int | None = None,
-        tick_end_ms:   int | None = None,
-    ) -> None:
-        """執行回測並顯示結果。
-
-        tick_start_ms / tick_end_ms 由 tick 模式直接傳入 tick 快取的起訖時間，
-        讓回測範圍不受 self._loaded_klines 的筆數限制。
-        klines 為 None 且未傳 tick 範圍時，使用 self._loaded_klines。
-        """
-        bt_klines = klines if klines is not None else self._loaded_klines
-
-        # ── 依模式決定是否載入 tick_map ────────────────────────────────
-        tick_map = None
-        tick_coverage_pct = 0.0
-        use_tick_mode = self._bt_mode_combo.currentIndex() == 1
-        had_allow_bar_fallback = False
-        prev_allow_bar_fallback = None
-        if use_tick_mode:
-            tick_symbol = self._current_tick_backtest_symbol()
-            # tick_start_ms/tick_end_ms 由呼叫方直接提供（完整 tick 快取範圍）；
-            # 若未提供則回退到 bt_klines 的時間範圍（向後相容）。
-            if tick_start_ms is not None:
-                start_ms = tick_start_ms
-                end_ms   = tick_end_ms
-            elif bt_klines:
-                start_ms = bt_klines[0].open_time
-                end_ms   = bt_klines[-1].close_time
-            else:
-                self._status_lbl.setText("⚠ Tick 模式：無 K 棒資料可回測")
-                return
-            ti = tick_cache.info(tick_symbol)
-            if not ti:
-                self._status_lbl.setText("No tick cache found. Please import/download tick data first.")
-                return
-            if end_ms < int(ti["start_ms"]) or start_ms > int(ti["end_ms"]):
-                self._status_lbl.setText("Selected backtest range does not overlap tick cache range.")
-                return
-
-            bar_ms = _interval_ms(self._interval)
-            range_start_ms = (start_ms // bar_ms) * bar_ms
-            range_end_ms = (end_ms // bar_ms) * bar_ms
-            bt_klines = kline_cache.load_range_as_klines(
-                self._symbol, self._interval, range_start_ms, range_end_ms,
-            )
-            if not bt_klines:
-                self._status_lbl.setText(
-                    "No corresponding K-line data for the selected tick backtest range."
-                )
-                return
-            kline_times = [
-                (k.open_time, k.close_time) for k in bt_klines
-            ]
-            tick_map = tick_cache.build_lazy_bar_map([tick_symbol], kline_times)
-            self._status_lbl.setText(
-                f"Tick backtest started with {len(bt_klines):,} bars (lazy tick loading enabled)."
-            )
-
-
-        # ── Phase B: build cfg once, inject into strategy before on_history ──
-        from backtest.engine import BacktestConfig, simulate_trades, _resolve_fee_rate
-        cfg = BacktestConfig(
-            initial_capital=self._bt_config_dlg.capital_spin.value(),
-            max_loss_pct=self._bt_config_dlg.loss_spin.value() / 100.0,
-            leverage=self._bt_config_dlg.leverage_spin.value(),
-            fee_mode=self._bt_config_dlg.fee_combo.currentText(),
-            custom_fee_rate=self._bt_config_dlg.custom_fee_spin.value() / 100.0,
-            slippage_bps=self._bt_config_dlg.slippage_spin.value(),
-            funding_rate=self._bt_config_dlg.funding_spin.value(),
-            maint_margin=self._bt_config_dlg.maint_spin.value(),
-            compound=self._bt_config_dlg.compound_combo.currentIndex() == 0,
-        )
-        if hasattr(self._strategy_engine, "configure_backtest_costs"):
-            self._strategy_engine.configure_backtest_costs(
-                _resolve_fee_rate(cfg), cfg.slippage_bps
-            )
-
-        if use_tick_mode:
-            had_allow_bar_fallback = hasattr(
-                self._strategy_engine, "allow_bar_fallback_in_tick_mode"
-            )
-            prev_allow_bar_fallback = getattr(
-                self._strategy_engine, "allow_bar_fallback_in_tick_mode", None
-            )
-            self._strategy_engine.allow_bar_fallback_in_tick_mode = False
-        try:
-            self._strategy_signals = self._strategy_engine.on_history(
-                bt_klines, tick_map=tick_map,
-            )
-        finally:
-            if use_tick_mode:
-                if had_allow_bar_fallback:
-                    self._strategy_engine.allow_bar_fallback_in_tick_mode = prev_allow_bar_fallback
-                elif hasattr(self._strategy_engine, "allow_bar_fallback_in_tick_mode"):
-                    delattr(self._strategy_engine, "allow_bar_fallback_in_tick_mode")
-
-        # 大回測（> 30d）不繪製圖表標記
-        if use_tick_mode and tick_map is not None and hasattr(tick_map, "observed_coverage"):
-            covered_bars, total_bars = tick_map.observed_coverage()
-            if total_bars > 0:
-                tick_coverage_pct = covered_bars / total_bars * 100.0
-
-        large_backtest = len(bt_klines) > config.BACKTEST_NO_CHART_BARS
-        if not large_backtest:
-            self._kline_chart.set_strategy_markers(self._strategy_signals)
-
-        # 工具列簡易統計（百分比）
-        basic_stats = self._strategy_engine.compute_stats(self._strategy_signals)
-        self._show_strategy_stats_label(basic_stats)
-
-        # 完整模擬（資金/手續費/倉位）— cfg already built above
-        sim_stats = simulate_trades(self._strategy_signals, cfg)
-        if bt_klines:
-            from core.regime import enrich_trades_with_regime
-            enrich_trades_with_regime(sim_stats["trade_list"], bt_klines)
-        sim_stats["strategy_name"]      = getattr(self._strategy_engine, "name", "策略")
-        sim_stats["backtest_start_ms"]  = bt_klines[0].open_time  if bt_klines else 0
-        sim_stats["backtest_end_ms"]    = bt_klines[-1].open_time if bt_klines else 0
-        sim_stats["tick_coverage_pct"]  = tick_coverage_pct if use_tick_mode else None
-        sim_stats["fallback_bar_count"] = getattr(
-            self._strategy_engine, "_fallback_bar_count", 0
-        ) if use_tick_mode else 0
-
-        dlg = BacktestResultDialog(
-            sim_stats,
-            klines=bt_klines if use_tick_mode else None,
-            tick_map=tick_map,
-            signals=self._strategy_signals if use_tick_mode else None,
-            parent=self,
-        )
-        dlg.exec()
-
-        # 通知容量分析頁：訊號已就緒
-        self._capacity_tab.set_ready(bool(self._strategy_signals))
-
-    # ── 本機快取 ──────────────────────────────────────────────────────────────
-
-    def _load_from_cache(self, cached_rows: list, need: int) -> None:
-        """以快取列表直接建立 _loaded_klines 並執行回測。"""
-        rows = cached_rows[-need:]  # 取最近 need 根
-        from core.data_types import Kline as _Kline
-        klines = [
-            _Kline.from_rest(self._symbol, self._interval, row)
-            for row in rows
-        ]
-
-        # 合併較新的即時 K 棒
-        if self._loaded_klines:
-            latest_hist_ot = klines[-1].open_time
-            newer = [k for k in self._loaded_klines if k.open_time > latest_hist_ot]
-            if newer:
-                klines.extend(newer)
-
-        self._loaded_klines = klines
-        self._kline_timestamps = [k.open_time for k in klines]
-
-        n = len(klines)
-        self._status_lbl.setText(f"已從快取載入 {n:,} 根 K 棒，開始回測…")
-
-        large_backtest = n > config.BACKTEST_NO_CHART_BARS
-        if not large_backtest:
-            self._kline_chart.set_history(klines)
-            self._fp_chart.set_kline_timestamps(self._kline_timestamps)
-            self._fp_builder.set_kline_open_times(self._kline_timestamps)
-            self._cvd_calc.seed_history(klines[:-1])
-            self._cvd_calc.on_new_candle(klines[-1].open_time)
-            self._current_kline_open_time = klines[-1].open_time
-            ot_map = self._kline_chart.get_open_time_index_map()
-            self._cvd_chart.update_cvd(self._cvd_calc.get_series(), ot_map)
-
-        if self._strategy_engine:
-            self._execute_backtest()
-
-    def _on_download_cache(self) -> None:
-        """「💾 預載」按鈕：只下載並儲存到本機快取，不執行回測。"""
-        range_label = self._bt_range_combo.currentText()
-        need = config.BACKTEST_RANGE_OPTIONS.get(range_label, 200)
-        if self._ws_thread:
-            self._download_btn.setEnabled(False)
-            self._download_btn.setText("下載中…")
-            self._status_lbl.setText(f"正在下載並儲存 {range_label} 快取…")
-            self._ws_thread.request_backtest_history(need, cache_only=True)
-
     def _on_cache_ready(self, count: int) -> None:
-        """cache_only 下載完成後的回調。"""
-        self._download_btn.setEnabled(True)
-        self._download_btn.setText("💾 預載")
+        """K 線快取下載完成後的回調。"""
         if count:
             info = kline_cache.info(self._symbol, self._interval)
             if info:
-                total = info["count"]
-                size  = info["size_mb"]
-                self._cache_lbl.setText(f"📁 {total:,}根 {size:.0f}MB")
                 self._status_lbl.setText(
-                    f"快取已儲存：{total:,} 根 K 棒 ({size:.1f} MB)"
+                    f"快取已儲存：{info['count']:,} 根 K 棒 ({info['size_mb']:.1f} MB)"
                 )
             else:
                 self._status_lbl.setText(f"快取已儲存：{count:,} 根")
         else:
             self._status_lbl.setText("快取下載失敗，請稍後再試")
 
-    def _on_bt_mode_changed(self, index: int) -> None:
-        """切換 Bar/Tick 模式：更新範圍下拉選單與 UI 元件可見性。"""
-        is_tick = index == 1
-        # 預載按鈕僅 Bar 模式有意義
-        self._download_btn.setVisible(not is_tick)
-        self._bt_dataset_label.setVisible(is_tick)
-        self._bt_dataset_combo.setVisible(is_tick)
-        self._rebuild_range_combo()
-        self._refresh_tick_label()
-
-    def _on_import_ticks(self) -> None:
-        """「📂 匯入 Tick」按鈕：開啟檔案對話框，背景匯入 aggTrades CSV/ZIP。"""
-        default_dir = str(Path(__file__).resolve().parent.parent / "tick_data")
-        paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "選擇 aggTrades 檔案（data.binance.vision）",
-            default_dir,
-            "Binance aggTrades (*.csv *.zip);;所有檔案 (*)",
-        )
-        if not paths:
-            return
-
-        # 若上一次匯入仍在執行，等待結束
-        if self._tick_import_thread and self._tick_import_thread.isRunning():
-            self._tick_import_thread.wait(500)
-
-        self._import_tick_btn.setEnabled(False)
-        self._import_tick_dir_btn.setEnabled(False)
-        self._import_tick_btn.setText("匯入中…")
-        self._tick_lbl.setText("🔄 匯入中…")
-
-        self._tick_import_thread = TickImportThread(
-            self._symbol, paths, parent=self
-        )
-        self._tick_import_thread.progress_signal.connect(self._on_tick_import_progress)
-        self._tick_import_thread.done_signal.connect(self._on_tick_import_done)
-        self._tick_import_thread.start()
-
-    def _on_tick_import_progress(self, msg: str) -> None:
-        self._status_lbl.setText(msg)
-
-    def _on_tick_import_done(self, count: int, err: str) -> None:
-        self._import_tick_btn.setEnabled(True)
-        self._import_tick_dir_btn.setEnabled(True)
-        self._import_tick_btn.setText("📂 匯入 Tick")
-        if err:
-            self._status_lbl.setText(f"❌ 匯入失敗：{err}")
-            self._tick_lbl.setText("❌ 匯入失敗")
-        elif count:
-            ti = tick_cache.info(self._symbol)
-            self._rebuild_tick_dataset_combo()
-            self._refresh_tick_label()
-            self._rebuild_range_combo()
-            self._status_lbl.setText(
-                f"✓ 匯入完成，快取共 {count:,} 筆"
-                + (f" ({ti['size_mb']:.1f} MB)" if ti else "")
-            )
-        else:
-            self._status_lbl.setText("⚠ 匯入完成，但未解析到任何資料（請確認檔案格式）")
-            self._tick_lbl.setText("⚠ 無資料")
-
-    def _refresh_tick_label(self) -> None:
-        """更新 tick 快取狀態標籤。"""
-        tick_symbol = self._current_tick_backtest_symbol()
-        ti = tick_cache.info(tick_symbol)
-        prefix = "🎯"
-        if tick_symbol != self._symbol:
-            prefix = f"🎯 [{self._tick_dataset_label(tick_symbol)}]"
-        if ti:
-            from datetime import datetime, timezone
-            s = datetime.fromtimestamp(ti["start_ms"] / 1000, tz=timezone.utc).strftime("%y-%m-%d")
-            e = datetime.fromtimestamp(ti["end_ms"]   / 1000, tz=timezone.utc).strftime("%y-%m-%d")
-            self._tick_lbl.setText(
-                f"{prefix} {ti['count']:,} 筆 | {s}~{e} | {ti['size_mb']:.0f}MB"
-            )
-        else:
-            self._tick_lbl.setText(f"{prefix} 無 Tick 快取")
-
-    def _rebuild_range_combo(self) -> None:
-        """依目前模式重建回測範圍下拉選單。
-
-        Bar 模式：使用 config.BACKTEST_RANGE_OPTIONS（200根 ~ 5年）。
-        Tick 模式：依 tick 快取中實際的天數範圍動態產生選項。
-        """
-        self._bt_range_combo.blockSignals(True)
-        self._bt_range_combo.clear()
-
-        if self._bt_mode_combo.currentIndex() == 0:
-            # ── Bar 模式 ──────────────────────────────────────────────────
-            for label in config.BACKTEST_RANGE_OPTIONS:
-                self._bt_range_combo.addItem(label)
-            self._bt_range_combo.addItem("🗓 自訂時間...")
-        else:
-            # ── Tick 模式 ─────────────────────────────────────────────────
-            ti = tick_cache.info(self._current_tick_backtest_symbol())
-            if ti:
-                span_days = max(1, (ti["end_ms"] - ti["start_ms"]) / 86_400_000)
-                from datetime import datetime, timezone
-                s = datetime.fromtimestamp(ti["start_ms"] / 1000, tz=timezone.utc).strftime("%m/%d")
-                e = datetime.fromtimestamp(ti["end_ms"]   / 1000, tz=timezone.utc).strftime("%m/%d")
-                self._bt_range_combo.addItem(
-                    f"全部 ({s}~{e}, {span_days:.0f}天)"
-                )
-                self._bt_range_combo.addItem("🗓 自訂時間...")
-            else:
-                self._bt_range_combo.addItem("⚠ 無 Tick 資料")
-
-        self._bt_range_combo.blockSignals(False)
-
-    def _on_import_ticks_folder(self) -> None:
-        """「📁 資料夾」按鈕：選取資料夾，自動尋找內部所有 CSV/ZIP 並匯入。"""
-        default_dir = str(Path(__file__).resolve().parent.parent / "tick_data")
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "選取包含 aggTrades 檔案的資料夾（data.binance.vision）",
-            default_dir,
-        )
-        if not folder:
-            return
-        folder_path = Path(folder)
-        paths = sorted(
-            str(p) for p in folder_path.iterdir()
-            if p.suffix.lower() in (".csv", ".zip")
-        )
-        if not paths:
-            self._status_lbl.setText(f"⚠ 資料夾中未找到任何 CSV/ZIP 檔案：{folder_path.name}")
-            return
-        if self._tick_import_thread and self._tick_import_thread.isRunning():
-            self._tick_import_thread.wait(500)
-        self._import_tick_btn.setEnabled(False)
-        self._import_tick_dir_btn.setEnabled(False)
-        self._import_tick_dir_btn.setText("匯入中…")
-        self._tick_lbl.setText("🔄 匯入中…")
-        self._tick_import_thread = TickImportThread(
-            self._symbol, paths, parent=self
-        )
-        self._tick_import_thread.progress_signal.connect(self._on_tick_import_progress)
-        self._tick_import_thread.done_signal.connect(self._on_tick_import_done_folder)
-        self._tick_import_thread.start()
-
-    def _on_tick_import_done_folder(self, count: int, err: str) -> None:
-        self._import_tick_btn.setEnabled(True)
-        self._import_tick_dir_btn.setEnabled(True)
-        self._import_tick_dir_btn.setText("📁 資料夾")
-        if err:
-            self._status_lbl.setText(f"❌ 匯入失敗：{err}")
-            self._tick_lbl.setText("❌ 匯入失敗")
-        elif count:
-            ti = tick_cache.info(self._symbol)
-            self._rebuild_tick_dataset_combo()
-            self._refresh_tick_label()
-            self._rebuild_range_combo()
-            self._status_lbl.setText(
-                f"✓ 資料夾匯入完成，快取共 {count:,} 筆"
-                + (f" ({ti['size_mb']:.1f} MB)" if ti else "")
-            )
-        else:
-            self._status_lbl.setText("⚠ 匯入完成，但未解析到任何資料（請確認檔案格式）")
-            self._tick_lbl.setText("⚠ 無資料")
-
-    def _on_clear_tick_cache(self) -> None:
-        """「🗑」按鈕：刪除本機 tick 快取檔案以釋放磁碟空間。"""
-        ti = tick_cache.info(self._symbol)
-        if not ti:
-            self._status_lbl.setText("⚠ 目前無 Tick 快取，無需清除")
-            return
-        size_mb = ti["size_mb"]
-        count   = ti["count"]
-        reply = QMessageBox.question(
-            self,
-            "刪除 Tick 快取",
-            f"確定要刪除 {self._symbol} 的 Tick 快取？\n"
-            f"共 {count:,} 筆，占用 {size_mb:.1f} MB\n\n"
-            f"刪除後將無法還原，請確認。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        path = tick_cache.cache_path(self._symbol)
-        try:
-            path.unlink(missing_ok=True)
-            self._refresh_tick_label()
-            self._rebuild_range_combo()
-            self._status_lbl.setText(f"✓ Tick 快取已刪除（釋放 {size_mb:.1f} MB）")
-        except Exception as exc:
-            self._status_lbl.setText(f"❌ 刪除失敗：{exc}")
-
-    def _refresh_cache_label(self) -> None:
-        """更新工具列快取資訊 label（切換幣對/interval 時呼叫）。"""
-        info = kline_cache.info(self._symbol, self._interval)
-        if info:
-            self._cache_lbl.setText(f"📁 {info['count']:,}根 {info['size_mb']:.0f}MB")
-        else:
-            self._cache_lbl.setText("")
-
     # ─────────────────────────────────────────────────────────────────────────
+
+    def _on_jump_to_time(self) -> None:
+        """跳轉到指定時間的 K 棒。若目標時間早於已載入資料則先載入更多歷史。"""
+        dt = self._jump_dt_edit.dateTime()
+        ts_ms = dt.toMSecsSinceEpoch()
+
+        if not self._loaded_klines:
+            return
+
+        oldest_ms = self._loaded_klines[0].open_time
+        newest_ms = self._loaded_klines[-1].close_time
+
+        if ts_ms > newest_ms:
+            # 未來時間，跳到最新
+            self._kline_chart.scroll_to_time(newest_ms)
+            return
+
+        if oldest_ms <= ts_ms <= newest_ms:
+            self._kline_chart.scroll_to_time(ts_ms)
+            self._jump_target_ms = None
+        else:
+            # 需要載入更早的歷史資料
+            self._jump_target_ms = ts_ms
+            self._status_lbl.setText("跳轉：載入歷史中…")
+            if self._ws_thread:
+                self._ws_thread.request_more_history(oldest_ms)
 
     def _on_realtime_toggled(self, checked: bool) -> None:
         """⚡ 即時按鈕 toggle：開啟後每根收盤 K 棒自動標注。"""
@@ -2418,11 +1559,6 @@ class MainWindow(QMainWindow):
         self._strategy_stats_lbl.setVisible(False)
         self._strategy_stats_lbl.setText("")
 
-    def _on_open_bt_config(self) -> None:
-        """開啟回測參數設定子頁面。"""
-        self._bt_config_dlg.show()
-        self._bt_config_dlg.raise_()
-        self._bt_config_dlg.activateWindow()
 
     def _update_strategy_stats(self) -> None:
         """根據目前 _strategy_signals 計算並顯示統計 label。"""

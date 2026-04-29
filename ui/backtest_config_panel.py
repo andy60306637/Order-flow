@@ -1,15 +1,19 @@
-"""左側回測設定面板：策略選取 + 時間切片 + 回測參數。"""
+"""左側回測設定面板：策略選取 + 時間切片 + 回測參數 + Tick 管理。"""
 from __future__ import annotations
 
-from PyQt6.QtCore import pyqtSignal
+from pathlib import Path
+
+from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -23,6 +27,38 @@ from core import tick_cache
 from strategies import STRATEGY_REGISTRY
 from ui.time_slice_widget import TimeSliceWidget, discover_tick_sources
 from utils.ui_settings import ui_settings
+
+
+class TickImportThread(QThread):
+    """將 data.binance.vision aggTrades CSV/ZIP 檔案匯入到本機 tick 快取。"""
+    progress_signal = pyqtSignal(str)
+    done_signal     = pyqtSignal(int, str)  # (total_count, error_message)
+
+    def __init__(self, symbol: str, paths: list, parent=None) -> None:
+        super().__init__(parent)
+        self._symbol = symbol
+        self._paths  = paths
+
+    def run(self) -> None:
+        from core import tick_cache as _tc
+        total = 0
+        for idx, raw_path in enumerate(self._paths, 1):
+            p = Path(raw_path)
+            self.progress_signal.emit(f"匯入 {p.name}… ({idx}/{len(self._paths)})")
+            try:
+                if p.suffix.lower() == ".zip":
+                    arr = _tc.from_zip_file(p)
+                else:
+                    arr = _tc.from_csv_file(p)
+                if len(arr) == 0:
+                    continue
+                st = int(arr[:, 0].min())
+                et = int(arr[:, 0].max())
+                total = _tc.merge_and_save_array(self._symbol, arr, st, et)
+            except Exception as exc:
+                self.done_signal.emit(0, f"{p.name}: {exc}")
+                return
+        self.done_signal.emit(total, "")
 
 
 class BacktestConfigPanel(QWidget):
@@ -143,6 +179,50 @@ class BacktestConfigPanel(QWidget):
 
         layout.addWidget(bt_box)
 
+        # ── Tick 快取管理 ──────────────────────────────────────────────────────
+        tick_box = QGroupBox("Tick Cache")
+        tick_layout = QVBoxLayout(tick_box)
+        tick_layout.setSpacing(4)
+
+        self._tick_status_lbl = QLabel("─")
+        self._tick_status_lbl.setStyleSheet("color:#80cbc4; font-size:11px;")
+        self._tick_status_lbl.setWordWrap(True)
+        tick_layout.addWidget(self._tick_status_lbl)
+
+        _btn_style = (
+            "QPushButton { background:#1e222d; color:#d1d4dc; border:1px solid #2a2e39;"
+            " border-radius:3px; padding:2px 8px; }"
+            "QPushButton:hover { background:#2a2e39; }"
+            "QPushButton:disabled { color:#555; }"
+        )
+        btn_row_tick = QHBoxLayout()
+        self._import_tick_btn = QPushButton("📂 匯入 Tick")
+        self._import_tick_btn.setToolTip(
+            "匯入從 data.binance.vision 下載的 aggTrades CSV/ZIP\n"
+            "可 Ctrl+點選多個檔案同時匯入"
+        )
+        self._import_tick_btn.setStyleSheet(_btn_style)
+        self._import_tick_btn.clicked.connect(self._on_import_ticks)
+        btn_row_tick.addWidget(self._import_tick_btn)
+
+        self._import_tick_dir_btn = QPushButton("📁 資料夾")
+        self._import_tick_dir_btn.setToolTip("選取資料夾，自動匯入其中所有 aggTrades CSV/ZIP")
+        self._import_tick_dir_btn.setStyleSheet(_btn_style)
+        self._import_tick_dir_btn.clicked.connect(self._on_import_ticks_folder)
+        btn_row_tick.addWidget(self._import_tick_dir_btn)
+
+        self._clear_tick_btn = QPushButton("🗑 清除")
+        self._clear_tick_btn.setToolTip("刪除本機 Tick 快取檔案以釋放磁碟空間")
+        self._clear_tick_btn.setStyleSheet(_btn_style)
+        self._clear_tick_btn.clicked.connect(self._on_clear_tick_cache)
+        btn_row_tick.addWidget(self._clear_tick_btn)
+
+        tick_layout.addLayout(btn_row_tick)
+        layout.addWidget(tick_box)
+
+        self._tick_import_thread: TickImportThread | None = None
+        self._refresh_tick_status()
+
         # ── 執行按鈕 ──────────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
         self._run_btn = QPushButton("▶ Run Backtest")
@@ -212,6 +292,7 @@ class BacktestConfigPanel(QWidget):
 
     def _on_symbol_changed(self, symbol: str) -> None:
         self._rebuild_tick_dataset_combo(symbol)
+        self._refresh_tick_status()
 
     def _on_tick_dataset_changed(self, _label: str) -> None:
         # The month selector is aggregated by base symbol, not by this fallback tick dataset.
@@ -304,3 +385,79 @@ class BacktestConfigPanel(QWidget):
 
     def _on_cancel(self) -> None:
         self.cancel_requested.emit()
+
+    # ── Tick 快取管理 ─────────────────────────────────────────────────────────
+
+    def _refresh_tick_status(self) -> None:
+        symbol = self.symbol()
+        sources = discover_tick_sources(symbol)
+        if not sources:
+            self._tick_status_lbl.setText("無 Tick 快取")
+            return
+        text = self._tick_coverage_text(sources)
+        self._tick_status_lbl.setText(text)
+
+    def _on_import_ticks(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "選擇 aggTrades CSV/ZIP", "",
+            "Tick Data (*.csv *.zip);;All Files (*)"
+        )
+        if not paths:
+            return
+        self._start_tick_import(paths)
+
+    def _on_import_ticks_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "選擇 Tick 資料夾")
+        if not folder:
+            return
+        folder_path = Path(folder)
+        paths = [str(p) for p in sorted(folder_path.glob("*.csv")) + sorted(folder_path.glob("*.zip"))]
+        if not paths:
+            QMessageBox.information(self, "無檔案", f"資料夾中未找到任何 CSV/ZIP 檔案")
+            return
+        self._start_tick_import(paths)
+
+    def _start_tick_import(self, paths: list) -> None:
+        if self._tick_import_thread and self._tick_import_thread.isRunning():
+            self._tick_import_thread.wait(500)
+        self._import_tick_btn.setEnabled(False)
+        self._import_tick_dir_btn.setEnabled(False)
+        self._tick_status_lbl.setText("🔄 匯入中…")
+        self._tick_import_thread = TickImportThread(self.symbol(), paths, parent=self)
+        self._tick_import_thread.progress_signal.connect(
+            lambda msg: self._tick_status_lbl.setText(msg)
+        )
+        self._tick_import_thread.done_signal.connect(self._on_tick_import_done)
+        self._tick_import_thread.start()
+
+    def _on_tick_import_done(self, count: int, err: str) -> None:
+        self._import_tick_btn.setEnabled(True)
+        self._import_tick_dir_btn.setEnabled(True)
+        if err:
+            self._tick_status_lbl.setText(f"❌ {err}")
+        elif count:
+            self._refresh_tick_status()
+            self._rebuild_tick_dataset_combo(self.symbol())
+        else:
+            self._tick_status_lbl.setText("⚠ 無資料")
+
+    def _on_clear_tick_cache(self) -> None:
+        symbol = self.symbol()
+        from core.tick_cache import cache_path
+        path = cache_path(symbol)
+        if not path.exists():
+            self._tick_status_lbl.setText("無快取可清除")
+            return
+        size_mb = path.stat().st_size / 1024 / 1024
+        reply = QMessageBox.question(
+            self, "確認刪除",
+            f"確定刪除 {symbol} 的 Tick 快取？（{size_mb:.1f} MB）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            path.unlink(missing_ok=True)
+            self._refresh_tick_status()
+        except Exception as exc:
+            self._tick_status_lbl.setText(f"❌ 刪除失敗：{exc}")

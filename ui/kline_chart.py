@@ -366,6 +366,26 @@ class KlineChart(pg.PlotWidget):
         # 將視圖右移 m 格，保持使用者正在看的位置不變
         pi.setXRange(vr[0] + m, vr[1] + m, padding=0)
 
+    # ── 時間跳轉 ──────────────────────────────────────────────────────────────
+    def scroll_to_time(self, ts_ms: int, window: int = 80) -> None:
+        """將視圖移到包含 ts_ms 的 K 棒，置中顯示 window 根蠟燭。"""
+        if not self._klines:
+            return
+        lo, hi = 0, len(self._klines) - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            k = self._klines[mid]
+            if k.open_time <= ts_ms <= k.close_time:
+                lo = mid
+                break
+            if ts_ms < k.open_time:
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        idx = max(0, min(lo, len(self._klines) - 1))
+        half = window // 2
+        self.getPlotItem().setXRange(max(0, idx - half), idx + half, padding=0.05)
+
     # ── 策略標記 API ──────────────────────────────────────────────────────────
     def get_open_time_index_map(self) -> Dict[int, int]:
         """
