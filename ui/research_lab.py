@@ -35,6 +35,102 @@ from ui.time_slice_widget import TimeSliceWidget
 from utils.ui_settings import ui_settings
 
 
+import pyqtgraph as pg
+import numpy as np
+from datetime import datetime, timezone
+
+class FactorPerformanceChart(QWidget):
+    """Time-series chart for factor Rank IC."""
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self._glw = pg.GraphicsLayoutWidget()
+        self._glw.setBackground("#131722")
+        layout.addWidget(self._glw)
+        
+        self._plot = self._glw.addPlot()
+        self._plot.setLabel("left", "Oriented Rank IC (Rolling)", color="#d1d4dc")
+        self._plot.getAxis("left").setTextPen("#d1d4dc")
+        self._plot.getAxis("bottom").setTextPen("#787b86")
+        self._plot.showGrid(x=True, y=True, alpha=0.15)
+        self._plot.addLegend(offset=(10, 10))
+        
+        # Crosshair
+        self._v_line = pg.InfiniteLine(angle=90, movable=False, pen="#787b86")
+        self._h_line = pg.InfiniteLine(angle=0, movable=False, pen="#787b86")
+        self._plot.addItem(self._v_line, ignoreBounds=True)
+        self._plot.addItem(self._h_line, ignoreBounds=True)
+        
+        self._proxy = pg.SignalProxy(self._plot.scene().sigMouseMoved, rateLimit=60, slot=self._mouse_moved)
+        self._lines = {}
+        self._data = {} # {name: (x, y)}
+        self._timestamps = []
+        
+        self._hover_label = pg.TextItem(anchor=(0, 0), color="#d1d4dc")
+        self._plot.addItem(self._hover_label, ignoreBounds=True)
+
+    def set_data(self, ts_data: dict) -> None:
+        self.clear()
+        if not ts_data:
+            return
+            
+        self._timestamps = ts_data.get("timestamps", [])
+        if not self._timestamps:
+            return
+            
+        x = np.array(self._timestamps) / 1000.0 # Convert to seconds for Axis
+        self._plot.setAxisItems({'bottom': pg.DateAxisItem()})
+        
+        colors = ["#26a69a", "#ef5350", "#2196f3", "#ff9800", "#9c27b0", "#e91e63", "#4caf50", "#ffeb3b"]
+        
+        factors = ts_data.get("factors", {})
+        for i, (name, y_list) in enumerate(factors.items()):
+            if not y_list:
+                continue
+            y = np.array(y_list)
+            color = colors[i % len(colors)]
+            line = self._plot.plot(x, y, pen=pg.mkPen(color, width=1.5), name=name)
+            self._lines[name] = line
+            self._data[name] = (x, y)
+
+    def _mouse_moved(self, evt):
+        pos = evt[0]
+        if self._plot.sceneBoundingRect().contains(pos):
+            mouse_point = self._plot.vb.mapSceneToView(pos)
+            self._v_line.setPos(mouse_point.x())
+            self._h_line.setPos(mouse_point.y())
+            
+            # Find nearest timestamp
+            if not self._timestamps:
+                return
+            
+            x_val = mouse_point.x()
+            vx_arr = np.array(self._timestamps)/1000.0
+            idx = np.searchsorted(vx_arr, x_val)
+            if idx >= len(self._timestamps):
+                idx = len(self._timestamps) - 1
+            
+            ts = self._timestamps[idx]
+            dt_str = datetime.fromtimestamp(ts/1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+            
+            text = f"Time: {dt_str}\n"
+            for name, (vx, vy) in self._data.items():
+                if idx < len(vy):
+                    val = vy[idx]
+                    text += f"{name}: {val:.4f}\n"
+            
+            self._hover_label.setHtml(f'<div style="background-color: #1e222d; padding: 5px; border: 1px solid #363c4e;">{text}</div>')
+            self._hover_label.setPos(mouse_point.x(), mouse_point.y())
+
+    def clear(self) -> None:
+        for line in self._lines.values():
+            self._plot.removeItem(line)
+        self._lines = {}
+        self._data = {}
+        self._timestamps = []
+
 class ResearchWorkerThread(QThread):
     result_ready = pyqtSignal(dict)
     error = pyqtSignal(str)
@@ -151,12 +247,15 @@ class ResearchLab(QWidget):
 
         button_row = QHBoxLayout()
         self._run_btn = QPushButton("Run Research")
-        self._export_btn = QPushButton("Export")
+        self._export_btn = QPushButton("Export Package")
+        self._import_btn = QPushButton("Import")
         self._export_btn.setEnabled(False)
         self._run_btn.clicked.connect(self._on_run)
         self._export_btn.clicked.connect(self._on_export)
+        self._import_btn.clicked.connect(self._on_import)
         button_row.addWidget(self._run_btn)
         button_row.addWidget(self._export_btn)
+        button_row.addWidget(self._import_btn)
         controls_layout.addLayout(button_row)
 
         self._status = QLabel("")
@@ -167,6 +266,8 @@ class ResearchLab(QWidget):
 
         self._tabs = QTabWidget()
         self._summary_table = QTableWidget()
+        self._ortho_table = QTableWidget()
+        self._ts_chart = FactorPerformanceChart()
         self._metrics_table = QTableWidget()
         self._quantile_table = QTableWidget()
         self._monthly_table = QTableWidget()
@@ -174,6 +275,8 @@ class ResearchLab(QWidget):
         self._correlation_table = QTableWidget()
         self._unavailable_table = QTableWidget()
         self._tabs.addTab(self._summary_table, "Factor Ranking")
+        self._tabs.addTab(self._ortho_table, "Orthogonal Ranking")
+        self._tabs.addTab(self._ts_chart, "IC Time Series")
         self._tabs.addTab(self._metrics_table, "IC by Horizon")
         self._tabs.addTab(self._quantile_table, "Quantiles")
         self._tabs.addTab(self._monthly_table, "Monthly Stability")
@@ -329,6 +432,8 @@ class ResearchLab(QWidget):
     def _on_result_ready(self, result: dict) -> None:
         self._last_result = result
         self._fill_table(self._summary_table, result.get("summary", []))
+        self._fill_table(self._ortho_table, result.get("orthogonal_summary", []))
+        self._ts_chart.set_data(result.get("timeseries_ic", {}))
         self._fill_table(self._metrics_table, result.get("metrics", []))
         self._fill_table(self._quantile_table, result.get("quantiles", []))
         self._fill_table(self._monthly_table, result.get("stability_monthly", []))
@@ -367,31 +472,72 @@ class ResearchLab(QWidget):
     def _on_export(self) -> None:
         if not self._last_result:
             return
+        
+        symbol = self._symbol_combo.currentText()
+        interval = self._interval_combo.currentText()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_dir_name = f"{symbol}_{interval}_{timestamp}"
+        
+        base_report_dir = Path("docs/reports/factor_analysis")
+        base_report_dir.mkdir(parents=True, exist_ok=True)
+        
+        suggested_path = base_report_dir / default_dir_name / "full_result.json"
+        suggested_path.parent.mkdir(parents=True, exist_ok=True)
+        
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Research Result",
-            "research_result.json",
-            "JSON Files (*.json);;CSV Directory Marker (*.csv)",
+            "Save Research Package (as full_result.json)",
+            str(suggested_path),
+            "JSON Files (full_result.json)",
         )
         if not path:
             return
-        if path.lower().endswith(".csv"):
-            self._export_csv_bundle(Path(path))
-        else:
-            Path(path).write_text(json.dumps(self._last_result, indent=2), encoding="utf-8")
-
-    def _export_csv_bundle(self, marker_path: Path) -> None:
-        assert self._last_result is not None
-        out_dir = marker_path.with_suffix("")
-        out_dir.mkdir(parents=True, exist_ok=True)
+            
+        target_json = Path(path)
+        target_dir = target_json.parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save JSON (contains all data including timeseries_ic and orthogonal_summary)
+        target_json.write_text(json.dumps(self._last_result, indent=2), encoding="utf-8")
+        
+        # Save CSV Bundle in the same directory
         for key, rows in self._last_result.items():
+            if key == "timeseries_ic":
+                continue # Skip timeseries in CSV bundle, or format differently if needed
             if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
                 continue
-            csv_path = out_dir / f"{key}.csv"
+            csv_path = target_dir / f"{key}.csv"
             with csv_path.open("w", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
                 writer.writeheader()
                 writer.writerows(rows)
+        
+        self._status.setText(f"Package saved to {target_dir}")
+        QMessageBox.information(self, "Export Successful", f"Research package saved to:\n{target_dir}")
+
+    def _on_import(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Research Result",
+            str(Path("docs/reports/factor_analysis")),
+            "JSON Files (*.json)",
+        )
+        if not path:
+            return
+            
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                result = json.load(f)
+            
+            # Simple validation
+            if "summary" not in result or "metrics" not in result:
+                raise ValueError("Invalid research result file (missing summary or metrics)")
+                
+            self._on_result_ready(result)
+            self._status.setText(f"Imported: {Path(path).parent.name}")
+            QMessageBox.information(self, "Import Successful", f"Successfully imported research results from:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", f"Failed to import results: {str(e)}")
 
     def _save_config(self) -> None:
         if not self._restore_done:

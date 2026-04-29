@@ -47,6 +47,9 @@ class ResearchResult:
     factor_correlations: list[dict[str, Any]]
     unavailable: list[dict[str, str]]
     rows: int
+    # New fields
+    timeseries_ic: dict[str, Any] = field(default_factory=dict)
+    orthogonal_summary: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +61,8 @@ class ResearchResult:
             "factor_correlations": self.factor_correlations,
             "unavailable": self.unavailable,
             "rows": self.rows,
+            "timeseries_ic": self.timeseries_ic,
+            "orthogonal_summary": self.orthogonal_summary,
         }
 
 
@@ -139,6 +144,8 @@ def analyze_factors(
     unavailable: list[dict[str, str]] = []
     factor_values: dict[str, np.ndarray] = {}
     factor_orientations: dict[str, int] = {}
+    factor_groups: dict[str, str] = {}
+    factor_sides: dict[str, tuple[str, ...]] = {}
 
     for name in factor_names:
         factor = get_factor(name)
@@ -153,6 +160,9 @@ def analyze_factors(
         factor_values[name] = values
         orientation = _factor_orientation(factor.sides)
         factor_orientations[name] = orientation
+        factor_groups[name] = factor.group
+        factor_sides[name] = factor.sides
+        
         factor_metrics: list[dict[str, Any]] = []
         for horizon, returns in fwd.items():
             period_ic = _per_period_ic(
@@ -167,6 +177,7 @@ def analyze_factors(
             qrows.extend(_quantile_rows_out_of_sample(name, horizon, values, returns, quantiles, orientation, train_ratio))
             monthly.extend(_stability_rows(name, horizon, values, returns, open_times, "month", quantiles, min_period_samples))
             yearly.extend(_stability_rows(name, horizon, values, returns, open_times, "year", quantiles, min_period_samples))
+        
         summary.append(_summary_row(
             name,
             factor.requires_ticks,
@@ -175,6 +186,12 @@ def analyze_factors(
             orientation,
             factor_metrics,
         ))
+
+    # --- Time-series IC ---
+    ts_ic = _calculate_timeseries_ic(factor_values, fwd, open_times, factor_orientations)
+
+    # --- Orthogonalization ---
+    ortho_summary = _orthogonalize_factors(factor_values, fwd, factor_orientations)
 
     correlations = _factor_correlations(factor_values)
     summary.sort(key=lambda r: float(r.get("oriented_rank_ic", 0.0)), reverse=True)
@@ -187,7 +204,108 @@ def analyze_factors(
         factor_correlations=correlations,
         unavailable=unavailable,
         rows=len(klines),
+        timeseries_ic=ts_ic,
+        orthogonal_summary=ortho_summary,
     )
+
+
+def _calculate_timeseries_ic(
+    factor_values: dict[str, np.ndarray],
+    fwd_returns: dict[int, np.ndarray],
+    open_times: np.ndarray,
+    orientations: dict[str, int],
+) -> dict[str, Any]:
+    """Calculate stepped rolling Rank IC for each factor."""
+    if not factor_values or not fwd_returns:
+        return {}
+    
+    # Use best horizon for simplicity in chart
+    best_horizon = min(fwd_returns.keys())
+    returns = fwd_returns[best_horizon]
+    
+    n = len(open_times)
+    # Step size to reduce number of points on chart (e.g. 100 bars)
+    step = max(1, n // 200) 
+    indices = np.arange(0, n, step)
+    
+    # Window for rolling IC (e.g. 10% of total data or at least 100 bars)
+    window = max(100, n // 10)
+    
+    ts_data = {
+        "timestamps": open_times[indices].tolist(),
+        "factors": {},
+        "horizon": best_horizon
+    }
+
+    for name, values in factor_values.items():
+        orientation = orientations.get(name, 0)
+        ic_series = []
+        for idx in indices:
+            start = max(0, idx - window)
+            end = idx + 1
+            v_win = values[start:end]
+            r_win = returns[start:end]
+            mask = _valid_mask(v_win, r_win)
+            if mask.sum() < 20:
+                ic_series.append(0.0)
+                continue
+            
+            ic = _corr(_rank(v_win[mask]), _rank(r_win[mask]))
+            ic_series.append(_orient(ic, orientation))
+        
+        ts_data["factors"][name] = ic_series
+
+    return ts_data
+
+
+def _orthogonalize_factors(
+    factor_values: dict[str, np.ndarray],
+    fwd_returns: dict[int, np.ndarray],
+    orientations: dict[str, int],
+) -> list[dict[str, Any]]:
+    """Gram-Schmidt orthogonalization based on factor correlations."""
+    names = list(factor_values.keys())
+    if not names:
+        return []
+    
+    # We only orthogonalize factors that have values
+    mat = []
+    valid_names = []
+    for name in names:
+        v = factor_values[name]
+        # Fill NaNs with mean to allow matrix ops
+        v_clean = v.copy()
+        v_clean[np.isnan(v_clean)] = np.nanmean(v_clean) if not np.all(np.isnan(v_clean)) else 0.0
+        mat.append(v_clean)
+        valid_names.append(name)
+    
+    if not mat:
+        return []
+    
+    X = np.column_stack(mat)
+    # Orthogonalize X
+    Q, R = np.linalg.qr(X)
+    
+    ortho_summary = []
+    # Evaluate each orthogonalized column against returns
+    best_h = min(fwd_returns.keys()) if fwd_returns else 1
+    returns = fwd_returns[best_h]
+    
+    for i, name in enumerate(valid_names):
+        ortho_v = Q[:, i]
+        mask = _valid_mask(ortho_v, returns)
+        if not mask.any():
+            continue
+            
+        rank_ic = _corr(_rank(ortho_v[mask]), _rank(returns[mask]))
+        ortho_summary.append({
+            "factor": name,
+            "horizon": best_h,
+            "rank_ic": rank_ic,
+            "oriented_rank_ic": _orient(rank_ic, orientations.get(name, 0)),
+        })
+    
+    return ortho_summary
 
 
 def _factor_orientation(sides: tuple[str, ...]) -> int:
