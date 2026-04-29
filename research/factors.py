@@ -71,167 +71,203 @@ def _tick_metric(
 
 
 @register_factor
-class Return1Factor(FactorBase):
-    name = "return_1"
-    sides = FACTOR_SIDES
-    group = GROUP_MOMENTUM
-
-    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
-        close = klines_to_arrays(klines)["close"]
-        out = np.full(close.shape, np.nan, dtype=np.float64)
-        if len(close) > 1:
-            out[1:] = safe_divide(close[1:] - close[:-1], close[:-1])
-        return out
-
-
-@register_factor
-class RangePctFactor(FactorBase):
-    name = "range_pct"
-    sides = FACTOR_SIDES
-    group = GROUP_VOLATILITY
-
-    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
-        arr = klines_to_arrays(klines)
-        return safe_divide(arr["high"] - arr["low"], arr["close"])
-
-
-@register_factor
-class BodyPctFactor(FactorBase):
-    name = "body_pct"
-    sides = FACTOR_SIDES
-    group = GROUP_REGIME
-
-    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
-        arr = klines_to_arrays(klines)
-        return safe_divide(np.abs(arr["close"] - arr["open"]), arr["high"] - arr["low"])
-
-
-@register_factor
-class UpperWickRatioFactor(FactorBase):
-    name = "upper_wick_ratio"
-    sides = (FACTOR_SIDE_SHORT,)
-    group = GROUP_MEAN_REVERSION
-
-    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
-        arr = klines_to_arrays(klines)
-        body_hi = np.maximum(arr["open"], arr["close"])
-        return safe_divide(arr["high"] - body_hi, arr["high"] - arr["low"])
-
-
-@register_factor
-class LowerWickRatioFactor(FactorBase):
-    name = "lower_wick_ratio"
+class LowerWickBodyRatioFactor(FactorBase):
+    name = "lower_wick_to_body_ratio"
     sides = (FACTOR_SIDE_LONG,)
     group = GROUP_MEAN_REVERSION
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
         body_lo = np.minimum(arr["open"], arr["close"])
-        return safe_divide(body_lo - arr["low"], arr["high"] - arr["low"])
+        body = np.abs(arr["close"] - arr["open"])
+        lower_wick = body_lo - arr["low"]
+        # Use body_floor = max(close * 0.00001, 1e-9) to match strategy
+        body_floor = np.maximum(arr["close"] * 0.00001, 1e-9)
+        denom = np.maximum(body, body_floor)
+        return safe_divide(lower_wick, denom)
 
 
 @register_factor
-class VolumeZscoreFactor(FactorBase):
-    name = "volume_zscore"
-    sides = FACTOR_SIDES
-    group = GROUP_VOLUME
-    window = 20
-
-    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
-        volume = klines_to_arrays(klines)["volume"]
-        mean = _rolling_mean(volume, self.window)
-        std = _rolling_std(volume, self.window)
-        return safe_divide(volume - mean, std)
-
-
-@register_factor
-class AtrRatioFactor(FactorBase):
-    name = "atr_ratio"
-    sides = FACTOR_SIDES
-    group = GROUP_VOLATILITY
-    window = 14
+class UpperWickBodyRatioFactor(FactorBase):
+    name = "upper_wick_to_body_ratio"
+    sides = (FACTOR_SIDE_SHORT,)
+    group = GROUP_MEAN_REVERSION
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
-        atr = _rolling_mean(_true_range(arr), self.window)
-        return safe_divide(atr, arr["close"])
+        body_hi = np.maximum(arr["open"], arr["close"])
+        body = np.abs(arr["close"] - arr["open"])
+        upper_wick = arr["high"] - body_hi
+        # Use body_floor = max(close * 0.00001, 1e-9) to match strategy
+        body_floor = np.maximum(arr["close"] * 0.00001, 1e-9)
+        denom = np.maximum(body, body_floor)
+        return safe_divide(upper_wick, denom)
 
 
 @register_factor
-class DeltaEffFactor(FactorBase):
-    name = "delta_eff"
+class BodyPositionRatioFactor(FactorBase):
+    """
+    Factor 1: Body_Position_Ratio
+    Definition: (body_mid - low) / (high - low)
+    Interpretation: Closer to 1.0 means body is at the top (bullish resistance/strength).
+    """
+    name = "body_position_ratio"
     sides = FACTOR_SIDES
-    group = GROUP_MICROSTRUCTURE
+    group = GROUP_MEAN_REVERSION
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
-        return safe_divide(2.0 * arr["taker_buy_volume"] - arr["volume"], arr["volume"])
+        body_mid = (arr["open"] + arr["close"]) / 2.0
+        range_ = arr["high"] - arr["low"]
+        return safe_divide(body_mid - arr["low"], range_)
 
 
 @register_factor
-class TakerBuyRatioFactor(FactorBase):
-    name = "taker_buy_ratio"
-    sides = FACTOR_SIDES
-    group = GROUP_MICROSTRUCTURE
-
-    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
-        arr = klines_to_arrays(klines)
-        return safe_divide(arr["taker_buy_volume"], arr["volume"])
-
-
-@register_factor
-class TickVolumeRatioFactor(FactorBase):
-    name = "tick_volume_ratio"
-    requires_ticks = True
+class VolumeZScoreFactor(FactorBase):
+    """
+    Factor 3: Volume_Z_Score
+    Definition: (volume - mean(volume, N)) / std(volume, N)
+    """
+    name = "volume_z_score"
     sides = FACTOR_SIDES
     group = GROUP_VOLUME
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
-        return _tick_metric(
-            klines,
-            tick_map,
-            lambda k, ticks: float(np.sum(ticks[:, 2])) / k.volume if k.volume > 0 else np.nan,
-        )
+        arr = klines_to_arrays(klines)
+        vol = arr["volume"]
+        window = 20  # Default window
+        mean = _rolling_mean(vol, window)
+        std = _rolling_std(vol, window)
+        return safe_divide(vol - mean, std)
 
 
 @register_factor
-class WickVolumeRatioFactor(FactorBase):
-    name = "wick_volume_ratio"
+class LowerWickDeltaEffFactor(FactorBase):
+    name = "lower_wick_delta_eff"
     requires_ticks = True
-    sides = FACTOR_SIDES
+    sides = (FACTOR_SIDE_LONG,)
     group = GROUP_MICROSTRUCTURE
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         def calc(k: Kline, ticks: np.ndarray) -> float:
-            total = float(np.sum(ticks[:, 2]))
-            if total <= 0:
-                return np.nan
-            body_hi = max(k.open, k.close)
             body_lo = min(k.open, k.close)
-            wick_ticks = ticks[(ticks[:, 1] >= body_hi) | (ticks[:, 1] <= body_lo)]
-            return float(np.sum(wick_ticks[:, 2])) / total if len(wick_ticks) else 0.0
-
-        return _tick_metric(klines, tick_map, calc)
-
-
-@register_factor
-class WickDeltaEffFactor(FactorBase):
-    name = "wick_delta_eff"
-    requires_ticks = True
-    sides = FACTOR_SIDES
-    group = GROUP_MICROSTRUCTURE
-
-    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
-        def calc(k: Kline, ticks: np.ndarray) -> float:
-            body_hi = max(k.open, k.close)
-            body_lo = min(k.open, k.close)
-            wick_ticks = ticks[(ticks[:, 1] >= body_hi) | (ticks[:, 1] <= body_lo)]
+            wick_ticks = ticks[ticks[:, 1] <= body_lo]
             if len(wick_ticks) == 0:
                 return np.nan
-            wvol = float(np.sum(wick_ticks[:, 2]))
-            if wvol <= 0:
+            wick_vol = float(np.sum(wick_ticks[:, 2]))
+            if wick_vol <= 0:
                 return np.nan
-            wbuy = float(np.sum(wick_ticks[wick_ticks[:, 3] < 0.5, 2]))
-            return (2.0 * wbuy - wvol) / wvol
+            wick_buy_vol = float(np.sum(wick_ticks[wick_ticks[:, 3] < 0.5, 2]))
+            return (2.0 * wick_buy_vol - wick_vol) / wick_vol
 
         return _tick_metric(klines, tick_map, calc)
+
+
+@register_factor
+class UpperWickDeltaEffFactor(FactorBase):
+    name = "upper_wick_delta_eff"
+    requires_ticks = True
+    sides = (FACTOR_SIDE_SHORT,)
+    group = GROUP_MICROSTRUCTURE
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        def calc(k: Kline, ticks: np.ndarray) -> float:
+            body_hi = max(k.open, k.close)
+            wick_ticks = ticks[ticks[:, 1] >= body_hi]
+            if len(wick_ticks) == 0:
+                return np.nan
+            wick_vol = float(np.sum(wick_ticks[:, 2]))
+            if wick_vol <= 0:
+                return np.nan
+            wick_buy_vol = float(np.sum(wick_ticks[wick_ticks[:, 3] < 0.5, 2]))
+            return (2.0 * wick_buy_vol - wick_vol) / wick_vol
+
+        return _tick_metric(klines, tick_map, calc)
+
+
+@register_factor
+class LowerWickVolumeRatioFactor(FactorBase):
+    name = "lower_wick_volume_ratio"
+    requires_ticks = True
+    sides = (FACTOR_SIDE_LONG,)
+    group = GROUP_MICROSTRUCTURE
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        def calc(k: Kline, ticks: np.ndarray) -> float:
+            body_lo = min(k.open, k.close)
+            wick_ticks = ticks[ticks[:, 1] <= body_lo]
+            if len(wick_ticks) == 0:
+                return np.nan
+            wick_vol = float(np.sum(wick_ticks[:, 2]))
+            total_vol = float(np.sum(ticks[:, 2]))
+            if total_vol <= 0:
+                return np.nan
+            return wick_vol / total_vol
+
+        return _tick_metric(klines, tick_map, calc)
+
+
+@register_factor
+class UpperWickVolumeRatioFactor(FactorBase):
+    name = "upper_wick_volume_ratio"
+    requires_ticks = True
+    sides = (FACTOR_SIDE_SHORT,)
+    group = GROUP_MICROSTRUCTURE
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        def calc(k: Kline, ticks: np.ndarray) -> float:
+            body_hi = max(k.open, k.close)
+            wick_ticks = ticks[ticks[:, 1] >= body_hi]
+            if len(wick_ticks) == 0:
+                return np.nan
+            wick_vol = float(np.sum(wick_ticks[:, 2]))
+            total_vol = float(np.sum(ticks[:, 2]))
+            if total_vol <= 0:
+                return np.nan
+            return wick_vol / total_vol
+
+        return _tick_metric(klines, tick_map, calc)
+
+
+@register_factor
+class BreakoutCumDeltaEffFactor(FactorBase):
+    """
+    Factor 6: Breakout_Cum_Delta_Eff
+    Simplification: Returns kline delta efficiency if it's a potential breakout bar.
+    """
+    name = "breakout_cum_delta_eff"
+    sides = FACTOR_SIDES
+    group = GROUP_MOMENTUM
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        delta = 2.0 * arr["taker_buy_volume"] - arr["volume"]
+        return safe_divide(delta, arr["volume"])
+
+
+@register_factor
+class FrictionCoverRatioFactor(FactorBase):
+    """
+    Factor 7: Friction_Cover_Ratio
+    Definition: (Expected Profit) / (Friction Cost)
+    Potential Profit = ATR * 2 (as a proxy for RR window)
+    Friction Cost = Price * 2 * (fee + slippage)
+    """
+    name = "friction_cover_ratio"
+    sides = FACTOR_SIDES
+    group = GROUP_REGIME
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        tr = _true_range(arr)
+        atr = _rolling_mean(tr, 14)
+
+        # Approximate risk/reward window based on ATR
+        potential_profit = atr * 2.0
+
+        # Friction: taker fee (0.032%) + slippage (0.002%)
+        fee_rate = 0.00032
+        slippage_rate = 0.00002
+        friction_cost = arr["close"] * 2.0 * (fee_rate + slippage_rate)
+
+        return safe_divide(potential_profit, friction_cost)

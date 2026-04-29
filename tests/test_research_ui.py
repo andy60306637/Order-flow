@@ -34,8 +34,8 @@ class ResearchLabUiTests(unittest.TestCase):
             item = widget._factor_list.item(i)
             hidden[str(item.data(Qt.ItemDataRole.UserRole))] = item.isHidden()
 
-        self.assertFalse(hidden["lower_wick_ratio"])
-        self.assertTrue(hidden["upper_wick_ratio"])
+        self.assertFalse(hidden["lower_wick_to_body_ratio"])
+        self.assertTrue(hidden["upper_wick_to_body_ratio"])
 
 
 if __name__ == "__main__":
