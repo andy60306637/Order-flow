@@ -8,6 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.data_paths import set_data_root_override
 from core.tick_cache import load_raw, save_shards, shard_dir, shard_manifest_path
 
 
@@ -20,7 +21,13 @@ def main() -> None:
         "--overwrite", action="store_true",
         help="overwrite existing shard files for this symbol",
     )
+    parser.add_argument(
+        "--data-root",
+        default=None,
+        help="override ORDERFLOW_DATA_ROOT for cache reads/writes in this process",
+    )
     args = parser.parse_args()
+    set_data_root_override(args.data_root)
 
     symbol = args.symbol.upper()
     ticks, meta = load_raw(symbol)

@@ -39,7 +39,7 @@ from core.cvd_calculator import CvdCalculator
 from core.footprint_builder import FootprintBuilder
 from core.ws_client import WsWorkerThread
 from core.history_processor import HistoryProcessorThread
-from core import kline_cache
+from core import data_paths, kline_cache, tick_cache
 from utils.ui_settings import ui_settings
 from strategies import STRATEGY_REGISTRY
 from strategies.base import StrategyBase, StrategySignal
@@ -930,6 +930,24 @@ class MainWindow(QMainWindow):
         self._status_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
         ctrl.addWidget(self._status_lbl)
 
+        _l = QLabel("Data")
+        _l.setStyleSheet(_lbl_style)
+        ctrl.addWidget(_l)
+
+        self._data_root_lbl = QLabel()
+        self._data_root_lbl.setStyleSheet("color:#80cbc4; font-size:11px;")
+        self._data_root_lbl.setMinimumWidth(130)
+        ctrl.addWidget(self._data_root_lbl)
+
+        self._data_root_btn = QPushButton("...")
+        self._data_root_btn.setFixedWidth(28)
+        self._data_root_btn.setToolTip("Select OrderFlow data root")
+        self._data_root_btn.setStyleSheet(_btn_style)
+        self._data_root_btn.clicked.connect(self._on_choose_data_root)
+        ctrl.addWidget(self._data_root_btn)
+
+        self._refresh_data_root_status()
+
         self._price_lbl = QLabel("─")
         self._price_lbl.setStyleSheet(
             "color: #d1d4dc; font-size: 13px; font-weight: bold; padding-left: 10px;"
@@ -1064,6 +1082,33 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════
     # WebSocket 管理
     # ══════════════════════════════════════════════════════════════
+
+    def _refresh_data_root_status(self) -> None:
+        root = data_paths.data_root()
+        ok, message = data_paths.validate_data_root()
+        self._data_root_lbl.setText(root.name or str(root))
+        self._data_root_lbl.setToolTip(f"{root}\n{message}")
+        self._data_root_lbl.setStyleSheet(
+            "color:#80cbc4; font-size:11px;" if ok else "color:#f0c040; font-size:11px;"
+        )
+
+    def _on_choose_data_root(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select OrderFlow data root",
+            str(data_paths.data_root()),
+        )
+        if not folder:
+            return
+        root = data_paths.ensure_data_root_layout(folder)
+        data_paths.set_data_root_override(root)
+        ui_settings.set("data_root", str(root))
+        self._refresh_data_root_status()
+        if hasattr(self, "_backtest_dashboard"):
+            refresh = getattr(self._backtest_dashboard, "refresh_data_root", None)
+            if callable(refresh):
+                refresh()
+        self._status_lbl.setText(f"Data root: {root}")
 
     def _start_stream(self) -> None:
         # 停止舊執行緒

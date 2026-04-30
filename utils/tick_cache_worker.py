@@ -67,6 +67,7 @@ from core.tick_cache import (
     load_raw,
     merge_and_save_array,
 )
+from core.data_paths import set_data_root_override, tick_cache_dir
 
 # ── pandas 可選依賴 ─────────────────────────────────────────────────────────
 try:
@@ -76,7 +77,6 @@ except ImportError:
     _HAS_PANDAS = False
 
 # ── 常數 ────────────────────────────────────────────────────────────────────
-_CACHE_DIR = PROJECT_ROOT / "data" / "ticks"
 _LOG_DIR   = PROJECT_ROOT / "logs"
 
 # ── 全域 shutdown 旗標 ───────────────────────────────────────────────────────
@@ -108,8 +108,9 @@ def _setup_logging(log_file: Optional[Path] = None) -> logging.Logger:
 # ── Manifest ────────────────────────────────────────────────────────────────
 
 def _manifest_path(symbol: str) -> Path:
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return _CACHE_DIR / f"{symbol.upper()}_manifest.json"
+    cache_dir = tick_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{symbol.upper()}_manifest.json"
 
 
 def _load_manifest(symbol: str) -> dict:
@@ -344,7 +345,13 @@ def main() -> None:
         "--log-file", default=None,
         help="write logs to this file in addition to stdout",
     )
+    ap.add_argument(
+        "--data-root",
+        default=None,
+        help="override ORDERFLOW_DATA_ROOT for cache reads/writes in this process",
+    )
     args = ap.parse_args()
+    set_data_root_override(args.data_root)
 
     log_file = Path(args.log_file) if args.log_file else None
     log = _setup_logging(log_file)

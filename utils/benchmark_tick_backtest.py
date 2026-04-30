@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backtest.engine import BacktestConfig, simulate_trades
 from core import kline_cache
+from core.data_paths import set_data_root_override
 from core.tick_cache import (
     build_bar_map,
     build_tick_slice_accessor,
@@ -267,7 +268,13 @@ def main() -> None:
     parser.add_argument("--funding-rate", type=float, default=0.0)
     parser.add_argument("--maint-margin", type=float, default=0.005)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--data-root",
+        default=None,
+        help="override ORDERFLOW_DATA_ROOT for cache reads/writes in this process",
+    )
     args = parser.parse_args()
+    set_data_root_override(args.data_root)
 
     days_list = [int(x.strip()) for x in args.days.split(",") if x.strip()]
     access_modes = ["map", "range"] if args.tick_access == "both" else [args.tick_access]

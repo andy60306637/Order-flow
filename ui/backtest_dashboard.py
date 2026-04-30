@@ -385,6 +385,11 @@ class BacktestDashboard(QWidget):
         self._snapshot_btn.clicked.connect(self._open_selected_snapshot)
         self._result_btn.clicked.connect(self._open_result_dialog)
 
+    def refresh_data_root(self) -> None:
+        refresh = getattr(self._config, "refresh_data_root", None)
+        if callable(refresh):
+            refresh()
+
     # ── 回測執行 ──────────────────────────────────────────────────────────────
 
     def _on_run_backtest(

@@ -1,5 +1,17 @@
 # Data Root Migration Plan
 
+## Implementation Status
+
+Implemented:
+
+- Phase 1 path abstraction through `core/data_paths.py`.
+- Tick and kline cache modules now resolve cache directories from the active data root.
+- Data utilities accept `--data-root` for process-local overrides.
+- UI can persist and select `data_root`.
+- Data root layout initialization writes `DATA_LAYOUT.md` and `manifests/data_root.json`.
+- Extended BTCUSDT-ready cache helpers are available in `core/market_data_cache.py` for `metrics`, `fundingRate`, `premiumIndexKlines`, and `liquidationSnapshot`.
+- Project-local large data remains a fallback; `.gitignore` keeps `data/DATA_LAYOUT.md` trackable while ignoring large cache files.
+
 ## Goal
 
 Move OrderFlow away from a project-local, hard-coded `data/` directory and toward a configurable data root that can live on another disk or storage volume.

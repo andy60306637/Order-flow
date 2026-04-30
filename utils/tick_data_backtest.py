@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backtest.engine import BacktestConfig, simulate_trades
+from core.data_paths import set_data_root_override
 from core.data_types import Kline
 from core.tick_cache import (
     _parse_agg_trades_csv_lines,
@@ -278,7 +279,13 @@ def main() -> None:
         "--tick-access", choices=["map", "range"], default="map",
         help="tick access mode: materialized dict map or lazy range accessor (default: map)",
     )
+    parser.add_argument(
+        "--data-root",
+        default=None,
+        help="override ORDERFLOW_DATA_ROOT for cache reads/writes in this process",
+    )
     args = parser.parse_args()
+    set_data_root_override(args.data_root)
 
     strategy_cls = STRATEGY_REGISTRY.get(args.strategy)
     if strategy_cls is None:

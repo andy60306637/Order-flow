@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
 from backtest.engine import BacktestConfig
 from backtest.time_slice import TimeSlice
 from config import base as cfg_base
-from core import tick_cache
+from core import data_paths, kline_cache, tick_cache
 from strategies import STRATEGY_REGISTRY
 from ui.time_slice_widget import TimeSliceWidget, discover_tick_sources
 from utils.ui_settings import ui_settings
@@ -185,9 +185,19 @@ class BacktestConfigPanel(QWidget):
         tick_layout.setSpacing(4)
 
         self._tick_status_lbl = QLabel("─")
+        self._data_root_lbl = QLabel()
+        self._data_root_lbl.setStyleSheet("color:#80cbc4; font-size:11px;")
+        self._data_root_lbl.setWordWrap(True)
+        tick_layout.addWidget(self._data_root_lbl)
+
         self._tick_status_lbl.setStyleSheet("color:#80cbc4; font-size:11px;")
         self._tick_status_lbl.setWordWrap(True)
         tick_layout.addWidget(self._tick_status_lbl)
+
+        self._data_root_btn = QPushButton("Select Data Root")
+        self._data_root_btn.setToolTip("Select OrderFlow data root")
+        self._data_root_btn.clicked.connect(self._on_choose_data_root)
+        tick_layout.addWidget(self._data_root_btn)
 
         _btn_style = (
             "QPushButton { background:#1e222d; color:#d1d4dc; border:1px solid #2a2e39;"
@@ -388,13 +398,47 @@ class BacktestConfigPanel(QWidget):
 
     # ── Tick 快取管理 ─────────────────────────────────────────────────────────
 
+    def refresh_data_root(self) -> None:
+        self._refresh_tick_status()
+
+    def _on_choose_data_root(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select OrderFlow data root",
+            str(data_paths.data_root()),
+        )
+        if not folder:
+            return
+        root = data_paths.ensure_data_root_layout(folder)
+        data_paths.set_data_root_override(root)
+        ui_settings.set("data_root", str(root))
+        self._refresh_tick_status()
+        self._rebuild_tick_dataset_combo(self.symbol())
+
     def _refresh_tick_status(self) -> None:
         symbol = self.symbol()
+        root = data_paths.data_root()
+        ok, message = data_paths.validate_data_root()
+        self._data_root_lbl.setText(f"Data root: {root}")
+        self._data_root_lbl.setToolTip(message)
+        self._data_root_lbl.setStyleSheet(
+            "color:#80cbc4; font-size:11px;" if ok else "color:#f0c040; font-size:11px;"
+        )
         sources = discover_tick_sources(symbol)
+        kline_info = kline_cache.info(symbol, self.interval())
+        warnings = []
+        if kline_info is None:
+            warnings.append(f"missing {symbol} {self.interval()} klines")
+        if not sources:
+            warnings.append(f"missing {symbol} tick cache")
+            self._tick_status_lbl.setText(" | ".join(warnings))
+            return
         if not sources:
             self._tick_status_lbl.setText("無 Tick 快取")
             return
         text = self._tick_coverage_text(sources)
+        if warnings:
+            text = f"{text} | {' | '.join(warnings)}"
         self._tick_status_lbl.setText(text)
 
     def _on_import_ticks(self) -> None:

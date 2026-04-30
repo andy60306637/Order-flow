@@ -25,12 +25,21 @@ from typing import Optional
 
 import numpy as np
 
+from core import data_paths
+
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_CACHE_DIR    = _PROJECT_ROOT / "data" / "ticks"
-_SHARD_ROOT   = _CACHE_DIR / "shards"
+_CACHE_DIR: Path | None = None
+_SHARD_ROOT: Path | None = None
 _NCOLS        = 4  # trade_time, price, qty, is_buyer_maker
+
+
+def _cache_dir() -> Path:
+    return _CACHE_DIR if _CACHE_DIR is not None else data_paths.tick_cache_dir()
+
+
+def _shard_root() -> Path:
+    return _SHARD_ROOT if _SHARD_ROOT is not None else _cache_dir() / "shards"
 
 
 class TickSliceAccessor(Mapping[int, np.ndarray]):
@@ -181,7 +190,7 @@ class LazyCombinedTickBarMap(Mapping[int, np.ndarray]):
             if entry is None:
                 return load_range(symbol, start_ms, end_ms)
 
-            path = _CACHE_DIR / entry["path"]
+            path = _cache_dir() / entry["path"]
             if not path.exists():
                 return load_range(symbol, start_ms, end_ms)
 
@@ -215,19 +224,21 @@ class LazyCombinedTickBarMap(Mapping[int, np.ndarray]):
 
 def cache_path(symbol: str) -> Path:
     """回傳快取路徑。Tick 資料與 K 棒 interval 無關，僅以 symbol 命名。"""
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return _CACHE_DIR / f"{symbol.upper()}_ticks.npz"
+    cache_dir = _cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{symbol.upper()}_ticks.npz"
 
 
 def shard_dir(symbol: str) -> Path:
-    path = _SHARD_ROOT / symbol.upper()
+    path = _shard_root() / symbol.upper()
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def shard_manifest_path(symbol: str) -> Path:
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return _CACHE_DIR / f"{symbol.upper()}_shards.json"
+    cache_dir = _cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{symbol.upper()}_shards.json"
 
 
 def shard_path(symbol: str, month_key: str) -> Path:
@@ -320,6 +331,8 @@ def load_raw(symbol: str) -> tuple[np.ndarray | None, dict | None]:
 
 
 def save_shards(symbol: str, data: np.ndarray, overwrite: bool = False) -> dict:
+    if _CACHE_DIR is None:
+        data_paths.ensure_data_root_layout()
     """將完整 tick array 寫成按月份分片的 NPY shards。"""
     symbol = symbol.upper()
     if len(data) == 0:
@@ -341,7 +354,7 @@ def save_shards(symbol: str, data: np.ndarray, overwrite: bool = False) -> dict:
             raise FileExistsError(f"shard already exists: {path}")
         np.save(str(path), part, allow_pickle=False)
         months[str(month_key)] = {
-            "path": str(path.relative_to(_CACHE_DIR)),
+            "path": str(path.relative_to(_cache_dir())),
             "count": int(len(part)),
             "start_ms": int(part[0, 0]),
             "end_ms": int(part[-1, 0]),
@@ -361,6 +374,8 @@ def save_shards(symbol: str, data: np.ndarray, overwrite: bool = False) -> dict:
 
 def save_raw(symbol: str, data: np.ndarray,
              start_ms: int, end_ms: int) -> bool:
+    if _CACHE_DIR is None:
+        data_paths.ensure_data_root_layout()
     """全量寫入快取（原子寫入：先寫 .tmp 再 rename，避免讀寫競爭造成損毀）。"""
     path = cache_path(symbol)
     # np.savez_compressed 只在路徑不含 .npz 時才補後綴，
@@ -553,7 +568,7 @@ def load_range_sharded(symbol: str, start_ms: int, end_ms: int) -> np.ndarray | 
         if entry is None:
             return None
 
-        path = _CACHE_DIR / entry["path"]
+        path = _cache_dir() / entry["path"]
         if not path.exists():
             return None
 
@@ -639,7 +654,7 @@ def info(symbol: str) -> Optional[dict]:
             count = sum(int(v["count"]) for v in manifest.get("months", {}).values())
             size_mb = 0.0
             for month in manifest.get("months", {}).values():
-                shard_file = _CACHE_DIR / month["path"]
+                shard_file = _cache_dir() / month["path"]
                 if shard_file.exists():
                     size_mb += shard_file.stat().st_size / 1_048_576
             return {

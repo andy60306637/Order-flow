@@ -29,6 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.data_paths import set_data_root_override, tick_cache_dir
 from core.tick_cache import _parse_agg_trades_csv_lines, cache_path, save_raw
 
 try:
@@ -59,7 +60,7 @@ def _setup_logging() -> logging.Logger:
 
 
 def _manifest_path(symbol: str) -> Path:
-    path = PROJECT_ROOT / "data" / "ticks" / f"{symbol.upper()}_manifest.json"
+    path = tick_cache_dir() / f"{symbol.upper()}_manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -347,7 +348,13 @@ def main() -> None:
     ap.add_argument("--from-date", required=True, help="inclusive start date, YYYY-MM-DD")
     ap.add_argument("--to-date", required=True, help="inclusive end date, YYYY-MM-DD")
     ap.add_argument("--scan-workers", type=int, default=4, help="parallel workers for metadata scan")
+    ap.add_argument(
+        "--data-root",
+        default=None,
+        help="override ORDERFLOW_DATA_ROOT for cache reads/writes in this process",
+    )
     args = ap.parse_args()
+    set_data_root_override(args.data_root)
 
     log = _setup_logging()
     rebuild(

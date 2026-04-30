@@ -15,13 +15,17 @@ from typing import Optional
 
 import numpy as np
 
+from core import data_paths
 from core.data_types import Kline
 
 logger = logging.getLogger(__name__)
 
 # 快取目錄（project root / data / klines）
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_CACHE_DIR    = _PROJECT_ROOT / "data" / "klines"
+_CACHE_DIR: Path | None = None
+
+
+def _cache_dir() -> Path:
+    return _CACHE_DIR if _CACHE_DIR is not None else data_paths.kline_cache_dir()
 _NCOLS        = 12  # Binance kline 欄位數
 
 
@@ -29,8 +33,9 @@ _NCOLS        = 12  # Binance kline 欄位數
 
 def cache_path(symbol: str, interval: str) -> Path:
     """回傳指定交易對 + interval 的快取檔路徑（確保目錄存在）。"""
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return _CACHE_DIR / f"{symbol.upper()}_{interval}.npy"
+    cache_dir = _cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{symbol.upper()}_{interval}.npy"
 
 
 def load(symbol: str, interval: str) -> list[list]:
@@ -55,6 +60,8 @@ def save(symbol: str, interval: str, rows: list[list]) -> bool:
     """
     if not rows:
         return False
+    if _CACHE_DIR is None:
+        data_paths.ensure_data_root_layout()
     path = cache_path(symbol, interval)
     try:
         arr = np.array(rows, dtype=np.float64)
