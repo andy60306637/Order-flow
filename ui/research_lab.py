@@ -9,6 +9,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -256,10 +257,22 @@ class ResearchLab(QWidget):
         self._quantile_spin = QSpinBox()
         self._quantile_spin.setRange(2, 10)
         self._quantile_spin.setValue(int(self._saved.get("quantiles", 5)))
+        self._entry_lag_spin = QSpinBox()
+        self._entry_lag_spin.setRange(0, 10)
+        self._entry_lag_spin.setValue(int(self._saved.get("entry_lag", 1)))
+        self._train_ratio_spin = QDoubleSpinBox()
+        self._train_ratio_spin.setRange(0.1, 0.9)
+        self._train_ratio_spin.setSingleStep(0.05)
+        self._train_ratio_spin.setDecimals(2)
+        self._train_ratio_spin.setValue(float(self._saved.get("train_ratio", 0.5)))
         param_layout.addWidget(QLabel("Forward Horizons (bars)"))
         param_layout.addWidget(self._horizon_edit)
         param_layout.addWidget(QLabel("Quantiles"))
         param_layout.addWidget(self._quantile_spin)
+        param_layout.addWidget(QLabel("Entry Lag (bars)"))
+        param_layout.addWidget(self._entry_lag_spin)
+        param_layout.addWidget(QLabel("Train Ratio"))
+        param_layout.addWidget(self._train_ratio_spin)
         controls_layout.addWidget(param_box)
 
         button_row = QHBoxLayout()
@@ -369,6 +382,8 @@ class ResearchLab(QWidget):
         self._tick_check.toggled.connect(save)
         self._horizon_edit.currentTextChanged.connect(save)
         self._quantile_spin.valueChanged.connect(save)
+        self._entry_lag_spin.valueChanged.connect(save)
+        self._train_ratio_spin.valueChanged.connect(save)
         self._time_slice.selection_changed.connect(save)
         self._factor_list.itemChanged.connect(save)
         self._factor_side_filter.currentIndexChanged.connect(self._on_factor_filter_changed)
@@ -419,6 +434,8 @@ class ResearchLab(QWidget):
             horizons=horizons,
             quantiles=self._quantile_spin.value(),
             use_tick_features=self._tick_check.isChecked(),
+            entry_lag=self._entry_lag_spin.value(),
+            train_ratio=self._train_ratio_spin.value(),
         )
 
     def _normalize_slices(self, slices: list) -> list:
@@ -565,6 +582,8 @@ class ResearchLab(QWidget):
             "use_tick_features": self._tick_check.isChecked(),
             "horizons": self._horizon_edit.currentText(),
             "quantiles": self._quantile_spin.value(),
+            "entry_lag": self._entry_lag_spin.value(),
+            "train_ratio": self._train_ratio_spin.value(),
             "factors": self._selected_factors(),
             "factor_side_filter": self._factor_side_filter.currentData() or "",
             "factor_group_filter": self._factor_group_filter.currentData() or "",

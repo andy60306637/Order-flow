@@ -134,7 +134,11 @@ def analyze_factors(
     arr = klines_to_arrays(klines) if klines else {}
     close = arr.get("close", np.array([], dtype=np.float64))
     open_times = arr.get("open_time", np.array([], dtype=np.int64))
-    fwd = {h: _forward_return(close, h, entry_lag) for h in horizons}
+    interval_ms = _kline_interval_ms(klines)
+    fwd = {
+        h: _forward_return(close, h, entry_lag, open_times=open_times, interval_ms=interval_ms)
+        for h in horizons
+    }
 
     # --- Global IS/OOS temporal split (shared across all functions) ---
     n_times = len(open_times)
@@ -213,7 +217,7 @@ def analyze_factors(
     ts_ic = _calculate_timeseries_ic(factor_values, fwd, open_times, factor_orientations, cut_time=cut_time)
     ortho_summary = _orthogonalize_factors(factor_values, fwd, factor_orientations, is_time_mask, oos_time_mask)
     correlations = _factor_correlations(factor_values, is_time_mask, oos_time_mask)
-    summary.sort(key=lambda r: float(r.get("oriented_rank_ic", 0.0)), reverse=True)
+    summary.sort(key=lambda r: float(r.get("rank_score", 0.0)), reverse=True)
     return ResearchResult(
         summary=summary,
         metrics=metrics,
@@ -371,7 +375,7 @@ def _orient(value: float, orientation: int) -> float:
     if not np.isfinite(value):
         return float("nan")
     if orientation == 0:
-        return abs(value)
+        return value
     return value * orientation
 
 
@@ -384,7 +388,13 @@ def _fval(v: Any, default: float = 0.0) -> float:
         return default
 
 
-def _forward_return(close: np.ndarray, horizon: int, entry_lag: int) -> np.ndarray:
+def _forward_return(
+    close: np.ndarray,
+    horizon: int,
+    entry_lag: int,
+    open_times: np.ndarray | None = None,
+    interval_ms: int | None = None,
+) -> np.ndarray:
     """Return at index i = close[i+lag+h]/close[i+lag] - 1.
 
     With entry_lag=1, the factor computed at bar i (only knowable at i's close)
@@ -400,8 +410,54 @@ def _forward_return(close: np.ndarray, horizon: int, entry_lag: int) -> np.ndarr
         return out
     entry = close[entry_lag:entry_lag + end]
     exit_ = close[entry_lag + horizon:entry_lag + horizon + end]
-    out[:end] = exit_ / entry - 1.0
+    returns = exit_ / entry - 1.0
+    if open_times is not None and interval_ms is not None:
+        continuity = _forward_continuity_mask(open_times, interval_ms, entry_lag + horizon)
+        valid = continuity[:end]
+        target = out[:end]
+        target[valid] = returns[valid]
+    else:
+        out[:end] = returns
     return out
+
+
+def _forward_continuity_mask(open_times: np.ndarray, interval_ms: int, steps: int) -> np.ndarray:
+    out = np.zeros(len(open_times), dtype=bool)
+    if interval_ms <= 0 or steps <= 0 or len(open_times) <= steps:
+        return out
+    pair_ok = np.diff(open_times) == interval_ms
+    csum = np.cumsum(np.insert(pair_ok.astype(np.int64), 0, 0))
+    end = len(open_times) - steps
+    out[:end] = (csum[steps:steps + end] - csum[:end]) == steps
+    return out
+
+
+def _kline_interval_ms(klines: list[Kline]) -> int | None:
+    for k in klines:
+        parsed = _interval_to_ms(k.interval)
+        if parsed is not None:
+            return parsed
+        span = int(k.close_time) - int(k.open_time) + 1
+        if span > 0:
+            return span
+    return None
+
+
+def _interval_to_ms(interval: str) -> int | None:
+    if not interval:
+        return None
+    unit = interval[-1]
+    raw = interval[:-1]
+    if not raw.isdigit():
+        return None
+    value = int(raw)
+    unit_ms = {
+        "m": 60_000,
+        "h": 3_600_000,
+        "d": 86_400_000,
+        "w": 604_800_000,
+    }.get(unit)
+    return value * unit_ms if unit_ms is not None else None
 
 
 def _per_period_ic(
@@ -459,7 +515,13 @@ def _metric_row(
     rank_ic = _corr(_rank(x), _rank(y))
 
     mean_p, std_p, ir, t_stat = _ir_tstat(is_period_ic)
+    oriented_is_period_ic = [_orient(v, orientation) for v in is_period_ic]
+    oriented_mean_p, oriented_std_p, oriented_ir, oriented_t_stat = _ir_tstat(oriented_is_period_ic)
     oos_mean_p, oos_std_p, oos_ir, oos_t_stat = _ir_tstat(oos_period_ic)
+    oriented_oos_period_ic = [_orient(v, orientation) for v in oos_period_ic]
+    oriented_oos_mean_p, oriented_oos_std_p, oriented_oos_ir, oriented_oos_t_stat = _ir_tstat(
+        oriented_oos_period_ic
+    )
 
     oos_valid = oos_mask & _valid_mask(values, returns)
     x_oos = values[oos_valid]
@@ -473,19 +535,29 @@ def _metric_row(
         "ic": ic,
         "rank_ic": rank_ic,
         "oriented_rank_ic": _orient(rank_ic, orientation),
+        "abs_rank_ic": abs(rank_ic),
         "ic_period_mean": mean_p,
         "ic_period_std": std_p,
         "ic_ir": float(ir),
         "ic_t_stat": float(t_stat),
+        "oriented_ic_period_mean": oriented_mean_p,
+        "oriented_ic_period_std": oriented_std_p,
+        "oriented_ic_ir": float(oriented_ir),
+        "oriented_ic_t_stat": float(oriented_t_stat),
         "ic_periods": len(is_period_ic),
         "sample_count": int(mask.sum()),
         # OOS fields
         "oos_ic": oos_ic,
         "oos_rank_ic": oos_rank_ic,
         "oos_oriented_rank_ic": _orient(oos_rank_ic, orientation),
+        "oos_abs_rank_ic": abs(oos_rank_ic),
         "oos_ic_period_mean": oos_mean_p,
         "oos_ic_ir": float(oos_ir),
         "oos_ic_t_stat": float(oos_t_stat),
+        "oos_oriented_ic_period_mean": oriented_oos_mean_p,
+        "oos_oriented_ic_period_std": oriented_oos_std_p,
+        "oos_oriented_ic_ir": float(oriented_oos_ir),
+        "oos_oriented_ic_t_stat": float(oriented_oos_t_stat),
         "oos_ic_periods": len(oos_period_ic),
         "oos_sample_count": int(oos_valid.sum()),
     }
@@ -505,6 +577,7 @@ def _summary_row(
         "side": factor_sides_label(sides),
         "group": group,
         "orientation": orientation,
+        "directional": orientation != 0,
     }
     if not metrics:
         base.update({
@@ -520,23 +593,37 @@ def _summary_row(
             "oos_ic_ir": 0.0,
             "oos_ic_t_stat": 0.0,
             "oos_sample_count": 0,
+            "rank_score": 0.0,
         })
         return base
     best = max(metrics, key=lambda r: _fval(r["oriented_rank_ic"]))
     oos_best = max(metrics, key=lambda r: _fval(r.get("oos_oriented_rank_ic")))
+    rank_score = _fval(oos_best.get("oos_oriented_rank_ic")) if orientation != 0 else -1.0e9
     base.update({
         "best_horizon": best["horizon"],
         "best_rank_ic": best["rank_ic"],
         "oriented_rank_ic": best["oriented_rank_ic"],
-        "ic_ir": best["ic_ir"],
-        "ic_t_stat": best["ic_t_stat"],
+        "abs_rank_ic": best.get("abs_rank_ic", abs(best["rank_ic"])),
+        "ic_ir": best.get("oriented_ic_ir", best["ic_ir"]),
+        "ic_t_stat": best.get("oriented_ic_t_stat", best["ic_t_stat"]),
+        "raw_ic_ir": best["ic_ir"],
+        "raw_ic_t_stat": best["ic_t_stat"],
+        "oriented_ic_ir": best.get("oriented_ic_ir", best["ic_ir"]),
+        "oriented_ic_t_stat": best.get("oriented_ic_t_stat", best["ic_t_stat"]),
         "avg_abs_rank_ic": float(np.nanmean([abs(float(r["rank_ic"])) for r in metrics])),
         "sample_count": max(int(r["sample_count"]) for r in metrics),
+        "oos_best_horizon": oos_best.get("horizon", ""),
         "oos_best_rank_ic": oos_best.get("oos_rank_ic", 0.0),
         "oos_oriented_rank_ic": oos_best.get("oos_oriented_rank_ic", 0.0),
-        "oos_ic_ir": oos_best.get("oos_ic_ir", 0.0),
-        "oos_ic_t_stat": oos_best.get("oos_ic_t_stat", 0.0),
+        "oos_abs_rank_ic": oos_best.get("oos_abs_rank_ic", abs(_fval(oos_best.get("oos_rank_ic")))),
+        "oos_ic_ir": oos_best.get("oos_oriented_ic_ir", oos_best.get("oos_ic_ir", 0.0)),
+        "oos_ic_t_stat": oos_best.get("oos_oriented_ic_t_stat", oos_best.get("oos_ic_t_stat", 0.0)),
+        "oos_raw_ic_ir": oos_best.get("oos_ic_ir", 0.0),
+        "oos_raw_ic_t_stat": oos_best.get("oos_ic_t_stat", 0.0),
+        "oos_oriented_ic_ir": oos_best.get("oos_oriented_ic_ir", oos_best.get("oos_ic_ir", 0.0)),
+        "oos_oriented_ic_t_stat": oos_best.get("oos_oriented_ic_t_stat", oos_best.get("oos_ic_t_stat", 0.0)),
         "oos_sample_count": max(int(r.get("oos_sample_count", 0)) for r in metrics),
+        "rank_score": rank_score,
     })
     return base
 

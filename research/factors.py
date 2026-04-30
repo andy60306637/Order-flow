@@ -70,6 +70,12 @@ def _tick_metric(
     return out
 
 
+def _kline_delta_eff_array(klines: list[Kline]) -> np.ndarray:
+    arr = klines_to_arrays(klines)
+    delta = 2.0 * arr["taker_buy_volume"] - arr["volume"]
+    return safe_divide(delta, arr["volume"])
+
+
 @register_factor
 class LowerWickBodyRatioFactor(FactorBase):
     name = "lower_wick_to_body_ratio"
@@ -240,9 +246,35 @@ class BreakoutCumDeltaEffFactor(FactorBase):
     group = GROUP_MOMENTUM
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
-        arr = klines_to_arrays(klines)
-        delta = 2.0 * arr["taker_buy_volume"] - arr["volume"]
-        return safe_divide(delta, arr["volume"])
+        return _kline_delta_eff_array(klines)
+
+
+@register_factor
+class DeltaEffLongFactor(FactorBase):
+    """
+    Atomic long-side kline delta efficiency.
+    Higher value means stronger taker-buy pressure.
+    """
+    name = "delta_eff_long"
+    sides = (FACTOR_SIDE_LONG,)
+    group = GROUP_MOMENTUM
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        return _kline_delta_eff_array(klines)
+
+
+@register_factor
+class DeltaEffShortFactor(FactorBase):
+    """
+    Atomic short-side kline delta efficiency.
+    Higher value means stronger taker-sell pressure.
+    """
+    name = "delta_eff_short"
+    sides = (FACTOR_SIDE_SHORT,)
+    group = GROUP_MOMENTUM
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        return -_kline_delta_eff_array(klines)
 
 
 @register_factor
