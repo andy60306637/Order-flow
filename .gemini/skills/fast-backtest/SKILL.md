@@ -5,7 +5,7 @@ description: Quick strategy backtesting tool for K-line and Tick modes. Use when
 
 # Fast Backtest Skill
 
-This skill allows you to run strategy backtests quickly using the project's specialized CLI tool (`utils/fast_backtest.py`). It supports both K-Line and high-precision Tick-level simulations.
+This skill allows you to run strategy backtests quickly using the project's specialized CLI tool (`utils/fast_backtest.py`). It supports both K-Line and high-precision Tick-level simulations and can generate structured reports.
 
 ## Usage
 
@@ -21,35 +21,35 @@ python utils/fast_backtest.py \
   [--interval <INTERVAL>] \
   [--fee <FEE_RATE>] \
   [--slippage <BPS>] \
-  [--capital <USDT>]
+  [--capital <USDT>] \
+  [--out <REPORT_JSON_PATH>] \
+  [--csv <TRADE_LIST_CSV_PATH>]
 ```
 
 ### Parameters Guide
 
-- **`--strategy`**: Must be a valid name from `strategies/registry.py` (e.g., "Wick Reversal 1m v4", "Wick Reversal 15m v6.1").
+- **`--strategy`**: Must be a valid name from `strategies/registry.py` (e.g., "Wick Reversal 1m v4").
 - **`--mode`**: 
-    - `tick`: High-precision, matches UI "Tick Mode". Uses sharded data.
-    - `kline`: Fast, uses OHLCV bars from cache.
-- **`--start` / `--end`**: Time range for the simulation.
-- **`--fee`**: Taker fee rate as a decimal (e.g., `0.00032` for 0.032%).
-- **`--slippage`**: Slippage in BPS (e.g., `0.2`).
-- **`--interval`**: Timeframe (e.g., `1m`, `15m`). Note that v6 strategies typically require `15m`.
+    - `tick`: High-precision, matches UI "Tick Mode".
+    - `kline`: Fast, uses OHLCV bars.
+- **`--out`**: Path to save a complete JSON report (including stats).
+- **`--csv`**: Path to save the trade-by-trade ledger.
 
 ## Examples
 
-### 1. Run a Tick Backtest
-"Run a tick backtest for BTCUSDT using Wick Reversal 1m v4 from 2026-01-01 to 2026-02-01 with 0.032% fee"
+### 1. Run a Tick Backtest with Reports
+"Run a tick backtest for BTCUSDT using Wick Reversal 1m v4 for last month and save the report to result.json"
 ```bash
-python utils/fast_backtest.py --strategy "Wick Reversal 1m v4" --mode tick --start 2026-01-01 --end 2026-02-01 --fee 0.00032
+python utils/fast_backtest.py --strategy "Wick Reversal 1m v4" --mode tick --start 2026-04-01 --end 2026-05-01 --out docs/reports/backtest_result.json --csv docs/reports/trade_list.csv
 ```
 
-### 2. Run a Fast Kline Backtest
-"Quickly test SMA Cross strategy for the last month"
+### 2. Quick Kline Test
+"Quickly test SMA Cross strategy for Q1 2026"
 ```bash
-python utils/fast_backtest.py --strategy "SMA Cross" --mode kline --start 2026-04-01 --end 2026-05-01
+python utils/fast_backtest.py --strategy "SMA Cross" --mode kline --start 2026-01-01 --end 2026-03-31
 ```
 
 ## Tips
-- Always check `strategies/registry.py` if unsure about the exact strategy name.
-- For v6 strategies (v6, v6.1), ensure `--interval 15m` is used if not specified.
-- The output provides a summary table and an exit type distribution.
+- The JSON report generated via `--out` is compatible with other internal analysis tools.
+- The CSV file via `--csv` includes entry/exit times, prices, and net PnL for each trade.
+- After a run, the tool prints a summary table to the console regardless of whether files are saved.
