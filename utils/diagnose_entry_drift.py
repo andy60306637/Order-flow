@@ -6,12 +6,14 @@
   2. entry 過度漂移：fill_price 遠離 k0_body_high
 
 用法：
-  python -m utils.diagnose_entry_drift
+  python -m utils.diagnose_entry_drift --symbol BTCUSDT --days 1
 """
 from __future__ import annotations
 
-import sys
+import argparse
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
+import sys
 
 import numpy as np
 
@@ -20,23 +22,42 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from core import tick_cache
-from core.data_types import Kline
-from core import kline_cache
+from core import tick_cache, kline_cache
+from core.data_paths import set_data_root_override
+from core.tick_cache import load_meta, load_range, build_bar_map
 from utils.tick_data_backtest import _build_klines_from_ticks
-from strategies.wick_reversal_v4 import WickReversalV4Strategy
+from strategies import STRATEGY_REGISTRY
 
+def diagnose():
+    parser = argparse.ArgumentParser(description="Diagnose entry drift and tick/kline consistency.")
+    parser.add_argument("--symbol", default="BTCUSDT", help="e.g. BTCUSDT")
+    parser.add_argument("--strategy", default="Wick Reversal 1m v4", help="Strategy name from registry")
+    parser.add_argument("--interval", default="1m", help="e.g. 1m")
+    parser.add_argument("--days", type=int, default=1, help="Number of recent days to check")
+    parser.add_argument("--data-root", default=None, help="Override ORDERFLOW_DATA_ROOT")
+    args = parser.parse_args()
 
-def _interval_ms(interval: str) -> int:
-    m = {"1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000}
-    return m.get(interval, 60_000)
+    if args.data_root:
+        set_data_root_override(args.data_root)
 
+    symbol = args.symbol.upper()
+    interval = args.interval
+    
+    meta = load_meta(symbol)
+    if meta is None:
+        print(f"❌ 無 {symbol} 的快取中繼資料")
+        return
 
-def diagnose(symbol: str = "BTCUSDT", interval: str = "1m"):
-    # ── 載入全部 tick ─────────────────────────────────────────────────
-    data, meta = tick_cache.load_raw(symbol)
+    end_ms = meta["end_ms"]
+    start_ms = max(meta["start_ms"], end_ms - args.days * 24 * 3600 * 1000)
+    
+    print(f"📊 正在診斷 {symbol} ({args.days} 天)...")
+    print(f"   範圍: {datetime.fromtimestamp(start_ms/1000, tz=timezone.utc)} ~ {datetime.fromtimestamp(end_ms/1000, tz=timezone.utc)}")
+
+    # ── 載入指定範圍 tick ─────────────────────────────────────────────────
+    data = load_range(symbol, start_ms, end_ms)
     if data is None or len(data) == 0:
-        print("❌ 無 tick 資料")
+        print("❌ 載入範圍內無 tick 資料")
         return
 
     # ── 從 tick 重建 kline（與 UI tick 回測模式一致）────────────────────
@@ -46,7 +67,7 @@ def diagnose(symbol: str = "BTCUSDT", interval: str = "1m"):
         return
 
     kline_times = [(k.open_time, k.close_time) for k in klines]
-    tick_map = tick_cache.build_bar_map(data, kline_times)
+    tick_map = build_bar_map(data, kline_times)
     print(f"📊 klines(from tick)={len(klines)}, tick 覆蓋={len(tick_map)}/{len(klines)}")
 
     # ══════════════════════════════════════════════════════════════════════
@@ -84,7 +105,6 @@ def diagnose(symbol: str = "BTCUSDT", interval: str = "1m"):
     else:
         print(f"⚠️  {mismatch_count} 根 bar 的 tick 價格超出 OHLC 範圍!")
         for d in mismatch_details[:10]:
-            from datetime import datetime, timezone
             dt = datetime.fromtimestamp(d["open_time"] / 1000, tz=timezone.utc)
             print(f"  {dt.strftime('%Y-%m-%d %H:%M')} | "
                   f"Kline [{d['kline_low']:.1f}, {d['kline_high']:.1f}] | "
@@ -94,22 +114,26 @@ def diagnose(symbol: str = "BTCUSDT", interval: str = "1m"):
             print(f"  ... 還有 {mismatch_count - 10} 筆")
 
     # ══════════════════════════════════════════════════════════════════════
-    # 檢查 2：策略 entry fill_price 與 k0_body_high 的偏離
+    # 檢查 2：策略 entry fill_price 的偏離
     # ══════════════════════════════════════════════════════════════════════
-    strategy = WickReversalV4Strategy()
+    strategy_cls = STRATEGY_REGISTRY.get(args.strategy)
+    if strategy_cls is None:
+        print(f"❌ 找不到策略: {args.strategy}")
+        return
+        
+    strategy = strategy_cls()
     signals = strategy.on_history(klines, tick_map=tick_map)
 
-    entry_sigs = [s for s in signals if s.signal_type == "long_entry"]
-    k0_sigs = [s for s in signals if s.signal_type == "k0_long"]
-
+    entry_sigs = [s for s in signals if "entry" in s.signal_type]
+    
     print(f"\n{'='*60}")
-    print(f"檢查 2: Entry fill_price 漂移")
+    print(f"檢查 2: Entry fill_price 漂移 (使用 {args.strategy})")
     print(f"{'='*60}")
-    print(f"k0 信號: {len(k0_sigs)}, 進場信號: {len(entry_sigs)}")
+    print(f"進場信號數: {len(entry_sigs)}")
 
     drift_cases = []
     for es in entry_sigs:
-        base_p = es.price       # k0_body_high
+        base_p = es.price       # 觸發價基準
         fill_p = es.fill_price  # 實際成交
 
         if fill_p is None:
@@ -122,12 +146,12 @@ def diagnose(symbol: str = "BTCUSDT", interval: str = "1m"):
         entry_bar = kline_by_ot.get(es.open_time)
         fill_in_bar = (
             entry_bar is not None
-            and entry_bar.low <= fill_p <= entry_bar.high
+            and entry_bar.low - 0.01 <= fill_p <= entry_bar.high + 0.01
         )
 
         drift_cases.append({
             "open_time": es.open_time,
-            "k0_body_high": base_p,
+            "trigger_price": base_p,
             "fill_price": fill_p,
             "drift": drift,
             "drift_pct": drift_pct,
@@ -149,16 +173,15 @@ def diagnose(symbol: str = "BTCUSDT", interval: str = "1m"):
     max_drift = max(drifts)
     out_of_bar = sum(1 for d in drift_cases if not d["fill_in_bar"])
 
-    print(f"  平均漂移: {avg_drift:.2f} USDT ({avg_drift / drift_cases[0]['k0_body_high'] * 100:.3f}%)")
-    print(f"  最大漂移: {max_drift:.2f} USDT ({max_drift / drift_cases[0]['k0_body_high'] * 100:.3f}%)")
+    print(f"  平均漂移: {avg_drift:.2f} USDT")
+    print(f"  最大漂移: {max_drift:.2f} USDT")
     print(f"  fill_price 超出 bar OHLC: {out_of_bar}/{len(drift_cases)} 筆")
 
-    # 漂移超過 100 USDT 的案例
-    big_drifts = [d for d in drift_cases if abs(d["drift"]) > 100]
+    # 漂移顯著的案例
+    big_drifts = [d for d in drift_cases if abs(d["drift_pct"]) > 0.1]
     if big_drifts:
-        print(f"\n  ⚠️  漂移 > 100 USDT 的 {len(big_drifts)} 筆:")
+        print(f"\n  ⚠️  漂移 > 0.1% 的 {len(big_drifts)} 筆:")
         for d in big_drifts[:15]:
-            from datetime import datetime, timezone
             dt = datetime.fromtimestamp(d["open_time"] / 1000, tz=timezone.utc)
             bar_info = (
                 f"bar [{d['bar_low']:.1f}, {d['bar_high']:.1f}]"
@@ -166,12 +189,11 @@ def diagnose(symbol: str = "BTCUSDT", interval: str = "1m"):
             )
             in_bar = "✅" if d["fill_in_bar"] else "❌ 超出bar"
             print(f"    {dt.strftime('%Y-%m-%d %H:%M')} | "
-                  f"k0_body_high={d['k0_body_high']:.1f} → fill={d['fill_price']:.1f} "
-                  f"(+{d['drift']:.1f}, {d['drift_pct']:.2f}%) | "
+                  f"trigger={d['trigger_price']:.1f} → fill={d['fill_price']:.1f} "
+                  f"({d['drift']:+.1f}, {d['drift_pct']:+.3f}%) | "
                   f"{bar_info} {in_bar}")
     else:
-        print("  ✅ 無大幅漂移 (> 100 USDT) 的案例")
-
+        print("  ✅ 無大幅漂移 (> 0.1%) 的案例")
 
 if __name__ == "__main__":
     diagnose()
