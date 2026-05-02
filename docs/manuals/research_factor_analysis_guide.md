@@ -16,7 +16,9 @@
    - 3.3 [Quantiles（分位數分析）](#33-quantiles分位數分析)
    - 3.4 [Monthly / Yearly Stability（穩定度）](#34-monthly--yearly-stability穩定度)
    - 3.5 [Factor Correlations（因子相關性）](#35-factor-correlations因子相關性)
-   - 3.6 [Unavailable（無法執行的因子）](#36-unavailable無法執行的因子)
+   - 3.6 [Time-series IC（時間序列 IC 分析）](#36-time-series-ic時間序列-ic-分析)
+   - 3.7 [Factor Orthogonalization（因子正交化）](#37-factor-orthogonalization因子正交化)
+   - 3.8 [Unavailable（無法執行的因子）](#38-unavailable無法執行的因子)
 4. [標準判讀流程](#4-標準判讀流程)
 5. [常見問題](#5-常見問題)
 
@@ -101,6 +103,12 @@ K 線資料 + Tick 資料
 | `upper_wick_delta_eff` | Short | Micro-structure | 上影線區域 Tick 的買賣差值效率（需 Tick）。負值越大代表上影線區有強力淨賣出。 |
 | `lower_wick_volume_ratio` | Long | Micro-structure | 下影線 Tick 成交量 / 該根 K 線總成交量（需 Tick）。比例越高代表成交量集中在下影線區。 |
 | `upper_wick_volume_ratio` | Short | Micro-structure | 上影線 Tick 成交量 / 總成交量（需 Tick）。比例越高代表成交量集中在上影線區。 |
+| `body_position_ratio` | All | Mean-Reversion | (實體中心 - 最低價) / (最高價 - 最低價)。接近 1 代表實體在頂部，接近 0 在底部。 |
+| `volume_z_score` | All | Volume | 成交量的 Z-Score (Window=20)。衡量成交量相對於近期平均的異常程度。 |
+| `delta_eff_long` | Long | Momentum | Taker 買盤效率 (2 * TakerBuyVol - TotalVol) / TotalVol。正值越大代表主動買盤越強。 |
+| `delta_eff_short` | Short | Momentum | Taker 賣盤效率的負值。值越大代表主動賣盤越強。 |
+| `breakout_cum_delta_eff` | All | Momentum | 潛在突破 K 線的累計 Taker 買賣差值效率。衡量突破時的動力。 |
+| `friction_cover_ratio` | All | Regime | (ATR * 2) / 摩擦成本 (Fee + Slippage)。衡量波動率是否足以覆蓋交易成本。 |
 
 **建議初始跑法：**
 全選所有 K 線因子（不含 tick），確認基礎信號後再加入 tick 類。
@@ -138,27 +146,26 @@ K 線資料 + Tick 資料
 
 ### 3.1 Factor Ranking（因子排名）
 
-**每個因子一列，依 `oriented_rank_ic` 由高到低排序（最強信號在最上方）。**
+**每個因子一列，依 `rank_score` (即 OOS Oriented Rank IC) 由高到低排序。**
 
 | 欄位 | 說明 | 判讀標準 |
 |------|------|----------|
 | `factor` | 因子名稱 | — |
 | `side` | Long / Short / Long/Short | — |
 | `group` | 因子所屬類別 | — |
-| `orientation` | +1（多頭因子）/ -1（空頭因子）/ 0（雙向） | — |
-| `best_horizon` | `oriented_rank_ic` 最高時對應的 horizon | 代表因子在哪個預測期最有效 |
-| `best_rank_ic` | 最佳 horizon 的原始 Rank IC 值（有正負號） | 正代表「值越高 → 未來報酬越高」，負則相反 |
-| `oriented_rank_ic` | Rank IC × orientation（正值永遠代表「符合設計方向的信號強度」） | **主排序依據**。> 0.03 有參考價值，> 0.05 值得深入研究 |
-| `ic_ir` | IC Information Ratio = 月度 Rank IC 均值 / 標準差 | **統計穩定性指標**。> 0.5 算穩定，> 1.0 優秀 |
-| `ic_t_stat` | IR × √(有效月數) | > 2.0 表示統計顯著（95% 信心水準） |
-| `avg_abs_rank_ic` | 所有 horizon 的 \|Rank IC\| 平均 | 衡量因子在各期的綜合強度 |
-| `sample_count` | 有效樣本數 | 低於 1,000 的結論要保持懷疑 |
+| `best_horizon` | `oriented_rank_ic` 最高時對應的 horizon | — |
+| `oriented_rank_ic` | IS Rank IC × orientation | IS 指標，僅供參考 |
+| `oos_oriented_rank_ic` | OOS Rank IC × orientation | **核心排序依據**。> 0.03 有參考價值 |
+| `oos_ic_ir` | OOS 月度 Rank IC 的 IR | **穩定性指標**。> 0.5 算穩定 |
+| `oos_ic_t_stat` | OOS IR × √(有效月數) | > 2.0 表示統計顯著 |
+| `rank_score` | 用於最終排名的分數 (通常等於 oos_oriented_rank_ic) | — |
+| `sample_count` | 總有效樣本數 | — |
 
 **快速篩選邏輯：**
 ```
-oriented_rank_ic > 0.03  →  信號有方向性
-ic_t_stat > 2.0          →  統計顯著，非偶然
-ic_ir > 0.5              →  穩定性夠，月度之間不亂飄
+oos_oriented_rank_ic > 0.03  →  信號在未見過的資料上依然有效
+oos_ic_t_stat > 2.0          →  統計顯著
+oos_ic_ir > 0.5              →  穩定性夠
 → 三條件同時滿足才列入候選因子
 ```
 
@@ -235,23 +242,24 @@ horizon=12 →  0.012  ← 自然衰減，信號有效
 
 ### 3.4 Monthly / Yearly Stability（穩定度）
 
-**驗證 IC 是否跨時間段一致，而非只在特定市場環境有效。**
+**驗證 IC 是否跨時間段一致，並區分 Train (IS) 與 Test (OOS) 區間。**
 
 每個（因子 × horizon × 期間）一列。
 
 | 欄位 | 說明 |
 |------|------|
 | `period` | 月份（格式 `YYYY-MM`）或年份（`YYYY`） |
+| `split` | `train`：屬於 IS 訓練集。`test`：屬於 OOS 測試集。`mixed`：跨越邊界。 |
 | `ic` | 該期間的 Pearson IC |
 | `rank_ic` | 該期間的 Rank IC |
 | `spread_qhigh_qlow` | 該期間的分位數報酬極差 |
-| `sample_count` | 該期間有效樣本數（低於 `min_period_samples=30` 的月份不出現） |
+| `sample_count` | 該期間有效樣本數 |
 
 **判讀要點：**
 
-- **月度 Rank IC 方向一致性**：好因子的月度 IC 應 **大多同號**（多頭因子多數月份為正，空頭因子多數月份為負）。如果 IC 正負各半，代表因子不穩定。
-- **參考比率**：IC 同號比例 > 60% 才算穩定；> 70% 算優良。
-- **看熊市與牛市是否都有效**：若因子只在某種市場趨勢下有效，使用時需加入 regime filter。
+- **IS 與 OOS 一致性**：好的因子在 `train` 期間表現優異，且在 `test` 期間不發生明顯崩塌（Degradation）。
+- **月度 Rank IC 方向一致性**：IC 同號比例 > 60% 才算穩定；> 70% 算優良。
+
 
 ---
 
@@ -278,12 +286,32 @@ horizon=12 →  0.012  ← 自然衰減，信號有效
 
 ---
 
-### 3.6 Unavailable（無法執行的因子）
+### 3.6 Time-series IC（時間序列 IC 分析）
+
+**觀察因子在整個回測期間的動態表現。**
+
+- **Stepped Rolling Rank IC**：系統會以 `horizon` 最小的值為準，計算一個滑動窗口內的 Rank IC 序列。
+- **Train/Test Boundary**：圖表中會標註 `train_ratio` 切分出的 IS/OOS 邊界（由 `train_cutoff_ts` 決定）。
+- **判讀方式**：好的因子其 IC 曲線應長時間維持在 0 軸上方（多頭因子）或下方（空頭因子），且在 OOS 區間不應有劇烈轉向或長期歸零的現象。
+
+---
+
+### 3.7 Factor Orthogonalization（因子正交化）
+
+**識別因子提供的「純 alpha」，排除已知因子的影響。**
+
+- **QR Decomposition**：系統使用 QR 分解，將一組因子的 IS 數據進行正交化。
+- **投影評估**：將 OOS 數據投影到 IS 生成的正交基底上，評估每個因子在排除掉排在它前面的因子後，還剩下多少預測能力（`oos_oriented_rank_ic`）。
+- **使用場景**：當你有多個看似有效的因子但它們彼此相關時，正交化能告訴你哪些因子是真正提供了額外資訊，哪些只是冗餘。
+
+---
+
+### 3.8 Unavailable（無法執行的因子）
 
 | 欄位 | `reason` 說明 |
 |------|---------------|
 | `factor` | 因子名稱 |
-| `reason` | `not_registered`：因子名稱不在 registry 中（名稱拼錯或忘了 import factors.py）。`tick_data_unavailable`：因子需要 tick 資料但本地無快取或勾選了「不使用 tick」。 |
+| `reason` | `not_registered`：因子名稱不在 registry 中（名稱拼錯或忘了 import factors.py）。`tick_data_unavailable`：因子需要 tick 資料 but 本地無快取或勾選了「不使用 tick」。 |
 
 ---
 
@@ -294,30 +322,29 @@ horizon=12 →  0.012  ← 自然衰減，信號有效
 ```
 Step 1  Factor Correlations
         → 先刪掉 |spearman| > 0.7 的重複因子
-        → 留下低相關的候選集
 
-Step 2  Factor Ranking（看 out_of_sample 指標）
-        → oriented_rank_ic > 0.03？
-        → ic_t_stat > 2.0？
-        → ic_ir > 0.5？
-        → 三條件同時滿足 → 進入 Step 3
+Step 2  Factor Ranking（重點看 OOS 指標）
+        → oos_oriented_rank_ic > 0.03？
+        → oos_ic_t_stat > 2.0？
+        → oos_ic_ir > 0.5？
+        → 通過後進入 Step 3
 
-Step 3  IC by Horizon
-        → 找最佳 horizon（oriented_rank_ic 最高的期數）
-        → 確認隨 horizon 增加有自然衰減（非隨機跳動）
+Step 3  Factor Orthogonalization
+        → 確認因子在正交化後，OOS Oriented Rank IC 依然顯著 (e.g. > 0.01)
+        → 若正交後 IC 歸零，代表該因子是其他因子的線性組合，可捨棄
 
 Step 4  Quantiles（重點看 out_of_sample 列）
         → 分位數單調性是否成立？
-        → OOS oriented_spread > 0？
         → OOS Q5（或 Q1 for short）的 win_rate > 55%？
 
-Step 5  Monthly Stability
+Step 5  Monthly Stability & Time-series IC
         → 月度 IC 同號比例 > 60%？
-        → 是否在熊市 / 牛市都有效？
-        → IC 是否在某段時間突然失效（可能碰到制度轉換）？
+        → IC 曲線是否穩定？
+        → 是否在特定時期（regime）集體失效？
 
 → 通過全部 Step 的因子才納入策略考量
 ```
+
 
 ---
 

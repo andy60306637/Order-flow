@@ -23,6 +23,7 @@ GROUP_MOMENTUM = "Momentum & Trend Factors"
 GROUP_MEAN_REVERSION = "Mean-Reversion & Extreme Factors"
 GROUP_VOLATILITY = "Volatility & Compression Factors"
 GROUP_CRYPTO_DERIVATIVES = "Crypto Derivatives & Alternative Factors"
+GROUP_PRICE_ACTION = "Price Action & Chart Patterns"
 FACTOR_GROUPS = (
     GROUP_MICROSTRUCTURE,
     GROUP_REGIME,
@@ -31,6 +32,7 @@ FACTOR_GROUPS = (
     GROUP_MEAN_REVERSION,
     GROUP_VOLATILITY,
     GROUP_CRYPTO_DERIVATIVES,
+    GROUP_PRICE_ACTION,
 )
 
 
