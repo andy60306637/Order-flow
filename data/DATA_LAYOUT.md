@@ -116,7 +116,35 @@ Recommended locations:
 {DATA_ROOT}/futures_um/liquidationSnapshot/{SYMBOL}/cache/
 ```
 
-Raw files should preserve Binance Vision filenames. Cache files should have a manifest describing source files, date range, schema, row count, and format version.
+Raw files should preserve Binance Vision filenames. For bulk Binance Vision zip archives, a repository-local raw mirror under `tick_data/binance/futures/um/{daily|monthly}/{DATASET}/{SYMBOL}/` is also allowed when the active data root should only contain normalized cache output. Cache manifests must record `source_root`, `source_files`, missing source files if any, date range, schema, row count, and format version.
+
+Normalized extended cache files use `market_data_npz_v1` and store a numeric `data` array plus a JSON manifest:
+
+```text
+{DATA_ROOT}/futures_um/fundingRate/{SYMBOL}/cache/{SYMBOL}_fundingRate.npz
+  0 timestamp_ms
+  1 funding_interval_hours
+  2 last_funding_rate
+
+{DATA_ROOT}/futures_um/metrics/{SYMBOL}/cache/{SYMBOL}_metrics.npz
+  0 timestamp_ms
+  1 sum_open_interest
+  2 sum_open_interest_value
+  3 count_toptrader_long_short_ratio
+  4 sum_toptrader_long_short_ratio
+  5 count_long_short_ratio
+  6 sum_taker_long_short_vol_ratio
+
+{DATA_ROOT}/futures_um/liquidationSnapshot/{SYMBOL}/cache/{SYMBOL}_liquidationSnapshot.npz
+  0 timestamp_ms
+  1 long_liq_qty
+  2 short_liq_qty
+  3 long_liq_notional
+  4 short_liq_notional
+  5 event_count
+```
+
+`metrics` is the source for open-interest and open-interest-delta factors. `liquidationSnapshot` rows are minute buckets; Binance Vision USDT-M liquidation snapshots may be unavailable for modern BTCUSDT ranges, in which case the manifest should explicitly record missing source files and an availability note.
 
 ## Agent Rules
 
@@ -126,4 +154,3 @@ Raw files should preserve Binance Vision filenames. Cache files should have a ma
 - Treat tick shard files and their `{SYMBOL}_shards.json` manifest as one movable unit.
 - Do not delete large data files unless explicitly requested.
 - Keep this file tracked; do not commit large market data caches unless explicitly requested.
-
