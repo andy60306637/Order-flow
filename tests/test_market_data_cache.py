@@ -55,6 +55,31 @@ class TestMarketDataCache(unittest.TestCase):
         self.assertIsNotNone(loaded_manifest)
         self.assertTrue(np.array_equal(arr[:, 1], np.array([0.0001, -0.0002])))
         self.assertEqual(loaded_manifest["columns"], ["fundingTime", "fundingRate"])
+        self.assertEqual(loaded_manifest["start_ms"], 1735689600000)
+        self.assertEqual(loaded_manifest["end_ms"], 1735718400000)
+
+    def test_align_cache_column_ffill_and_exact(self):
+        market_data_cache.save_cache(
+            "metrics",
+            "BTCUSDT",
+            np.array([
+                [60_000, 100.0],
+                [180_000, 130.0],
+            ]),
+            columns=["timestamp_ms", "sum_open_interest"],
+            time_column="timestamp_ms",
+        )
+        open_times = np.array([0, 60_000, 120_000, 180_000, 240_000], dtype=np.int64)
+
+        ffilled = market_data_cache.align_cache_column(
+            "metrics", "BTCUSDT", open_times, "sum_open_interest"
+        )
+        exact = market_data_cache.align_cache_column(
+            "metrics", "BTCUSDT", open_times, "sum_open_interest", mode="exact", default=0.0
+        )
+
+        np.testing.assert_allclose(ffilled, np.array([np.nan, 100.0, 100.0, 130.0, 130.0]), equal_nan=True)
+        np.testing.assert_allclose(exact, np.array([0.0, 100.0, 0.0, 130.0, 0.0]))
 
     def test_premium_index_klines_requires_interval(self):
         with self.assertRaises(ValueError):

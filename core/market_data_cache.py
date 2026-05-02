@@ -5,7 +5,7 @@ import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -150,6 +150,8 @@ def save_cache(
     interval: str | None = None,
     market: str = "futures_um",
     source_files: Iterable[str | Path] = (),
+    time_column: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
 ) -> dict:
     data_paths.ensure_data_root_layout()
     if isinstance(rows, np.ndarray):
@@ -162,6 +164,19 @@ def save_cache(
 
     np.savez_compressed(str(cache_path(kind, symbol, interval=interval, market=market)), data=arr)
     source_names = [Path(p).name for p in source_files]
+    start_ms: int | None = None
+    end_ms: int | None = None
+    resolved_time_column = time_column
+    if arr.size and arr.ndim == 2 and arr.shape[1] > 0:
+        if resolved_time_column is None:
+            resolved_time_column = "timestamp_ms" if "timestamp_ms" in resolved_columns else resolved_columns[0]
+        if resolved_time_column in resolved_columns:
+            ts = arr[:, resolved_columns.index(resolved_time_column)]
+            ts = ts[np.isfinite(ts)]
+            if len(ts):
+                start_ms = int(np.nanmin(ts))
+                end_ms = int(np.nanmax(ts))
+
     manifest = {
         "format": "market_data_npz_v1",
         "market": market,
@@ -171,8 +186,13 @@ def save_cache(
         "columns": resolved_columns,
         "row_count": int(arr.shape[0]),
         "source_files": source_names,
+        "time_column": resolved_time_column,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
         "updated_at": datetime.now(tz=timezone.utc).isoformat(),
     }
+    if metadata:
+        manifest.update(dict(metadata))
     with open(manifest_path(kind, symbol, interval=interval, market=market), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2, ensure_ascii=False)
     return manifest
@@ -221,3 +241,64 @@ def load_cache(
         return arr, manifest
     except Exception:
         return None, None
+
+
+def column_index(manifest: Mapping[str, Any] | None, column: str) -> int | None:
+    if not manifest:
+        return None
+    columns = manifest.get("columns")
+    if not isinstance(columns, list):
+        return None
+    try:
+        return [str(c) for c in columns].index(column)
+    except ValueError:
+        return None
+
+
+def align_cache_column(
+    kind: str,
+    symbol: str,
+    open_times: np.ndarray,
+    value_column: str,
+    *,
+    time_column: str = "timestamp_ms",
+    interval: str | None = None,
+    market: str = "futures_um",
+    mode: str = "ffill",
+    default: float = np.nan,
+) -> np.ndarray:
+    """Align a cached market-data column to kline open times.
+
+    `ffill` uses the latest observation at or before each bar open, suitable for
+    funding and open-interest snapshots. `exact` maps identical timestamps and
+    fills missing bars with `default`, suitable for pre-aggregated bar data.
+    """
+    open_times = np.asarray(open_times, dtype=np.int64)
+    out = np.full(len(open_times), default, dtype=np.float64)
+    arr, manifest = load_cache(kind, symbol, interval=interval, market=market)
+    if arr is None or manifest is None or len(open_times) == 0 or arr.size == 0:
+        return out
+
+    t_idx = column_index(manifest, time_column)
+    v_idx = column_index(manifest, value_column)
+    if t_idx is None or v_idx is None:
+        return out
+
+    timestamps = arr[:, t_idx].astype(np.int64, copy=False)
+    values = arr[:, v_idx].astype(np.float64, copy=False)
+    order = np.argsort(timestamps, kind="stable")
+    timestamps = timestamps[order]
+    values = values[order]
+
+    if mode == "exact":
+        loc = np.searchsorted(timestamps, open_times, side="left")
+        valid = (loc < len(timestamps)) & (timestamps[np.minimum(loc, len(timestamps) - 1)] == open_times)
+        out[valid] = values[loc[valid]]
+        return out
+
+    if mode != "ffill":
+        raise ValueError(f"unsupported alignment mode: {mode!r}")
+    loc = np.searchsorted(timestamps, open_times, side="right") - 1
+    valid = loc >= 0
+    out[valid] = values[loc[valid]]
+    return out

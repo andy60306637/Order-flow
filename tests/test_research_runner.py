@@ -5,7 +5,14 @@ import unittest
 import numpy as np
 
 from core.data_types import Kline
-from research.base import GROUP_MEAN_REVERSION, GROUP_MICROSTRUCTURE, FACTOR_SIDE_LONG, FACTOR_SIDES, FactorBase
+from research.base import (
+    GROUP_CRYPTO_DERIVATIVES,
+    GROUP_MEAN_REVERSION,
+    GROUP_MICROSTRUCTURE,
+    FACTOR_SIDE_LONG,
+    FACTOR_SIDES,
+    FactorBase,
+)
 from research.registry import ensure_builtin_factors, get_factor, get_factor_info, list_factors, register_factor
 from research.runner import analyze_factors
 
@@ -59,6 +66,9 @@ class ResearchRunnerTests(unittest.TestCase):
         self.assertIn("lower_wick_delta_eff", names)
         self.assertIn("delta_eff_long", names)
         self.assertIn("delta_eff_short", names)
+        self.assertIn("funding_rate", names)
+        self.assertIn("open_interest_delta_15m", names)
+        self.assertIn("liq_imbalance_1m", names)
 
     def test_builtin_factor_metadata_classifies_side_and_group(self) -> None:
         lower = get_factor_info("lower_wick_to_body_ratio")
@@ -75,6 +85,9 @@ class ResearchRunnerTests(unittest.TestCase):
         self.assertEqual(delta_short["side"], "Short")
         self.assertEqual(lower["group"], GROUP_MEAN_REVERSION)
         self.assertEqual(delta["group"], GROUP_MICROSTRUCTURE)
+        funding = get_factor_info("funding_rate")
+        assert funding is not None
+        self.assertEqual(funding["group"], GROUP_CRYPTO_DERIVATIVES)
 
     def test_delta_eff_atomic_long_short_factors_are_opposites(self) -> None:
         klines = [
