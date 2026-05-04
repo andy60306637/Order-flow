@@ -67,7 +67,7 @@ class PipelineContext:
       - 輸入欄位：由 MultiPipelineRunner 注入
       - 系統欄位：Pipeline 識別與資源配置
       - RegimeStage：市場狀態
-      - SessionStage：交易時段（寫入 regime_meta["session"]）
+      - RegimeStage session dimension：交易時段（寫入 regime_meta["session"]）
       - AlphaStage：方向與進出場價格
       - RRStage：目標 TP、倉位大小
       - FeeStage：費用核算

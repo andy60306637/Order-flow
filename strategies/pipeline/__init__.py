@@ -6,24 +6,25 @@ Pipeline 交易策略架構套件。
         TradingPipeline, MultiPipelineRunner, MultiPipelineStrategy,
         PipelineDef, PipelineContext, PipelineResult, SharedContext,
         RegimeComponent, ATRComponent, SessionComponent, VolatilityComponent,
-        RegimeStage, SessionStage, AlphaStage, RRStage, FeeStage,
+        RegimeStage, AlphaStage, RRStage, FeeStage,
     )
 """
 from strategies.pipeline.context import PipelineContext, SharedContext
 from strategies.pipeline.result import PipelineResult
 from strategies.pipeline.component import (
     SharedComponent,
+    RegimeClassifier,
     ATRComponent,
     RegimeComponent,
     SessionComponent,
     VolatilityComponent,
+    MicroVolatilityComponent,
     TickDeltaComponent,
     TickVWAPComponent,
 )
 from strategies.pipeline.stages import (
     PipelineStage,
     RegimeStage,
-    SessionStage,
     AlphaStage,
     RRStage,
     FeeStage,
@@ -41,16 +42,17 @@ __all__ = [
     "PipelineResult",
     # Components
     "SharedComponent",
+    "RegimeClassifier",
     "ATRComponent",
     "RegimeComponent",
     "SessionComponent",
     "VolatilityComponent",
+    "MicroVolatilityComponent",
     "TickDeltaComponent",
     "TickVWAPComponent",
     # Stages
     "PipelineStage",
     "RegimeStage",
-    "SessionStage",
     "AlphaStage",
     "RRStage",
     "FeeStage",

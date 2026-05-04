@@ -10,7 +10,6 @@ Pipeline Stage 定義。
 
 內建 Stages：
   RegimeStage    市場狀態過濾
-  SessionStage   交易時段過濾
   AlphaStage     一個或多個 SignalModule 組合（AND / SCORE）
   RRStage        TP 計算 + 最低 RR 確認 + 倉位大小
   FeeStage       手續費覆蓋確認（Pipeline 最後一道關卡）
@@ -18,6 +17,7 @@ Pipeline Stage 定義。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from typing import Optional
 
 from strategies.modules.capital_management import CapitalConfig, CapitalModule
@@ -25,87 +25,122 @@ from strategies.modules.exit_management import ExitConfig, ExitModule
 from strategies.modules.signal_trigger import SignalModule
 from strategies.pipeline.component import (
     ATRComponent,
-    RegimeComponent,
-    SessionComponent,
+    RegimeClassifier,
     SharedComponent,
 )
 from strategies.pipeline.context import PipelineContext
 
 
-# ── 抽象基底 ──────────────────────────────────────────────────────────────────
-
 class PipelineStage(ABC):
-    """所有 Pipeline Stage 的抽象基底。"""
+    """Base class for all pipeline stages."""
 
     name: str = "UnnamedStage"
 
     @abstractmethod
     def process(self, ctx: PipelineContext) -> Optional[PipelineContext]:
-        """回傳 ctx（繼續）或 None（阻斷）。"""
+        """Return ctx to continue or None to stop the pipeline."""
         ...
 
 
-# ── RegimeStage ───────────────────────────────────────────────────────────────
-
 class RegimeStage(PipelineStage):
     """
-    讀取（或觸發計算）市場 Regime，依白名單過濾。
+    Regime filter stage.
 
-    RegimeComponent 的計算結果由 SharedContext 快取，
-    同一根 K 棒上所有 Pipeline 共用同一份結果。
-
-    填入 ctx：regime, regime_meta
+    One pipeline should have one RegimeStage. Trend, session, volatility, or
+    other RegimeClassifier components are modeled as dimensions inside it.
     """
 
     name = "RegimeStage"
 
     def __init__(
         self,
-        component:       RegimeComponent,
-        allowed_regimes: list[str],
+        component: RegimeClassifier | Sequence[RegimeClassifier] | None = None,
+        allowed_regimes: Sequence[str] | Mapping[str, Sequence[str]] | None = None,
+        *,
+        components: Sequence[RegimeClassifier] | None = None,
+        allowed: Sequence[str] | Mapping[str, Sequence[str]] | None = None,
+        session_component: RegimeClassifier | None = None,
+        allowed_sessions: Sequence[str] | None = None,
     ) -> None:
-        self.component = component
-        self.allowed   = set(allowed_regimes)
+        selected = components if components is not None else component
+        if selected is None:
+            raise ValueError("RegimeStage requires at least one RegimeClassifier")
+
+        if isinstance(selected, RegimeClassifier):
+            self.components = [selected]
+        else:
+            self.components = list(selected)
+
+        if session_component is not None:
+            self.components.append(session_component)
+        if not self.components:
+            raise ValueError("RegimeStage requires at least one RegimeClassifier")
+
+        allowed_spec = allowed if allowed is not None else allowed_regimes
+        self.allowed_by_dimension = self._normalize_allowed(allowed_spec)
+        if allowed_sessions is not None:
+            self.allowed_by_dimension["session"] = set(allowed_sessions)
 
     def process(self, ctx: PipelineContext) -> Optional[PipelineContext]:
-        result = ctx.shared.get_or_compute(
-            self.component.component_id,
-            lambda: self.component.compute(ctx.klines, ctx.idx, ctx.tick_map),
-        )
-        ctx.regime      = result["regime"]
-        ctx.regime_meta = dict(result)
-        return ctx if ctx.regime in self.allowed else None
+        ctx.regime_meta.setdefault("regime_dimensions", {})
 
+        for component in self.components:
+            result = ctx.shared.get_or_compute(
+                component.component_id,
+                lambda component=component: component.compute(ctx.klines, ctx.idx, ctx.tick_map),
+            )
+            dimension = self._dimension(component)
+            label = self._label(result)
 
-# ── SessionStage ──────────────────────────────────────────────────────────────
+            ctx.regime_meta["regime_dimensions"][dimension] = label
+            ctx.regime_meta[dimension] = dict(result)
+            self._write_legacy_meta(ctx, dimension, result, label)
 
-class SessionStage(PipelineStage):
-    """
-    讀取（或觸發計算）當前 UTC 交易時段，依白名單過濾。
+            allowed = self.allowed_by_dimension.get(dimension)
+            if allowed is not None and label not in allowed:
+                return None
 
-    時段名稱：asian / london / ny / overlap / off
-    結果附加至 ctx.regime_meta["session"]（方便日誌追蹤）。
-    """
+        return ctx
 
-    name = "SessionStage"
-
-    def __init__(
+    def _normalize_allowed(
         self,
-        component:        SessionComponent,
-        allowed_sessions: list[str],
-    ) -> None:
-        self.component = component
-        self.allowed   = set(allowed_sessions)
+        allowed: Sequence[str] | Mapping[str, Sequence[str]] | None,
+    ) -> dict[str, set[str]]:
+        if allowed is None:
+            return {}
+        if isinstance(allowed, Mapping):
+            return {dimension: set(labels) for dimension, labels in allowed.items()}
+        return {self._dimension(self.components[0]): set(allowed)}
 
-    def process(self, ctx: PipelineContext) -> Optional[PipelineContext]:
-        result  = ctx.shared.get_or_compute(
-            self.component.component_id,
-            lambda: self.component.compute(ctx.klines, ctx.idx, ctx.tick_map),
-        )
-        session = result["session"]
-        ctx.regime_meta["session"]         = session
-        ctx.regime_meta["active_sessions"] = result["active_sessions"]
-        return ctx if session in self.allowed else None
+    @staticmethod
+    def _dimension(component: RegimeClassifier) -> str:
+        return getattr(component, "dimension", component.component_id)
+
+    @staticmethod
+    def _label(result: dict) -> str:
+        label = result.get("label", result.get("regime", result.get("session")))
+        if label is None:
+            raise ValueError("RegimeClassifier.compute() must return label/regime/session")
+        return str(label)
+
+    @staticmethod
+    def _write_legacy_meta(
+        ctx: PipelineContext,
+        dimension: str,
+        result: dict,
+        label: str,
+    ) -> None:
+        if dimension == "trend":
+            ctx.regime = label
+            ctx.regime_meta.update(result)
+            ctx.regime_meta["regime"] = label
+            return
+
+        if dimension == "session":
+            ctx.regime_meta.update(result)
+
+
+
 
 
 # ── AlphaStage ────────────────────────────────────────────────────────────────
