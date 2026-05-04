@@ -5,6 +5,7 @@ from strategies.modules.session_filter import SessionConfig, SessionModule
 from strategies.modules.risk_management import RiskConfig, RiskModule
 from strategies.modules.exit_management import ExitConfig, ExitModule
 from strategies.modules.signal_trigger import SignalModule, StrategySignalModule
+from strategies.modules.fee_coverage import FeeConfig, FeeModule
 
 __all__ = [
     "BaseModule", "ModuleConfig",
@@ -13,4 +14,5 @@ __all__ = [
     "RiskConfig", "RiskModule",
     "ExitConfig", "ExitModule",
     "SignalModule", "StrategySignalModule",
+    "FeeConfig", "FeeModule",
 ]
