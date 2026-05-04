@@ -16,6 +16,7 @@ Tick 資料支援：
   RegimeComponent     → regime             純 kline
   SessionComponent    → session            純 kline（時間戳）
   VolatilityComponent → volatility_{period} 純 kline
+  MicroVolatilityComponent → micro_volatility_{period}_l{N} L2 snapshot-first
   TickDeltaComponent  → tick_delta         tick-first，kline fallback
 """
 from __future__ import annotations
@@ -23,13 +24,16 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Optional
+from zoneinfo import ZoneInfo
+from typing import Any, Optional
 
 import numpy as np
 
 from core.data_types import Kline
+from core.micro_volatility import MicroVolatilityEngine
 
 TickBarMap = Mapping[int, np.ndarray]
+MicroSnapshotMap = Mapping[int, Any]
 
 
 class SharedComponent(ABC):
@@ -58,6 +62,22 @@ class SharedComponent(ABC):
         確保所有 Component 在無 tick 環境下仍可執行。
         """
         ...
+
+
+class RegimeClassifier(SharedComponent, ABC):
+    """
+    Regime 多維度分類器基底。
+
+    繼承此類別的 Component 代表市場狀態的一個維度（趨勢、時段、波動…），
+    可被 RegimeStage 組合，每個維度獨立計算並過濾。
+
+    規範：
+      - dimension  : 唯一維度名稱，作為 ctx.regime[dimension] 的鍵
+      - compute()  : 回傳 dict 必須包含 "label" 鍵，代表此維度的分類結果（str）
+                     其餘鍵為詳細數值，存入 ctx.regime_meta[dimension]
+    """
+
+    dimension: str
 
 
 # ── ATRComponent ──────────────────────────────────────────────────────────────
@@ -101,25 +121,28 @@ class ATRComponent(SharedComponent):
 
 # ── RegimeComponent ───────────────────────────────────────────────────────────
 
-class RegimeComponent(SharedComponent):
+class RegimeComponent(RegimeClassifier):
     """
-    市場 Regime 分類。
+    趨勢 Regime 分類器（dimension = "trend"）。
 
     演算法：EMA slope（趨勢方向）+ ATR% 高低（波動強度）
-    輸出 regime：
+    label：
       "trending_bull"  EMA 向上 + 正常波動
       "trending_bear"  EMA 向下 + 正常波動
       "ranging"        EMA 平坦
       "volatile"       ATR% 超過閾值（不論方向）
 
     回傳：
-      regime       : str
-      ema_slope    : float  (相對斜率，5 bar EMA 變化率)
-      ema          : float  (當前 EMA 值)
-      atr_pct      : float  (ATR%)
+      label        : str   （= regime，供 RegimeStage 過濾）
+      regime       : str   （同 label，向下相容）
+      ema_slope    : float
+      ema          : float
+      atr_pct      : float
+      atr          : float
     """
 
     component_id = "regime"
+    dimension    = "trend"
 
     def __init__(
         self,
@@ -182,7 +205,8 @@ class RegimeComponent(SharedComponent):
             regime = "ranging"
 
         return {
-            "regime":    regime,
+            "label":     regime,   # RegimeClassifier 標準鍵
+            "regime":    regime,   # 向下相容
             "ema_slope": float(slope),
             "ema":       float(ema),
             "atr_pct":   float(atr_pct),
@@ -192,24 +216,37 @@ class RegimeComponent(SharedComponent):
 
 # ── SessionComponent ──────────────────────────────────────────────────────────
 
-class SessionComponent(SharedComponent):
+class SessionComponent(RegimeClassifier):
     """
-    UTC 時段識別。
+    交易時段分類器（dimension = "session"）。
+
+    完整支援美國（EST/EDT）與英國（GMT/BST）DST。
+
+    時段定義（以各地交易所本地時間為準）：
+      asian   : 09:00–18:00 Asia/Tokyo
+      london  : 08:00–17:00 Europe/London  （自動切換 GMT/BST）
+      ny      : 08:00–17:00 America/New_York（自動切換 EST/EDT）
 
     回傳：
-      session         : str   主時段名稱
-      active_sessions : list  所有重疊時段
-      utc_hour        : int
+      label           : str   （= session，供 RegimeStage 過濾）
+      session         : str   主時段名稱（overlap > ny > london > asian > off）
+      active_sessions : list  所有當前活躍時段
+      utc_hour        : int   UTC 小時
+      london_hour     : int   倫敦本地小時
+      ny_hour         : int   紐約本地小時
     """
 
     component_id = "session"
+    dimension    = "session"
 
-    SESSION_HOURS: dict[str, tuple[int, int]] = {
-        "asian":   (0,  8),
-        "london":  (7,  16),
-        "ny":      (13, 22),
-        "overlap": (13, 16),  # London-NY 重疊
-    }
+    _TZ_LONDON = ZoneInfo("Europe/London")
+    _TZ_NY     = ZoneInfo("America/New_York")
+    _TZ_TOKYO  = ZoneInfo("Asia/Tokyo")
+
+    # 各時段以本地時間定義（start_hour, end_hour），end_hour 不含
+    _LONDON_HOURS = (8, 17)   # 倫敦本地：08:00–17:00（BST/GMT 自動切換）
+    _NY_HOURS     = (8, 17)   # 紐約本地：08:00–17:00（EDT/EST 自動切換）
+    _ASIAN_HOURS  = (9, 18)   # 東京本地：09:00–18:00 JST（= UTC 00:00–09:00，日本無 DST）
 
     def compute(
         self,
@@ -218,23 +255,42 @@ class SessionComponent(SharedComponent):
         tick_map: Optional[TickBarMap] = None,
     ) -> dict:
         ts_ms = klines[idx].open_time
-        hour  = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).hour
+        dt_utc = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
 
-        active = [
-            name for name, (s, e) in self.SESSION_HOURS.items()
-            if s <= hour < e
-        ]
-        if "overlap" in active:
+        london_hour = dt_utc.astimezone(self._TZ_LONDON).hour
+        ny_hour     = dt_utc.astimezone(self._TZ_NY).hour
+        tokyo_hour  = dt_utc.astimezone(self._TZ_TOKYO).hour
+
+        is_london = self._LONDON_HOURS[0] <= london_hour < self._LONDON_HOURS[1]
+        is_ny     = self._NY_HOURS[0]     <= ny_hour     < self._NY_HOURS[1]
+        is_asian  = self._ASIAN_HOURS[0]  <= tokyo_hour  < self._ASIAN_HOURS[1]
+
+        active: list[str] = []
+        if is_asian:
+            active.append("asian")
+        if is_london:
+            active.append("london")
+        if is_ny:
+            active.append("ny")
+
+        if is_london and is_ny:
             primary = "overlap"
-        elif active:
-            primary = active[0]
+        elif is_ny:
+            primary = "ny"
+        elif is_london:
+            primary = "london"
+        elif is_asian:
+            primary = "asian"
         else:
             primary = "off"
 
         return {
-            "session":         primary,
+            "label":           primary,   # RegimeClassifier 標準鍵
+            "session":         primary,   # 向下相容
             "active_sessions": active,
-            "utc_hour":        hour,
+            "utc_hour":        dt_utc.hour,
+            "london_hour":     london_hour,
+            "ny_hour":         ny_hour,
         }
 
 
@@ -282,6 +338,128 @@ class VolatilityComponent(SharedComponent):
         pct = float(np.mean([v <= recent_vol for v in all_vols]) * 100) if all_vols else 50.0
 
         return {"realized_vol": recent_vol, "vol_percentile": pct}
+
+
+# ── MicroVolatilityComponent ─────────────────────────────────────────────────
+
+class MicroVolatilityComponent(SharedComponent):
+    """
+    Microstructural fragility component.
+
+    This is a pipeline wrapper around ``MicroVolatilityEngine``. In live mode,
+    prefer using the engine directly and feeding it every order-book/trade
+    update. In backtest/pipeline mode, pass ``snapshot_map`` keyed by
+    ``Kline.open_time``. Each value can be:
+      {"orderbook": {...}, "trade": {...}}
+      (orderbook_snapshot, trade_snapshot)
+      one dict containing both order-book and trade fields
+
+    If no L2 snapshot is available, kline fallback is used only to keep the
+    pipeline stable; ``source`` will be ``"kline_fallback"``.
+    """
+
+    def __init__(
+        self,
+        period_label: str = "15m",
+        window_size: int = 15,
+        normalization_window: int = 100,
+        top_n: int = 10,
+        weights: tuple[float, float, float] = (0.34, 0.33, 0.33),
+        snapshot_map: Optional[MicroSnapshotMap] = None,
+        use_kline_fallback: bool = True,
+    ) -> None:
+        self.period_label = period_label
+        self.window_size = window_size
+        self.normalization_window = normalization_window
+        self.top_n = top_n
+        self.weights = weights
+        self.snapshot_map = snapshot_map
+        self.use_kline_fallback = use_kline_fallback
+        safe_period = period_label.lower().replace(" ", "")
+        self.component_id = f"micro_volatility_{safe_period}_l{top_n}"
+
+    def compute(
+        self,
+        klines:   list[Kline],
+        idx:      int,
+        tick_map: Optional[TickBarMap] = None,
+    ) -> dict:
+        engine = MicroVolatilityEngine(
+            window_size=self.window_size,
+            normalization_window=self.normalization_window,
+            top_n=self.top_n,
+            weights=self.weights,
+        )
+        lookback = self.window_size + self.normalization_window
+        start = max(0, idx - lookback + 1)
+        source = "missing_snapshot"
+        updates = 0
+
+        for k in klines[start : idx + 1]:
+            orderbook_snapshot, trade_snapshot, item_source = self._snapshots_for_kline(k)
+            if orderbook_snapshot is None:
+                continue
+            engine.update(orderbook_snapshot, trade_snapshot)
+            source = item_source
+            updates += 1
+
+        result = engine.snapshot()
+        result.update({
+            "source": source,
+            "updates": updates,
+            "period": self.period_label,
+            "window_size": self.window_size,
+            "normalization_window": self.normalization_window,
+            "top_n": self.top_n,
+        })
+        return result
+
+    def _snapshots_for_kline(self, k: Kline) -> tuple[Optional[Any], Optional[Any], str]:
+        if self.snapshot_map is not None:
+            item = self.snapshot_map.get(k.open_time)
+            if item is not None:
+                orderbook, trade = self._parse_snapshot_item(item)
+                if orderbook is not None:
+                    return orderbook, trade, "snapshot"
+
+        if not self.use_kline_fallback:
+            return None, None, "missing_snapshot"
+
+        spread = max(k.high - k.low, 0.0)
+        half_spread = spread / 2.0
+        orderbook_snapshot = {
+            "best_bid_price": max(k.close - half_spread, 0.0),
+            "best_ask_price": k.close + half_spread,
+            "bids_volume_top_N": max(k.volume - k.taker_buy_volume, 0.0),
+            "asks_volume_top_N": max(k.taker_buy_volume, 0.0),
+        }
+        trade_snapshot = {
+            "taker_buy_volume": max(k.taker_buy_volume, 0.0),
+            "taker_sell_volume": max(k.volume - k.taker_buy_volume, 0.0),
+        }
+        return orderbook_snapshot, trade_snapshot, "kline_fallback"
+
+    @staticmethod
+    def _parse_snapshot_item(item: Any) -> tuple[Optional[Any], Optional[Any]]:
+        if isinstance(item, tuple) and len(item) >= 2:
+            return item[0], item[1]
+        if isinstance(item, list) and len(item) >= 2:
+            return item[0], item[1]
+        if isinstance(item, Mapping):
+            orderbook = (
+                item.get("orderbook")
+                or item.get("orderbook_snapshot")
+                or item.get("book")
+            )
+            trade = (
+                item.get("trade")
+                or item.get("trade_snapshot")
+                or item.get("trades")
+            )
+            if orderbook is not None:
+                return orderbook, trade
+            return item, item
+        return item, None
 
 
 # ── TickDeltaComponent ────────────────────────────────────────────────────────
