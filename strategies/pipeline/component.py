@@ -17,7 +17,9 @@ Tick 資料支援：
   SessionComponent    → session            純 kline（時間戳）
   VolatilityComponent → volatility_{period} 純 kline
   MicroVolatilityComponent → micro_volatility_{period}_l{N} L2 snapshot-first
-  TickDeltaComponent  → tick_delta         tick-first，kline fallback
+  TickDeltaComponent       → tick_delta              tick-first，kline fallback
+  TickVWAPComponent        → tick_vwap               tick-first，kline fallback
+  VolumeProfileComponent   → volume_profile_*        tick-first，kline fallback
 """
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ import numpy as np
 
 from core.data_types import Kline
 from core.micro_volatility import MicroVolatilityEngine
+from core.volume_profile import VolumeProfile, build_composite_profile, build_volume_profile
 
 TickBarMap = Mapping[int, np.ndarray]
 MicroSnapshotMap = Mapping[int, Any]
@@ -575,4 +578,154 @@ class TickVWAPComponent(SharedComponent):
             "vwap_dev":   vwap_dev,
             "tick_count": 0,
             "source":     "kline_fallback",
+        }
+
+
+# ── VolumeProfileComponent ────────────────────────────────────────────────────
+
+class VolumeProfileComponent(SharedComponent):
+    """
+    滾動 Volume Profile（tick-first，kline fallback）。
+
+    以過去 window 根 K 棒建立 composite Volume Profile，計算交易密集區（Value Area）、
+    POC、VAH、VAL 及 HVN / LVN 節點。
+
+    觸碰帶（touch band）：
+      POC / VAH / VAL 以帶寬 (current_price × touch_band_pct) 取代單一價格觸碰，
+      回傳 price_in_xxx_band 布林值供策略層直接使用。
+      touch_band_pct 預設值由 DEFAULT_TOUCH_BAND_PCT 決定，程式員可修改類別屬性覆蓋。
+
+    回傳：
+      poc_price         : float
+      vah               : float
+      val               : float
+      poc_band          : tuple[float, float]  (低界, 高界)
+      vah_band          : tuple[float, float]
+      val_band          : tuple[float, float]
+      price_in_poc_band : bool
+      price_in_vah_band : bool
+      price_in_val_band : bool
+      hvn_prices        : list[float]
+      lvn_prices        : list[float]
+      in_value_area     : bool
+      above_poc         : bool
+      total_volume      : float
+      source            : str  "tick" | "kline_fallback" | "insufficient_data"
+    """
+
+    DEFAULT_TOUCH_BAND_PCT: float = 0.001  # 0.1% — 程式員可覆蓋此類別屬性
+
+    def __init__(
+        self,
+        interval: str = "1h",
+        window: int = 24,
+        tick_size: float = 1.0,
+        value_area_pct: float = 0.70,
+        touch_band_pct: Optional[float] = None,
+        hvn_threshold: float = 1.5,
+        lvn_threshold: float = 0.5,
+    ) -> None:
+        self.interval       = interval
+        self.window         = window
+        self.tick_size      = tick_size
+        self.value_area_pct = value_area_pct
+        self.touch_band_pct = self.DEFAULT_TOUCH_BAND_PCT if touch_band_pct is None else touch_band_pct
+        self.hvn_threshold  = hvn_threshold
+        self.lvn_threshold  = lvn_threshold
+
+        safe_interval = interval.lower().replace(" ", "")
+        va_pct = int(round(value_area_pct * 100))
+        tb_bp  = int(round(self.touch_band_pct * 10000))
+        self.component_id = f"volume_profile_{safe_interval}_{window}_va{va_pct}_tb{tb_bp}"
+
+    def compute(
+        self,
+        klines:   list[Kline],
+        idx:      int,
+        tick_map: Optional[TickBarMap] = None,
+    ) -> dict:
+        start          = max(0, idx - self.window + 1)
+        window_klines  = klines[start : idx + 1]
+        current_price  = klines[idx].close
+
+        vp: Optional[VolumeProfile] = None
+        source = "insufficient_data"
+
+        if tick_map is not None:
+            open_times = [k.open_time for k in window_klines]
+            vp = build_composite_profile(
+                tick_map, open_times,
+                self.tick_size, self.value_area_pct,
+                self.hvn_threshold, self.lvn_threshold,
+            )
+            if vp is not None:
+                source = "tick"
+
+        if vp is None:
+            vp = self._build_from_klines(window_klines)
+            if vp is not None:
+                source = "kline_fallback"
+
+        if vp is None:
+            return self._empty_result(current_price)
+
+        band_size = current_price * self.touch_band_pct
+
+        return {
+            "poc_price":         vp.poc_price,
+            "vah":               vp.vah,
+            "val":               vp.val,
+            "poc_band":          (vp.poc_price - band_size, vp.poc_price + band_size),
+            "vah_band":          (vp.vah - band_size, vp.vah + band_size),
+            "val_band":          (vp.val - band_size, vp.val + band_size),
+            "price_in_poc_band": abs(current_price - vp.poc_price) <= band_size,
+            "price_in_vah_band": abs(current_price - vp.vah) <= band_size,
+            "price_in_val_band": abs(current_price - vp.val) <= band_size,
+            "hvn_prices":        vp.hvn_prices,
+            "lvn_prices":        vp.lvn_prices,
+            "in_value_area":     vp.is_in_value_area(current_price),
+            "above_poc":         current_price > vp.poc_price,
+            "total_volume":      vp.total_volume,
+            "source":            source,
+        }
+
+    def _build_from_klines(self, klines: list[Kline]) -> Optional[VolumeProfile]:
+        rows: list[list[float]] = []
+        for k in klines:
+            if k.volume <= 0:
+                continue
+            typical = (k.high + k.low + k.close) / 3.0
+            buy_vol  = k.taker_buy_volume
+            sell_vol = k.volume - k.taker_buy_volume
+            if buy_vol > 0:
+                rows.append([float(k.open_time), typical, buy_vol, 0.0])
+            if sell_vol > 0:
+                rows.append([float(k.open_time), typical, sell_vol, 1.0])
+
+        if not rows:
+            return None
+
+        ticks = np.array(rows, dtype=float)
+        return build_volume_profile(
+            ticks, self.tick_size, self.value_area_pct,
+            self.hvn_threshold, self.lvn_threshold,
+        )
+
+    def _empty_result(self, current_price: float) -> dict:
+        return {
+            "poc_price":         current_price,
+            "vah":               current_price,
+            "val":               current_price,
+            "poc_band":          (current_price, current_price),
+            "vah_band":          (current_price, current_price),
+            "val_band":          (current_price, current_price),
+            "price_in_poc_band": False,
+            "price_in_vah_band": False,
+            "price_in_val_band": False,
+            "hvn_prices":        [],
+            "lvn_prices":        [],
+            "in_value_area":     False,
+            "above_poc":         False,
+            "total_volume":      0.0,
+            "source":            "insufficient_data",
         }
