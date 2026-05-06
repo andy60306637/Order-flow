@@ -12,14 +12,15 @@ Tick 資料支援：
   確保回測（有 tick）與實盤快速模式（僅 kline）都能執行。
 
 內建 Components：
-  ATRComponent        → atr_{period}       純 kline
-  RegimeComponent     → regime             純 kline
-  SessionComponent    → session            純 kline（時間戳）
-  VolatilityComponent → volatility_{period} 純 kline
-  MicroVolatilityComponent → micro_volatility_{period}_l{N} L2 snapshot-first
-  TickDeltaComponent       → tick_delta              tick-first，kline fallback
-  TickVWAPComponent        → tick_vwap               tick-first，kline fallback
-  VolumeProfileComponent   → volume_profile_*        tick-first，kline fallback
+  ATRComponent                  → atr_{period}            純 kline
+  RegimeComponent               → regime                  純 kline
+  SessionComponent              → session                 純 kline（時間戳）
+  VolatilityComponent           → volatility_{period}     純 kline
+  MarketVolatilityRegimeComponent → market_vol_regime     純 kline
+  MicroVolatilityComponent      → micro_volatility_{period}_l{N} L2 snapshot-first
+  TickDeltaComponent            → tick_delta              tick-first，kline fallback
+  TickVWAPComponent             → tick_vwap               tick-first，kline fallback
+  VolumeProfileComponent        → volume_profile_*        tick-first，kline fallback
 """
 from __future__ import annotations
 
@@ -728,4 +729,254 @@ class VolumeProfileComponent(SharedComponent):
             "above_poc":         False,
             "total_volume":      0.0,
             "source":            "insufficient_data",
+        }
+
+
+# ── MarketVolatilityRegimeComponent ──────────────────────────────────────────
+
+class MarketVolatilityRegimeComponent(RegimeClassifier):
+    """
+    市場波動率環境分類器（dimension = "market_vol_regime"）。
+
+    綜合五個指標判斷市場的波動率環境（方向性擴張 / 均值回歸 / 壓縮 / 混沌）。
+
+    Regime 定義：
+      MEAN_REVERSION   rv60_pct < 60  & atr10_atr60 < 1.2 & er30 < 0.30 & adx14 < 25
+      BREAKOUT_TREND   rv60_pct >= 60 & atr10_atr60 > 1.3 & er30 > 0.40 & adx14 > 25
+      CHAOTIC_HIGH_VOL rv60_pct >= 85 & atr10_atr60 > 1.5 & er30 < 0.30
+      COMPRESSION_WAIT rv60_pct < 30  & bb_width_pct < 20
+      NEUTRAL          以上條件均不滿足
+
+    回傳：
+      label        : str   Regime 名稱（= regime，供 RegimeStage 過濾）
+      regime       : str   同 label，向下相容
+      rv60_pct     : float 已實現波動率(rv_period) 百分位（0–100）
+      atr10_atr60  : float ATR(atr_short) / ATR(atr_long) 擴張比
+      er30         : float Kaufman 效率比（0–1；越高越趨勢）
+      adx14        : float ADX(adx_period)
+      bb_width_pct : float Bollinger 帶寬百分位（0–100）
+      atr10        : float ATR(atr_short) 絕對值
+      atr60        : float ATR(atr_long)  絕對值
+    """
+
+    component_id = "market_vol_regime"
+    dimension    = "market_vol_regime"
+
+    def __init__(
+        self,
+        rv_period:  int = 60,
+        atr_short:  int = 10,
+        atr_long:   int = 60,
+        er_period:  int = 30,
+        adx_period: int = 14,
+        bb_period:  int = 20,
+        lookback:   int = 100,
+    ) -> None:
+        self.rv_period  = rv_period
+        self.atr_short  = atr_short
+        self.atr_long   = atr_long
+        self.er_period  = er_period
+        self.adx_period = adx_period
+        self.bb_period  = bb_period
+        self.lookback   = lookback
+
+    def compute(
+        self,
+        klines:   list[Kline],
+        idx:      int,
+        tick_map: Optional[TickBarMap] = None,
+    ) -> dict:
+        min_bars = max(
+            self.rv_period + self.lookback,
+            self.atr_long * 3,
+            self.adx_period * 3,
+            self.bb_period + self.lookback,
+        )
+        start  = max(0, idx - min_bars + 1)
+        window = klines[start : idx + 1]
+
+        min_need = max(
+            self.rv_period + 2,
+            self.atr_long + 2,
+            self.er_period + 2,
+            self.adx_period * 2 + 2,
+        )
+        if len(window) < min_need:
+            return self._neutral_result()
+
+        closes = np.array([k.close for k in window], dtype=float)
+        highs  = np.array([k.high  for k in window], dtype=float)
+        lows   = np.array([k.low   for k in window], dtype=float)
+
+        rv60_pct     = self._rv_percentile(closes, self.rv_period, self.lookback)
+        atr10        = self._wilder_atr(highs, lows, closes, self.atr_short)
+        atr60        = self._wilder_atr(highs, lows, closes, self.atr_long)
+        atr10_atr60  = atr10 / (atr60 + 1e-10)
+        er30         = self._efficiency_ratio(closes, self.er_period)
+        adx14        = self._adx(highs, lows, closes, self.adx_period)
+        bb_width_pct = self._bb_width_percentile(closes, self.bb_period, self.lookback)
+
+        if rv60_pct < 60 and atr10_atr60 < 1.2 and er30 < 0.30 and adx14 < 25:
+            regime = "MEAN_REVERSION"
+        elif rv60_pct >= 60 and atr10_atr60 > 1.3 and er30 > 0.40 and adx14 > 25:
+            regime = "BREAKOUT_TREND"
+        elif rv60_pct >= 85 and atr10_atr60 > 1.5 and er30 < 0.30:
+            regime = "CHAOTIC_HIGH_VOL"
+        elif rv60_pct < 30 and bb_width_pct < 20:
+            regime = "COMPRESSION_WAIT"
+        else:
+            regime = "NEUTRAL"
+
+        return {
+            "label":        regime,
+            "regime":       regime,
+            "rv60_pct":     float(rv60_pct),
+            "atr10_atr60":  float(atr10_atr60),
+            "er30":         float(er30),
+            "adx14":        float(adx14),
+            "bb_width_pct": float(bb_width_pct),
+            "atr10":        float(atr10),
+            "atr60":        float(atr60),
+        }
+
+    # ── indicator helpers ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _wilder_atr(
+        highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int
+    ) -> float:
+        """Wilder-smoothed ATR scalar (last value)."""
+        if len(highs) < period + 1:
+            return 0.0
+        prev_c = closes[:-1]
+        tr = np.maximum.reduce([
+            highs[1:] - lows[1:],
+            np.abs(highs[1:] - prev_c),
+            np.abs(lows[1:]  - prev_c),
+        ])
+        val = float(np.mean(tr[:period]))
+        for v in tr[period:]:
+            val = (val * (period - 1) + v) / period
+        return val
+
+    @staticmethod
+    def _efficiency_ratio(closes: np.ndarray, period: int) -> float:
+        """Kaufman Efficiency Ratio: net move / sum of bar-by-bar moves."""
+        if len(closes) < period + 1:
+            return 0.5
+        net  = abs(float(closes[-1] - closes[-(period + 1)]))
+        path = float(np.sum(np.abs(np.diff(closes[-(period + 1):]))))
+        return net / (path + 1e-10)
+
+    @staticmethod
+    def _adx(
+        highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int
+    ) -> float:
+        """ADX scalar (last value) via full Wilder-smooth of DX series."""
+        n = len(highs)
+        if n < period * 2 + 2:
+            return 0.0
+
+        tr       = np.zeros(n)
+        plus_dm  = np.zeros(n)
+        minus_dm = np.zeros(n)
+        for i in range(1, n):
+            h, l, pc    = highs[i], lows[i], closes[i - 1]
+            tr[i]        = max(h - l, abs(h - pc), abs(l - pc))
+            up            = highs[i] - highs[i - 1]
+            dn            = lows[i - 1] - lows[i]
+            plus_dm[i]  = up if up > dn and up > 0 else 0.0
+            minus_dm[i] = dn if dn > up and dn > 0 else 0.0
+
+        # Wilder smoothing: seed at index `period` using bars 1..period
+        def _ws(arr: np.ndarray) -> np.ndarray:
+            out = np.full(n, np.nan)
+            if n < period + 1:
+                return out
+            out[period] = float(np.mean(arr[1: period + 1]))
+            for i in range(period + 1, n):
+                out[i] = (out[i - 1] * (period - 1) + arr[i]) / period
+            return out
+
+        atr_s   = _ws(tr)
+        plus_s  = _ws(plus_dm)
+        minus_s = _ws(minus_dm)
+
+        eps      = 1e-10
+        plus_di  = np.where(atr_s > 0, 100.0 * plus_s  / (atr_s + eps), 0.0)
+        minus_di = np.where(atr_s > 0, 100.0 * minus_s / (atr_s + eps), 0.0)
+        di_sum   = plus_di + minus_di
+        dx       = np.where(di_sum > 0, 100.0 * np.abs(plus_di - minus_di) / (di_sum + eps), 0.0)
+
+        # ADX = Wilder smooth of DX; seed with mean of first `period` valid DX values
+        seed_i  = 2 * period - 1  # first `period` valid DX values span [period, 2*period-1]
+        if seed_i >= n:
+            return 0.0
+        adx_arr = np.full(n, np.nan)
+        adx_arr[seed_i] = float(np.mean(dx[period: seed_i + 1]))
+        for i in range(seed_i + 1, n):
+            adx_arr[i] = (adx_arr[i - 1] * (period - 1) + dx[i]) / period
+
+        valid = adx_arr[~np.isnan(adx_arr)]
+        return float(valid[-1]) if len(valid) > 0 else 0.0
+
+    @staticmethod
+    def _rv_percentile(closes: np.ndarray, period: int, lookback: int) -> float:
+        """Percentile rank (0–100) of current realized-vol vs trailing history."""
+        n = len(closes)
+        if n < period + 1:
+            return 50.0
+
+        log_ret = np.zeros(n)
+        valid   = (closes[:-1] > 0) & (closes[1:] > 0)
+        log_ret[1:][valid] = np.log(closes[1:][valid] / closes[:-1][valid])
+
+        rv = np.full(n, np.nan)
+        for i in range(period - 1, n):
+            rv[i] = float(np.std(log_ret[i - period + 1: i + 1]))
+
+        current = rv[-1]
+        if np.isnan(current):
+            return 50.0
+
+        hist = rv[~np.isnan(rv)][:-1][-lookback:]   # exclude current bar
+        if len(hist) == 0:
+            return 50.0
+        return float(np.sum(hist < current) / len(hist) * 100.0)
+
+    @staticmethod
+    def _bb_width_percentile(closes: np.ndarray, bb_period: int, lookback: int) -> float:
+        """Percentile rank (0–100) of current Bollinger Band width vs trailing history."""
+        n = len(closes)
+        if n < bb_period:
+            return 50.0
+
+        bw = np.full(n, np.nan)
+        for i in range(bb_period - 1, n):
+            w  = closes[i - bb_period + 1: i + 1]
+            ma = float(np.mean(w))
+            if ma <= 0:
+                continue
+            bw[i] = 4.0 * float(np.std(w)) / ma * 100.0   # expressed as % of price
+
+        current = bw[-1]
+        if np.isnan(current):
+            return 50.0
+
+        hist = bw[~np.isnan(bw)][:-1][-lookback:]
+        if len(hist) == 0:
+            return 50.0
+        return float(np.sum(hist < current) / len(hist) * 100.0)
+
+    def _neutral_result(self) -> dict:
+        return {
+            "label":        "NEUTRAL",
+            "regime":       "NEUTRAL",
+            "rv60_pct":     50.0,
+            "atr10_atr60":  1.0,
+            "er30":         0.5,
+            "adx14":        0.0,
+            "bb_width_pct": 50.0,
+            "atr10":        0.0,
+            "atr60":        0.0,
         }
