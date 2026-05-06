@@ -394,7 +394,7 @@ class OpenInterestZscore30dFactor(FactorBase):
 
 @register_factor
 class LongLiquidationVolume1mFactor(FactorBase):
-    name = "long_liquidation_volume_1m"
+    name = "long_liquidation_volume"
     sides = (FACTOR_SIDE_SHORT,)
     group = GROUP_CRYPTO_DERIVATIVES
 
@@ -404,7 +404,7 @@ class LongLiquidationVolume1mFactor(FactorBase):
 
 @register_factor
 class ShortLiquidationVolume1mFactor(FactorBase):
-    name = "short_liquidation_volume_1m"
+    name = "short_liquidation_volume"
     sides = (FACTOR_SIDE_LONG,)
     group = GROUP_CRYPTO_DERIVATIVES
 
@@ -414,7 +414,7 @@ class ShortLiquidationVolume1mFactor(FactorBase):
 
 @register_factor
 class LiquidationImbalance1mFactor(FactorBase):
-    name = "liq_imbalance_1m"
+    name = "liq_imbalance"
     sides = FACTOR_SIDES
     group = GROUP_CRYPTO_DERIVATIVES
 
@@ -431,7 +431,7 @@ class LiquidationImbalance1mFactor(FactorBase):
 
 @register_factor
 class BuyTradeVolumeFactor(FactorBase):
-    name = "buy_trade_volume_1m"
+    name = "buy_trade_volume"
     sides = (FACTOR_SIDE_LONG,)
     group = GROUP_MICROSTRUCTURE
 
@@ -441,7 +441,7 @@ class BuyTradeVolumeFactor(FactorBase):
 
 @register_factor
 class SellTradeVolumeFactor(FactorBase):
-    name = "sell_trade_volume_1m"
+    name = "sell_trade_volume"
     sides = (FACTOR_SIDE_SHORT,)
     group = GROUP_MICROSTRUCTURE
 
@@ -452,7 +452,7 @@ class SellTradeVolumeFactor(FactorBase):
 
 @register_factor
 class TradeVolumeDeltaFactor(FactorBase):
-    name = "trade_volume_delta_1m"
+    name = "trade_volume_delta"
     sides = FACTOR_SIDES
     group = GROUP_MICROSTRUCTURE
 
@@ -463,7 +463,7 @@ class TradeVolumeDeltaFactor(FactorBase):
 
 @register_factor
 class TradeVolumeDeltaRatioFactor(FactorBase):
-    name = "trade_volume_delta_ratio_1m"
+    name = "trade_volume_delta_ratio"
     sides = FACTOR_SIDES
     group = GROUP_MICROSTRUCTURE
 
@@ -475,7 +475,7 @@ class TradeVolumeDeltaRatioFactor(FactorBase):
 
 @register_factor
 class TakerBuyRatioFactor(FactorBase):
-    name = "taker_buy_ratio_1m"
+    name = "taker_buy_ratio"
     sides = FACTOR_SIDES
     group = GROUP_MICROSTRUCTURE
 
@@ -490,7 +490,7 @@ class TakerBuyRatioFactor(FactorBase):
 
 @register_factor
 class AdxFactor(FactorBase):
-    name = "adx_15m"
+    name = "adx_14"
     sides = FACTOR_SIDES
     group = GROUP_REGIME
 
@@ -524,7 +524,7 @@ class AdxFactor(FactorBase):
 
 @register_factor
 class ChoppinessFactor(FactorBase):
-    name = "chop_index_15m"
+    name = "chop_index_14"
     sides = FACTOR_SIDES
     group = GROUP_REGIME
 
@@ -547,7 +547,7 @@ class ChoppinessFactor(FactorBase):
 
 @register_factor
 class RangePositionFactor(FactorBase):
-    name = "range_position_15m"
+    name = "range_position_20"
     sides = FACTOR_SIDES
     group = GROUP_REGIME
 
@@ -561,7 +561,7 @@ class RangePositionFactor(FactorBase):
 
 @register_factor
 class HhHlStructureFactor(FactorBase):
-    name = "hh_hl_structure_15m"
+    name = "hh_hl_structure"
     sides = (FACTOR_SIDE_LONG,)
     group = GROUP_REGIME
 
@@ -577,7 +577,7 @@ class HhHlStructureFactor(FactorBase):
 
 @register_factor
 class LlLhStructureFactor(FactorBase):
-    name = "ll_lh_structure_15m"
+    name = "ll_lh_structure"
     sides = (FACTOR_SIDE_SHORT,)
     group = GROUP_REGIME
 
@@ -592,19 +592,8 @@ class LlLhStructureFactor(FactorBase):
 
 
 @register_factor
-class VolumeZscoreRegimeFactor(FactorBase):
-    name = "volume_zscore_15m_20"
-    sides = FACTOR_SIDES
-    group = GROUP_REGIME
-
-    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
-        arr = klines_to_arrays(klines)
-        return _rolling_zscore(arr["volume"], 20)
-
-
-@register_factor
 class VolatilityZscoreRegimeFactor(FactorBase):
-    name = "volatility_zscore_15m_20"
+    name = "volatility_zscore_20"
     sides = FACTOR_SIDES
     group = GROUP_REGIME
 
@@ -675,7 +664,7 @@ class WeekendFlagFactor(FactorBase):
 
 @register_factor
 class VolumeFactor(FactorBase):
-    name = "volume_1m"
+    name = "volume"
     sides = FACTOR_SIDES
     group = GROUP_VOLUME
 
@@ -718,7 +707,7 @@ class VolumeRatio20Factor(FactorBase):
 
 @register_factor
 class VolumeChangeFactor(FactorBase):
-    name = "volume_change_1m"
+    name = "volume_change"
     sides = FACTOR_SIDES
     group = GROUP_VOLUME
 
@@ -752,7 +741,7 @@ class SellVolumeZscore20Factor(FactorBase):
 
 @register_factor
 class AmihudIlliquidityFactor(FactorBase):
-    name = "amihud_illiquidity_1m"
+    name = "amihud_illiquidity"
     sides = FACTOR_SIDES
     group = GROUP_VOLUME
 
@@ -776,7 +765,7 @@ def _return_n(close: np.ndarray, n: int) -> np.ndarray:
 
 @register_factor
 class Return1mFactor(FactorBase):
-    name = "return_1m"
+    name = "return_1"
     sides = FACTOR_SIDES
     group = GROUP_MOMENTUM
 
@@ -787,7 +776,7 @@ class Return1mFactor(FactorBase):
 
 @register_factor
 class Return3mFactor(FactorBase):
-    name = "return_3m"
+    name = "return_3"
     sides = FACTOR_SIDES
     group = GROUP_MOMENTUM
 
@@ -797,7 +786,7 @@ class Return3mFactor(FactorBase):
 
 @register_factor
 class Return5mFactor(FactorBase):
-    name = "return_5m"
+    name = "return_5"
     sides = FACTOR_SIDES
     group = GROUP_MOMENTUM
 
@@ -807,7 +796,7 @@ class Return5mFactor(FactorBase):
 
 @register_factor
 class Return10mFactor(FactorBase):
-    name = "return_10m"
+    name = "return_10"
     sides = FACTOR_SIDES
     group = GROUP_MOMENTUM
 
@@ -817,7 +806,7 @@ class Return10mFactor(FactorBase):
 
 @register_factor
 class Return15mFactor(FactorBase):
-    name = "return_15m"
+    name = "return_15"
     sides = FACTOR_SIDES
     group = GROUP_MOMENTUM
 
@@ -827,7 +816,7 @@ class Return15mFactor(FactorBase):
 
 @register_factor
 class LogReturn1mFactor(FactorBase):
-    name = "log_return_1m"
+    name = "log_return_1"
     sides = FACTOR_SIDES
     group = GROUP_MOMENTUM
 
@@ -843,7 +832,7 @@ class LogReturn1mFactor(FactorBase):
 
 @register_factor
 class NormalizedReturn5mFactor(FactorBase):
-    name = "normalized_return_5m"
+    name = "normalized_return_5"
     sides = FACTOR_SIDES
     group = GROUP_MOMENTUM
 
@@ -856,7 +845,7 @@ class NormalizedReturn5mFactor(FactorBase):
 
 @register_factor
 class Ma5Factor(FactorBase):
-    name = "ma_5_1m"
+    name = "ma_5"
     sides = FACTOR_SIDES
     group = GROUP_MOMENTUM
 
@@ -866,7 +855,7 @@ class Ma5Factor(FactorBase):
 
 @register_factor
 class Ma20Factor(FactorBase):
-    name = "ma_20_1m"
+    name = "ma_20"
     sides = FACTOR_SIDES
     group = GROUP_MOMENTUM
 
@@ -876,7 +865,7 @@ class Ma20Factor(FactorBase):
 
 @register_factor
 class Ma60Factor(FactorBase):
-    name = "ma_60_1m"
+    name = "ma_60"
     sides = FACTOR_SIDES
     group = GROUP_MOMENTUM
 
@@ -1260,8 +1249,8 @@ def _realized_vol(close: np.ndarray, window: int) -> np.ndarray:
 
 
 @register_factor
-class RealizedVol5mFactor(FactorBase):
-    name = "realized_vol_5m"
+class RealizedVol5Factor(FactorBase):
+    name = "realized_vol_5"
     sides = FACTOR_SIDES
     group = GROUP_VOLATILITY
 
@@ -1270,8 +1259,17 @@ class RealizedVol5mFactor(FactorBase):
 
 
 @register_factor
-class RealizedVol15mFactor(FactorBase):
-    name = "realized_vol_15m"
+class RealizedVol10Factor(FactorBase):
+    name = "realized_vol_10"
+    sides = FACTOR_SIDES
+    group = GROUP_VOLATILITY
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        return _realized_vol(klines_to_arrays(klines)["close"], 10)
+
+@register_factor
+class RealizedVol15Factor(FactorBase):
+    name = "realized_vol_15"
     sides = FACTOR_SIDES
     group = GROUP_VOLATILITY
 
@@ -1280,18 +1278,27 @@ class RealizedVol15mFactor(FactorBase):
 
 
 @register_factor
-class RealizedVol1hFactor(FactorBase):
-    name = "realized_vol_1h"
+class RealizedVol60Factor(FactorBase):
+    name = "realized_vol_60"
     sides = FACTOR_SIDES
     group = GROUP_VOLATILITY
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         return _realized_vol(klines_to_arrays(klines)["close"], 60)
 
+@register_factor
+class RealizedVol240Factor(FactorBase):
+    name = "realized_vol_240"
+    sides = FACTOR_SIDES
+    group = GROUP_VOLATILITY
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        return _realized_vol(klines_to_arrays(klines)["close"], 240)
+
 
 @register_factor
 class Atr14Factor(FactorBase):
-    name = "atr_14_1m"
+    name = "atr_14"
     sides = FACTOR_SIDES
     group = GROUP_VOLATILITY
 
@@ -1346,6 +1353,28 @@ class AtrPercentile100Factor(FactorBase):
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         atr = _atr(klines_to_arrays(klines), 14)
         return _rolling_percentile(atr, 100)
+
+
+@register_factor
+class RealizedVol60Percentile100Factor(FactorBase):
+    name = "realized_vol_60_percentile_100"
+    sides = FACTOR_SIDES
+    group = GROUP_VOLATILITY
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        rv = _realized_vol(klines_to_arrays(klines)["close"], 60)
+        M = 100
+        out = np.full(len(rv), np.nan, dtype=np.float64)
+        for i in range(M, len(rv)):
+            current = rv[i]
+            if np.isnan(current):
+                continue
+            past = rv[i - M:i]
+            valid_past = past[~np.isnan(past)]
+            if len(valid_past) == 0:
+                continue
+            out[i] = np.sum(valid_past < current) / M * 100.0
+        return out
 
 
 @register_factor
@@ -1416,7 +1445,7 @@ class TrueRangeSpikeFactor(FactorBase):
 
 @register_factor
 class HighLowRange1mFactor(FactorBase):
-    name = "high_low_range_1m"
+    name = "high_low_range"
     sides = FACTOR_SIDES
     group = GROUP_VOLATILITY
 
