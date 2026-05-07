@@ -20,6 +20,7 @@ Tick 資料支援：
   MicroVolatilityComponent      → micro_volatility_{period}_l{N} L2 snapshot-first
   TickDeltaComponent            → tick_delta              tick-first，kline fallback
   TickVWAPComponent             → tick_vwap               tick-first，kline fallback
+  VWAPDeviationComponent        → vwap_dev_{window}_{lookback}  tick-first，kline fallback
   VolumeProfileComponent        → volume_profile_*        tick-first，kline fallback
 """
 from __future__ import annotations
@@ -579,6 +580,163 @@ class TickVWAPComponent(SharedComponent):
             "vwap_dev":   vwap_dev,
             "tick_count": 0,
             "source":     "kline_fallback",
+        }
+
+
+# ── VWAPDeviationComponent ────────────────────────────────────────────────────
+
+class VWAPDeviationComponent(SharedComponent):
+    """
+    滾動 VWAP 乖離帶分類（tick-first，kline fallback）。
+
+    以過去 window 根 K 棒建立滾動 VWAP，計算當前棒的相對乖離 vwap_dev，
+    並以 lookback 根歷史棒的相對乖離分布估計 σ，得到真正的 z-score。
+
+    z-score 計算（單位一致）：
+      vwap_i   = 歷史第 i 棒的滾動 kline VWAP（window 根）
+      dev_i    = (close_i − vwap_i) / vwap_i          ← 相對乖離，無單位
+      σ        = std(dev_i  for i in [idx−lookback, idx−1])
+      z_score  = vwap_dev_current / σ
+
+    σ 估計固定用 kline（歷史掃描效率考量）；當前棒 VWAP 仍 tick-first。
+
+    Zone 定義（OVEREXTENDED_LOW / HIGH 可覆蓋類別屬性）：
+      normal                  |z| < 1.0
+      extended_high/low       1.0 ≤ |z| < 2.0
+      overextended_high/low   2.0 ≤ |z| ≤ 2.5   ← 極端乖離區
+      extreme_high/low        |z| > 2.5
+
+    回傳：
+      vwap             : float  當前滾動 VWAP
+      vwap_dev         : float  (close − vwap) / vwap
+      z_score          : float  vwap_dev / σ
+      sigma            : float  歷史相對乖離的標準差（與 vwap_dev 同單位）
+      zone             : str    區帶名稱（見上）
+      in_overextended  : bool   2.0 ≤ |z| ≤ 2.5
+      above_vwap       : bool   close > vwap
+      source           : str    "tick" | "kline_fallback" | "insufficient_data"
+    """
+
+    OVEREXTENDED_LOW:  float = 2.0
+    OVEREXTENDED_HIGH: float = 2.5
+
+    def __init__(
+        self,
+        window:            int            = 24,
+        lookback:          int            = 100,
+        overextended_low:  Optional[float] = None,
+        overextended_high: Optional[float] = None,
+    ) -> None:
+        self.window   = window
+        self.lookback = lookback
+        self.oe_low   = self.OVEREXTENDED_LOW  if overextended_low  is None else overextended_low
+        self.oe_high  = self.OVEREXTENDED_HIGH if overextended_high is None else overextended_high
+        self.component_id = f"vwap_dev_{window}_{lookback}"
+
+    def compute(
+        self,
+        klines:   list[Kline],
+        idx:      int,
+        tick_map: Optional[TickBarMap] = None,
+    ) -> dict:
+        current_price = klines[idx].close
+
+        if idx < self.window - 1:
+            return self._empty_result(current_price)
+
+        # ── 1. 當前棒 VWAP（tick-first）────────────────────────────────────
+        cur_window = klines[max(0, idx - self.window + 1) : idx + 1]
+        if tick_map is not None:
+            vwap = self._tick_vwap(cur_window, tick_map)
+            source = "tick" if vwap is not None else "kline_fallback"
+        else:
+            vwap, source = None, "kline_fallback"
+
+        if vwap is None:
+            vwap = self._kline_vwap(cur_window)
+
+        if vwap is None:
+            return self._empty_result(current_price)
+
+        vwap_dev = (current_price - vwap) / vwap if vwap > 0 else 0.0
+
+        # ── 2. 歷史相對乖離 → σ（純 kline，效率考量）─────────────────────
+        hist_start = max(self.window - 1, idx - self.lookback)
+        hist_devs: list[float] = []
+        for j in range(hist_start, idx):          # 不含當前棒
+            w = klines[max(0, j - self.window + 1) : j + 1]
+            hv = self._kline_vwap(w)
+            if hv is not None and hv > 0:
+                hist_devs.append((klines[j].close - hv) / hv)
+
+        sigma   = float(np.std(hist_devs)) if len(hist_devs) > 1 else 0.0
+        z_score = vwap_dev / (sigma + 1e-10)
+        abs_z   = abs(z_score)
+
+        return {
+            "vwap":            float(vwap),
+            "vwap_dev":        float(vwap_dev),
+            "z_score":         float(z_score),
+            "sigma":           float(sigma),
+            "zone":            self._classify_zone(z_score),
+            "in_overextended": self.oe_low <= abs_z <= self.oe_high,
+            "above_vwap":      current_price > vwap,
+            "source":          source,
+        }
+
+    def _kline_vwap(self, klines: list[Kline]) -> Optional[float]:
+        """Typical-price VWAP from OHLCV klines."""
+        pv = tv = 0.0
+        for k in klines:
+            if k.volume > 0:
+                pv += (k.high + k.low + k.close) / 3.0 * k.volume
+                tv += k.volume
+        return pv / tv if tv > 0 else None
+
+    def _tick_vwap(self, klines: list[Kline], tick_map: TickBarMap) -> Optional[float]:
+        """Bar-level tick VWAP; falls back to typical price per bar when ticks missing.
+
+        Returns None if no real tick data was found (signals caller to use kline path).
+        """
+        pv = tv = 0.0
+        tick_vol = 0.0
+        for k in klines:
+            ticks = tick_map.get(k.open_time)
+            if ticks is not None and len(ticks) > 0:
+                vols = ticks[:, 2]
+                v    = float(np.sum(vols))
+                if v > 0:
+                    pv      += float(np.dot(ticks[:, 1], vols))
+                    tv      += v
+                    tick_vol += v
+            elif k.volume > 0:
+                pv += (k.high + k.low + k.close) / 3.0 * k.volume
+                tv += k.volume
+        if tick_vol == 0.0:
+            return None   # no real ticks; let caller fall back to kline_vwap
+        return pv / tv if tv > 0 else None
+
+    def _classify_zone(self, z_score: float) -> str:
+        abs_z     = abs(z_score)
+        direction = "high" if z_score >= 0 else "low"
+        if abs_z > self.oe_high:
+            return f"extreme_{direction}"
+        if abs_z >= self.oe_low:
+            return f"overextended_{direction}"
+        if abs_z >= 1.0:
+            return f"extended_{direction}"
+        return "normal"
+
+    def _empty_result(self, current_price: float) -> dict:
+        return {
+            "vwap":            current_price,
+            "vwap_dev":        0.0,
+            "z_score":         0.0,
+            "sigma":           0.0,
+            "zone":            "normal",
+            "in_overextended": False,
+            "above_vwap":      False,
+            "source":          "insufficient_data",
         }
 
 
