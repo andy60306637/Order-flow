@@ -70,7 +70,7 @@ class MultiPipelineStrategy(StrategyBase):
                 bars_held[pname] = bars_held.get(pname, 0) + 1
                 exit_sig = self._exit.check_exit(k, pos, tick_map, bars_held[pname])
                 if exit_sig is not None:
-                    exit_sig.label = pname
+                    exit_sig.meta.setdefault("pipeline", pname)
                     results.append(exit_sig)
                     closed.append(pname)
 
@@ -90,6 +90,9 @@ class MultiPipelineStrategy(StrategyBase):
                 if pname in open_positions:
                     continue  # 此 Pipeline 已有持倉，跳過
 
+                k0_sig = self._build_k0_snapshot_signal(pr.ctx)
+                if k0_sig is not None:
+                    results.append(k0_sig)
                 results.append(pr.entry_signal)
 
                 ctx = pr.ctx
@@ -107,3 +110,37 @@ class MultiPipelineStrategy(StrategyBase):
                 bars_held[pname]      = 0
 
         return results
+
+    @staticmethod
+    def _build_k0_snapshot_signal(ctx: PipelineContext) -> Optional[StrategySignal]:
+        k0_meta = ctx.alpha_meta.get("k0_meta")
+        if not isinstance(k0_meta, dict):
+            modules = ctx.alpha_meta.get("modules", [])
+            if isinstance(modules, list):
+                k0_meta = next(
+                    (
+                        item.get("k0_meta")
+                        for item in modules
+                        if isinstance(item, dict) and isinstance(item.get("k0_meta"), dict)
+                    ),
+                    None,
+                )
+        if not isinstance(k0_meta, dict):
+            return None
+        k0_idx = k0_meta.get("k0_idx")
+        if not isinstance(k0_idx, int) or k0_idx < 0 or k0_idx >= len(ctx.klines):
+            return None
+        direction = k0_meta.get("direction", ctx.direction)
+        sig_type = "k0_short" if direction == "short" else "k0_long"
+        k0_bar = ctx.klines[k0_idx]
+        return StrategySignal(
+            open_time=k0_bar.open_time,
+            price=k0_bar.close,
+            signal_type=sig_type,
+            label=ctx.pipeline_name,
+            meta={
+                "pipeline": ctx.pipeline_name,
+                "module": ctx.alpha_meta.get("module"),
+                **k0_meta,
+            },
+        )

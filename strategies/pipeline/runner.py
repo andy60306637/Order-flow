@@ -119,24 +119,35 @@ class MultiPipelineRunner:
     @staticmethod
     def _build_entry_signal(ctx: PipelineContext) -> StrategySignal:
         sig_type = "long_entry" if ctx.direction == "long" else "short_entry"
+        source_signal = ctx.alpha_meta.get("entry_signal")
+        source_meta = getattr(source_signal, "meta", {}) or {}
+        fill_price = (
+            source_signal.fill_price
+            if source_signal is not None and source_signal.fill_price is not None
+            else ctx.entry_price
+        )
+        fill_time = source_signal.fill_time if source_signal is not None else None
+        meta = {
+            **source_meta,
+            "pipeline":    ctx.pipeline_name,
+            "regime":      ctx.regime,
+            "session":     ctx.regime_meta.get("session"),
+            "alpha_score": ctx.alpha_score,
+            "expected_rr": ctx.expected_rr,
+            "qty":         ctx.qty,
+            "tp_price":    ctx.tp_price,
+            "expected_fee":ctx.expected_fee,
+            "net_reward":  ctx.net_reward,
+        }
         return StrategySignal(
             open_time   = ctx.klines[ctx.idx].open_time,
             price       = ctx.entry_price,
             signal_type = sig_type,
             label       = ctx.pipeline_name,
             stop_price  = ctx.stop_price,
-            fill_price  = ctx.entry_price,
-            meta        = {
-                "pipeline":    ctx.pipeline_name,
-                "regime":      ctx.regime,
-                "session":     ctx.regime_meta.get("session"),
-                "alpha_score": ctx.alpha_score,
-                "expected_rr": ctx.expected_rr,
-                "qty":         ctx.qty,
-                "tp_price":    ctx.tp_price,
-                "expected_fee":ctx.expected_fee,
-                "net_reward":  ctx.net_reward,
-            },
+            fill_price  = fill_price,
+            fill_time   = fill_time,
+            meta        = meta,
         )
 
     def _resolve_conflict(self, results: list[PipelineResult]) -> list[PipelineResult]:

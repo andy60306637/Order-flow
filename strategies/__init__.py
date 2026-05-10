@@ -62,3 +62,7 @@ def _register_signal_modules():
         SIGNAL_MODULE_REGISTRY[_st.WickReversalV6_1Signal.name] = _st.WickReversalV6_1Signal
 
 _register_signal_modules()
+
+# ── Pipeline 策略 ─────────────────────────────────────────────────────────────
+from strategies.pipeline.mean_reversion import MeanReversionPipelineStrategy as _MRStrategy  # noqa: E402, F401
+STRATEGY_REGISTRY[_MRStrategy.name] = _MRStrategy

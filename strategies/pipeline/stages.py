@@ -23,6 +23,7 @@ from typing import Optional
 from strategies.modules.capital_management import CapitalConfig, CapitalModule
 from strategies.modules.exit_management import ExitConfig, ExitModule
 from strategies.modules.signal_trigger import SignalModule
+from strategies.base import StrategySignal
 from strategies.pipeline.component import (
     ATRComponent,
     RegimeClassifier,
@@ -180,7 +181,11 @@ class AlphaStage(PipelineStage):
             raise ValueError("weights 長度必須與 modules 相同")
 
     def process(self, ctx: PipelineContext) -> Optional[PipelineContext]:
-        return self._and_mode(ctx) if self.mode == "AND" else self._score_mode(ctx)
+        if self.mode == "AND":
+            return self._and_mode(ctx)
+        if self.mode == "OR":
+            return self._or_mode(ctx)
+        return self._score_mode(ctx)
 
     # ── AND ──────────────────────────────────────────────────────────────────
 
@@ -188,6 +193,7 @@ class AlphaStage(PipelineStage):
         klines, idx = ctx.klines, ctx.idx
         direction = entry_price = stop_price = None
         meta_list: list[dict] = []
+        entry_signal = None
 
         for mod in self.modules:
             if not mod.can_trade(klines, idx):
@@ -204,6 +210,7 @@ class AlphaStage(PipelineStage):
                 direction   = d
                 entry_price = sig.fill_price or sig.price
                 stop_price  = sig.stop_price
+                entry_signal = sig
             elif direction != d:
                 return None  # 方向衝突，AND 失敗
             meta_list.append({"module": mod.name, "k0_meta": k0_meta})
@@ -215,14 +222,41 @@ class AlphaStage(PipelineStage):
         ctx.entry_price = entry_price
         ctx.stop_price  = stop_price
         ctx.alpha_score = 1.0
-        ctx.alpha_meta  = {"modules": meta_list, "mode": "AND"}
+        ctx.alpha_meta  = {"modules": meta_list, "entry_signal": entry_signal, "mode": "AND"}
         return ctx
+
+    # ── OR ───────────────────────────────────────────────────────────────────
+
+    def _or_mode(self, ctx: PipelineContext) -> Optional[PipelineContext]:
+        """任意一個 module 成立即通過；按模組順序優先，以第一個成立者為準。"""
+        klines, idx = ctx.klines, ctx.idx
+        for mod in self.modules:
+            if not mod.can_trade(klines, idx):
+                continue
+            k0_meta = mod.detect_k0(klines, idx)
+            if k0_meta is None:
+                continue
+            sig = mod.entry_conditions(klines, idx, k0_meta, ctx.tick_map)
+            if sig is None:
+                continue
+            ctx.direction   = k0_meta["direction"]
+            ctx.entry_price = sig.fill_price if sig.fill_price is not None else sig.price
+            ctx.stop_price  = sig.stop_price
+            ctx.alpha_score = 1.0
+            ctx.alpha_meta  = {
+                "module": mod.name,
+                "k0_meta": k0_meta,
+                "entry_signal": sig,
+                "mode": "OR",
+            }
+            return ctx
+        return None
 
     # ── SCORE ─────────────────────────────────────────────────────────────────
 
     def _score_mode(self, ctx: PipelineContext) -> Optional[PipelineContext]:
         klines, idx = ctx.klines, ctx.idx
-        votes: list[tuple[str, float, Optional[float], float]] = []
+        votes: list[tuple[str, float, Optional[float], float, StrategySignal]] = []
         total_w = sum(self.weights)
 
         for mod, w in zip(self.modules, self.weights):
@@ -239,29 +273,36 @@ class AlphaStage(PipelineStage):
                 sig.fill_price or sig.price,
                 sig.stop_price,
                 w,
+                sig,
             ))
 
         if not votes:
             return None
 
-        long_w  = sum(w for d, _, _, w in votes if d == "long")
-        short_w = sum(w for d, _, _, w in votes if d == "short")
+        long_w  = sum(w for d, _, _, w, _ in votes if d == "long")
+        short_w = sum(w for d, _, _, w, _ in votes if d == "short")
         score   = max(long_w, short_w) / total_w
 
         if score < self.min_score:
             return None
 
         direction  = "long" if long_w >= short_w else "short"
-        side_votes = [(ep, sp, w) for d, ep, sp, w in votes if d == direction]
-        w_sum      = sum(w for _, _, w in side_votes)
-        entry_price = sum(ep * w for ep, _, w in side_votes) / w_sum
-        stop_price  = next((sp for ep, sp, w in side_votes if sp is not None), None)
+        side_votes = [(ep, sp, w, sig) for d, ep, sp, w, sig in votes if d == direction]
+        w_sum      = sum(w for _, _, w, _ in side_votes)
+        entry_price = sum(ep * w for ep, _, w, _ in side_votes) / w_sum
+        stop_price  = next((sp for ep, sp, _, _ in side_votes if sp is not None), None)
+        entry_signal = side_votes[0][3] if side_votes else None
 
         ctx.direction   = direction
         ctx.entry_price = entry_price
         ctx.stop_price  = stop_price
         ctx.alpha_score = score
-        ctx.alpha_meta  = {"mode": "SCORE", "long_w": long_w, "short_w": short_w}
+        ctx.alpha_meta  = {
+            "mode": "SCORE",
+            "long_w": long_w,
+            "short_w": short_w,
+            "entry_signal": entry_signal,
+        }
         return ctx
 
 
@@ -425,3 +466,95 @@ class TickFactorStage(PipelineStage):
             ctx.alpha_meta["tick_factors"] = {}
         ctx.alpha_meta["tick_factors"][self.component.component_id] = result
         return ctx
+
+
+# ── PositionGateStage ─────────────────────────────────────────────────────────
+
+class PositionGateStage(PipelineStage):
+    """
+    持倉數量上限過濾器。
+
+    若當前開倉數量已達 max_positions，阻斷 pipeline，不再產生新訊號。
+    應放在 pipeline 最前端，避免後續 Stage 做無用的昂貴計算。
+
+    外部整合（回測引擎 / live 交易管理器）：
+      開倉確認後呼叫 record_open()
+      任意出場（TP / SL / Time / Info）後呼叫 record_close()
+      重設時呼叫 reset()
+    """
+
+    name = "PositionGateStage"
+
+    def __init__(self, max_positions: int = 1) -> None:
+        self.max_positions = max_positions
+        self._open_count   = 0
+
+    # ── 外部回調 API ──────────────────────────────────────────────────────────
+
+    @property
+    def open_count(self) -> int:
+        return self._open_count
+
+    def record_open(self) -> None:
+        self._open_count += 1
+
+    def record_close(self) -> None:
+        self._open_count = max(0, self._open_count - 1)
+
+    def reset(self) -> None:
+        self._open_count = 0
+
+    # ── PipelineStage ─────────────────────────────────────────────────────────
+
+    def process(self, ctx: PipelineContext) -> Optional[PipelineContext]:
+        return None if self._open_count >= self.max_positions else ctx
+
+
+# ── CooldownStage ─────────────────────────────────────────────────────────────
+
+class CooldownStage(PipelineStage):
+    """
+    訊號冷卻期過濾器。
+
+    記錄最近一次觸發訊號的時間戳（ms），若當前 K 棒開盤時間距上次訊號不足
+    cooldown_ms，阻斷 pipeline。
+    應放在 pipeline 最前端（PositionGateStage 之後）。
+
+    外部整合（回測引擎 / live 交易管理器）：
+      任意出場（TP / SL / Time / Info）後呼叫 record_signal(close_time_ms)
+      重設時呼叫 reset()
+
+    預設 cooldown_ms = 300_000（5 分鐘）。
+    """
+
+    name = "CooldownStage"
+
+    def __init__(self, cooldown_ms: int = 300_000) -> None:
+        self.cooldown_ms         = cooldown_ms
+        self._last_signal_ms: Optional[int] = None
+
+    # ── 外部回調 API ──────────────────────────────────────────────────────────
+
+    def record_signal(self, time_ms: int) -> None:
+        """訊號觸發或出場後呼叫，開始冷卻計時。"""
+        self._last_signal_ms = time_ms
+
+    def reset(self) -> None:
+        self._last_signal_ms = None
+
+    @property
+    def remaining_ms(self) -> Optional[int]:
+        """距冷卻結束的剩餘毫秒數（None = 未在冷卻中）。"""
+        if self._last_signal_ms is None:
+            return None
+        # 無法得知「現在」時間，此 property 供外部 debug 用
+        return self._last_signal_ms + self.cooldown_ms
+
+    # ── PipelineStage ─────────────────────────────────────────────────────────
+
+    def process(self, ctx: PipelineContext) -> Optional[PipelineContext]:
+        if self._last_signal_ms is None:
+            return ctx
+        current_ms = ctx.klines[ctx.idx].open_time
+        elapsed    = current_ms - self._last_signal_ms
+        return ctx if elapsed >= self.cooldown_ms else None
