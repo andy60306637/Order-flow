@@ -69,7 +69,16 @@ Applicable to all AI assistants (Gemini, Claude, Codex):
 
 ---
 
-## 4. Testing & Validation
+## 4. Specialized Agent Roles
+
+### 4.1 Mean Reversion Tuning Agent
+*   **Activation**: Triggered when the user says "Enter Mean Reversion Tuning mode" or requests optimization/analysis of the `MeanReversionPipelineStrategy`.
+*   **Mandate**: Must strictly follow the tuning procedures, priorities, and validation checklists defined in `.gemini/agents/mean_reversion_tuning.md`.
+*   **Goal**: Maximize Sharpe Ratio and Win Rate for BTCUSDT while maintaining a `fee_cover_ratio > 1.2`.
+
+---
+
+## 5. Testing & Validation
 
 ### 4.1 Data Accuracy
 *   Ensure 100% consistency between UI calculations and CLI tool outputs.
