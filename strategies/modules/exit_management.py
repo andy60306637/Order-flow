@@ -13,7 +13,7 @@ from strategies.modules.base_module import BaseModule, ModuleConfig
 
 @dataclass
 class ExitConfig(ModuleConfig):
-    use_trailing_stop: bool  = True
+    use_trailing_stop: bool  = False
     trailing_mode:     str   = "lock_tp"      # "lock_tp" | "breakeven_cost"
     trailing_trigger_r: float = 1.0           # 達到幾倍 R 後啟動追蹤
     time_decay_bars:   int   = 0              # 0=關閉；超過此 K 棒數強制離場

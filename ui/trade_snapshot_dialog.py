@@ -138,6 +138,143 @@ def _collect_contexts(
     return result
 
 
+# ─── VWAP band helpers ────────────────────────────────────────────────────────
+
+# z-score 邊界：(z值, 顏色, 透明度, 標籤)
+_VWAP_BAND_DEFS = [
+    (1.0,  QColor(120, 180, 255), 18,  "±1σ"),
+    (2.0,  QColor( 38, 166, 154), 25,  "±2σ"),
+    (2.5,  QColor(255, 152,   0), 35,  "±2.5σ"),
+]
+
+
+def _vwap_band_price(vwap: float, sigma: float, z: float) -> float:
+    """以 vwap_dev = z × sigma 換算回價格。"""
+    return vwap * (1.0 + z * sigma)
+
+
+def _draw_vwap_bands(
+    plot:       "pg.PlotItem",
+    overlays:   list,
+    sig_meta:   dict,
+    n_bars:     int,
+) -> None:
+    """
+    在 plot 上繪製 VWAP 中線 + ±1σ / ±2σ / ±2.5σ 帶狀線。
+
+    僅在 sig_meta 含有效的 vwap_price / vwap_sigma 時才執行。
+    所有項目加入 overlays 以便 _clear_overlays() 清除。
+    """
+    vwap  = sig_meta.get("vwap_price")
+    sigma = sig_meta.get("vwap_sigma")
+    if not vwap or not sigma or sigma <= 0:
+        return
+
+    def _hband(y: float, color: QColor, alpha: int, width: float = 0.8,
+               style=Qt.PenStyle.DashLine):
+        item = pg.PlotDataItem(
+            x=[-0.5, n_bars - 0.5], y=[y, y],
+            pen=pg.mkPen(color, width=width, style=style),
+        )
+        plot.addItem(item)
+        overlays.append(item)
+        return item
+
+    def _fill(y_lo: float, y_hi: float, color: QColor, alpha: int):
+        fill_color = QColor(color)
+        fill_color.setAlpha(alpha)
+        region = pg.LinearRegionItem(
+            values=[y_lo, y_hi],
+            orientation="horizontal",
+            brush=QBrush(fill_color),
+            pen=QPen(QColor(0, 0, 0, 0)),
+            movable=False,
+        )
+        plot.addItem(region)
+        overlays.append(region)
+
+    def _lbl(y: float, text: str, color: QColor, anchor=(0.0, 0.5)):
+        item = pg.TextItem(text=text, color=color, anchor=anchor)
+        item.setFont(QFont("monospace", 7))
+        item.setPos(0.0, y)
+        plot.addItem(item)
+        overlays.append(item)
+
+    # ── VWAP 中線（實線）─────────────────────────────────────────────────────
+    vwap_color = QColor(200, 200, 200)
+    _hband(vwap, vwap_color, 60, width=1.0, style=Qt.PenStyle.SolidLine)
+    _lbl(vwap, f"VWAP {vwap:.1f}", vwap_color, anchor=(0.0, 1.05))
+
+    # ── 帶狀區間（先畫 fill，再畫邊線，讓邊線在前景）────────────────────────
+    prev_lo = vwap
+    prev_hi = vwap
+    for z, color, alpha, label in _VWAP_BAND_DEFS:
+        price_hi = _vwap_band_price(vwap, sigma, +z)
+        price_lo = _vwap_band_price(vwap, sigma, -z)
+        _fill(prev_lo, price_lo, color, alpha)   # 下方帶
+        _fill(prev_hi, price_hi, color, alpha)   # 上方帶
+        _hband(price_lo, color, 80)
+        _hband(price_hi, color, 80)
+        _lbl(price_lo, f"−{label}", color, anchor=(0.0, 0.0))
+        _lbl(price_hi, f"+{label}", color, anchor=(0.0, 1.0))
+        prev_lo = price_lo
+        prev_hi = price_hi
+
+
+# ─── Regime badge helpers ─────────────────────────────────────────────────────
+
+_MV_REGIME_COLORS: dict[str, tuple[str, str]] = {
+    "MEAN_REVERSION":   ("#00bcd4", "#0d2a2a"),
+    "BREAKOUT_TREND":   ("#ff9800", "#2a1800"),
+    "CHAOTIC_HIGH_VOL": ("#ef5350", "#2a0d0d"),
+    "COMPRESSION_WAIT": ("#78909c", "#1e252d"),
+    "NEUTRAL":          ("#78909c", "#1e252d"),
+}
+_VWAP_ZONE_COLORS: dict[str, tuple[str, str]] = {
+    "normal":            ("#78909c", "#1e252d"),
+    "extended_low":      ("#80cbc4", "#0d2424"),
+    "extended_high":     ("#ef9a9a", "#2a1212"),
+    "overextended_low":  ("#26a69a", "#0a1e1e"),
+    "overextended_high": ("#ef5350", "#2a0a0a"),
+    "extreme_low":       ("#1de9b6", "#0a2a22"),
+    "extreme_high":      ("#ff1744", "#2a0a0e"),
+}
+_SESSION_COLORS: dict[str, tuple[str, str]] = {
+    "asian":   ("#ffb74d", "#1e1400"),
+    "london":  ("#64b5f6", "#001428"),
+    "ny":      ("#81c784", "#0a1e0a"),
+    "overlap": ("#ce93d8", "#1e0a28"),
+}
+
+
+def _badge(text: str, fg: str, bg: str) -> str:
+    return (
+        f"<span style='background:{bg}; color:{fg}; "
+        f"border:1px solid {fg}55; border-radius:3px; "
+        f"padding:1px 7px;'>{text}</span>"
+    )
+
+
+def _regime_badge_html(
+    mv_regime: Optional[str],
+    vwap_zone: Optional[str],
+    vwap_z:    Optional[float],
+    session:   Optional[str],
+) -> str:
+    parts: list[str] = []
+    if mv_regime:
+        fg, bg = _MV_REGIME_COLORS.get(mv_regime, ("#aaa", "#1e252d"))
+        parts.append(_badge(mv_regime, fg, bg))
+    if vwap_zone:
+        fg, bg = _VWAP_ZONE_COLORS.get(vwap_zone, ("#aaa", "#1e252d"))
+        z_str = f"  z={vwap_z:.2f}" if vwap_z is not None else ""
+        parts.append(_badge(f"VWAP: {vwap_zone}{z_str}", fg, bg))
+    if session:
+        fg, bg = _SESSION_COLORS.get(session, ("#aaa", "#1e252d"))
+        parts.append(_badge(session.upper(), fg, bg))
+    return "&nbsp;&nbsp;".join(parts) if parts else ""
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Candlestick + Volume items (self-contained, no extra deps)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -250,6 +387,12 @@ class _SnapshotPanel(QWidget):
         )
         layout.addWidget(self._title_lbl)
 
+        # ── regime badge strip ───────────────────────────────────────────────
+        self._regime_lbl = QLabel()
+        self._regime_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._regime_lbl.setStyleSheet("font-size: 11px; padding: 2px 4px;")
+        layout.addWidget(self._regime_lbl)
+
         # ── graphics layout ──────────────────────────────────────────────────
         self._glw = pg.GraphicsLayoutWidget()
         self._glw.setBackground(_C_BG)
@@ -327,6 +470,13 @@ class _SnapshotPanel(QWidget):
 
         self._timestamps = [k.open_time for k in window]
         self._update_time_axis(window)
+
+        # entry_sig / sig_meta 提前取得，供後續多處使用
+        entry_sig = ctx.get("entry_signal")
+        sig_meta  = getattr(entry_sig, "meta", {}) or {}
+
+        # ── VWAP 帶（先加，確保在蠟燭下方）────────────────────────────────────
+        _draw_vwap_bands(self._price_plot, self._overlays, sig_meta, n)
 
         # ── candlestick ───────────────────────────────────────────────────────
         if self._candle_item:
@@ -462,7 +612,6 @@ class _SnapshotPanel(QWidget):
                     self._overlays.append(sell_sp)
 
         # ── entry marker ──────────────────────────────────────────────────────
-        entry_sig = ctx.get("entry_signal")
         if entry_ki is not None and start <= entry_ki <= end:
             xi = entry_ki - start
             entry_sp = pg.ScatterPlotItem(
@@ -536,6 +685,14 @@ class _SnapshotPanel(QWidget):
             f"<span style='color:#80cbc4'>{exit_label}</span>  |  "
             f"<span style='color:#787b86'>{entry_dt} UTC</span>"
         )
+
+        # ── regime badges ─────────────────────────────────────────────────────
+        self._regime_lbl.setText(_regime_badge_html(
+            sig_meta.get("market_vol_regime"),
+            sig_meta.get("vwap_dev_zone"),
+            sig_meta.get("vwap_z_score"),
+            sig_meta.get("session"),
+        ))
 
     # ── 十字線 ────────────────────────────────────────────────────────────────
 
