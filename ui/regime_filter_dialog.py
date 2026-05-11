@@ -228,15 +228,19 @@ class RegimeFilterDialog(QDialog):
 
         # ── Mode ─────────────────────────────────────────────────────────────
         mode_box = QGroupBox("執行模式")
-        mode_layout = QHBoxLayout(mode_box)
+        mode_layout = QVBoxLayout(mode_box)
         self._filter_radio = QRadioButton(
             "Filter  — 維度間 AND 合併，跑一次（適合條件切片）"
         )
         self._matrix_radio = QRadioButton(
-            "Matrix  — 每個 label 獨立跑一次，結果並排比較（適合效果對比）"
+            "Matrix  — 每個 label 獨立跑一次，結果並排比較"
+        )
+        self._cross_matrix_radio = QRadioButton(
+            "Cross Matrix  — 各維度 label 笛卡兒積，每個組合各跑一次（N×M×… 次）"
         )
         mode_layout.addWidget(self._filter_radio)
         mode_layout.addWidget(self._matrix_radio)
+        mode_layout.addWidget(self._cross_matrix_radio)
         self._matrix_radio.setChecked(True)
         root.addWidget(mode_box)
 
@@ -275,6 +279,7 @@ class RegimeFilterDialog(QDialog):
         self._apply_btn.clicked.connect(self.accept)
         self._cancel_btn.clicked.connect(self.reject)
         self._matrix_radio.toggled.connect(self._update_preview)
+        self._cross_matrix_radio.toggled.connect(self._update_preview)
         for sec in self._sections.values():
             for chk in sec._label_chks.values():
                 chk.toggled.connect(self._update_preview)
@@ -288,13 +293,20 @@ class RegimeFilterDialog(QDialog):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def get_config(self) -> RegimeFilterConfig:
-        mode = "matrix" if self._matrix_radio.isChecked() else "filter"
+        if self._cross_matrix_radio.isChecked():
+            mode = "cross_matrix"
+        elif self._filter_radio.isChecked():
+            mode = "filter"
+        else:
+            mode = "matrix"
         dims = [sec.get_config() for sec in self._sections.values()]
         return RegimeFilterConfig(mode=mode, dimensions=dims)
 
     def set_config(self, cfg: RegimeFilterConfig) -> None:
         if cfg.mode == "filter":
             self._filter_radio.setChecked(True)
+        elif cfg.mode == "cross_matrix":
+            self._cross_matrix_radio.setChecked(True)
         else:
             self._matrix_radio.setChecked(True)
         dim_map = {d.dimension: d for d in cfg.dimensions}
@@ -319,6 +331,11 @@ class RegimeFilterDialog(QDialog):
         if cfg.mode == "matrix":
             self._preview_label.setText(
                 f"Matrix 模式：{n} 個 regime 各跑一次 IC 分析（共 {n} 次）"
+            )
+        elif cfg.mode == "cross_matrix":
+            combos = cfg.cross_combination_count()
+            self._preview_label.setText(
+                f"Cross Matrix 模式：{n} 個 labels 笛卡兒積 → {combos} 個組合，各跑一次（共 {combos} 次）"
             )
         else:
             self._preview_label.setText(

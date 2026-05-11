@@ -115,8 +115,27 @@ def run_research_with_regimes(
         combined = combine_for_filter(len(klines), raw_masks, rf)
         return {"filtered": _analyze_with_config(config, klines, tick_map_f, combined)}
 
+    if rf.mode == "cross_matrix":
+        from research.regime_filter import cross_combination_key
+        results: dict[str, ResearchResult] = {}
+        for combo in rf.get_cross_combinations():
+            combined_mask: np.ndarray | None = None
+            valid = True
+            for dim, lbl in combo:
+                mask = raw_masks.get(f"{dim}={lbl}")
+                if mask is None:
+                    valid = False
+                    break
+                combined_mask = mask if combined_mask is None else (combined_mask & mask)
+            if not valid or combined_mask is None or combined_mask.sum() == 0:
+                continue
+            results[cross_combination_key(combo)] = _analyze_with_config(
+                config, klines, tick_map_f, combined_mask
+            )
+        return results
+
     # Matrix: one run per label
-    results: dict[str, ResearchResult] = {}
+    results = {}
     for label, mask in raw_masks.items():
         results[label] = _analyze_with_config(config, klines, tick_map_f, mask)
     return results

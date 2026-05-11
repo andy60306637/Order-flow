@@ -9,9 +9,10 @@ research/regime_filter.py
   vwap_zone    VWAPDeviationComponent          → normal / extended_* / overextended_* / extreme_*
   vol_profile  VolumeProfileComponent          → in_value_area / above_poc / price_in_*_band
 
-兩種執行模式：
-  filter  — 所有維度 AND 合併（維度內 OR），跑一次 IC 分析
-  matrix  — 每個 label 獨立跑一次 IC 分析，結果並排比較
+三種執行模式：
+  filter        — 所有維度 AND 合併（維度內 OR），跑一次 IC 分析
+  matrix        — 每個 label 獨立跑一次 IC 分析，結果並排比較
+  cross_matrix  — 各維度勾選 label 的笛卡兒積，每個組合各跑一次（N×M×…次）
 
 效能備注：
   SessionComponent       每根 K 棒 O(1)，極快。
@@ -92,11 +93,22 @@ DIMENSION_SHORT: dict[str, str] = {
 
 
 def label_display_name(key: str) -> str:
-    """'vwap_zone=overextended_low'  →  'VWAP: overextended_low'"""
+    """Convert regime key to readable label.
+
+    'vwap_zone=overextended_low'            → 'VWAP: overextended_low'
+    'session=asian+vwap_zone=normal'        → 'Sess: asian × VWAP: normal'
+    """
+    if "+" in key:
+        return " × ".join(label_display_name(p) for p in key.split("+"))
     if "=" not in key:
         return key
     dim, label = key.split("=", 1)
     return f"{DIMENSION_SHORT.get(dim, dim)}: {label}"
+
+
+def cross_combination_key(combo: list[tuple[str, str]]) -> str:
+    """[(session, asian), (vwap_zone, normal)]  →  'session=asian+vwap_zone=normal'"""
+    return "+".join(f"{dim}={lbl}" for dim, lbl in combo)
 
 
 # ── Config dataclasses ────────────────────────────────────────────────────────
@@ -111,7 +123,7 @@ class RegimeDimConfig:
 
 @dataclass
 class RegimeFilterConfig:
-    mode: Literal["filter", "matrix"] = "matrix"
+    mode: Literal["filter", "matrix", "cross_matrix"] = "matrix"
     dimensions: list[RegimeDimConfig] = field(default_factory=list)
 
     def is_active(self) -> bool:
@@ -123,6 +135,27 @@ class RegimeFilterConfig:
             for d in self.dimensions
             if d.enabled and d.selected_labels
         )
+
+    def cross_combination_count(self) -> int:
+        """Number of cartesian-product combinations (cross_matrix mode)."""
+        from math import prod
+        counts = [
+            len(d.selected_labels)
+            for d in self.dimensions
+            if d.enabled and d.selected_labels
+        ]
+        return prod(counts) if counts else 0
+
+    def get_cross_combinations(self) -> list[list[tuple[str, str]]]:
+        """Cartesian product of enabled dims' selected labels."""
+        from itertools import product as iterproduct
+        groups: list[list[tuple[str, str]]] = []
+        for d in self.dimensions:
+            if d.enabled and d.selected_labels:
+                groups.append([(d.dimension, lbl) for lbl in d.selected_labels])
+        if not groups:
+            return []
+        return [list(combo) for combo in iterproduct(*groups)]
 
     def to_dict(self) -> dict[str, Any]:
         return {

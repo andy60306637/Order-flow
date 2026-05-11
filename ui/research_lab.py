@@ -303,7 +303,7 @@ class ResearchWorkerThread(QThread):
     def run(self) -> None:
         try:
             rf = self._config.regime_filter
-            if rf is not None and rf.is_active() and rf.mode == "matrix":
+            if rf is not None and rf.is_active() and rf.mode in ("matrix", "cross_matrix"):
                 results = run_research_with_regimes(self._config)
                 self.matrix_result_ready.emit({k: v.to_dict() for k, v in results.items()})
             else:
@@ -557,9 +557,14 @@ class ResearchLab(QWidget):
             self._regime_status.setText("Inactive")
             self._regime_status.setStyleSheet(_S_DIM)
         else:
-            n = rc.active_label_count()
-            mode_str = "Matrix" if rc.mode == "matrix" else "Filter"
-            self._regime_status.setText(f"● {mode_str} ({n} labels)")
+            if rc.mode == "matrix":
+                detail = f"{rc.active_label_count()} labels"
+            elif rc.mode == "cross_matrix":
+                detail = f"{rc.cross_combination_count()} combos"
+            else:
+                detail = f"{rc.active_label_count()} labels"
+            mode_str = {"matrix": "Matrix", "cross_matrix": "Cross×", "filter": "Filter"}.get(rc.mode, rc.mode)
+            self._regime_status.setText(f"● {mode_str} ({detail})")
             self._regime_status.setStyleSheet(_S_OK)
 
     def _update_all_statuses(self) -> None:
@@ -637,11 +642,12 @@ class ResearchLab(QWidget):
         self._run_btn.setEnabled(False)
         self._export_btn.setEnabled(False)
         rc = self._regime_config
-        is_matrix = rc is not None and rc.is_active() and rc.mode == "matrix"
-        self._status.setText(
-            f"Running Matrix IC ({rc.active_label_count()} regimes)..."
-            if is_matrix else "Running vectorized research..."
-        )
+        if rc is not None and rc.is_active() and rc.mode == "matrix":
+            self._status.setText(f"Running Matrix IC ({rc.active_label_count()} regimes)...")
+        elif rc is not None and rc.is_active() and rc.mode == "cross_matrix":
+            self._status.setText(f"Running Cross Matrix IC ({rc.cross_combination_count()} combos)...")
+        else:
+            self._status.setText("Running vectorized research...")
         self._worker = ResearchWorkerThread(config, self)
         self._worker.result_ready.connect(self._on_result_ready)
         self._worker.matrix_result_ready.connect(self._on_matrix_result_ready)
