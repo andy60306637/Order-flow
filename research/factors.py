@@ -273,6 +273,12 @@ class LowerWickDeltaEfficiencyFactor(FactorBase):
 
 
 @register_factor
+class LowerWickDeltaEfficiencyMeanReversionFactor(LowerWickDeltaEfficiencyFactor):
+    name = "lower_wick_delta_eff_mr"
+    group = GROUP_MEAN_REVERSION
+
+
+@register_factor
 class DeltaEfficiencyLongFactor(FactorBase):
     name = "delta_eff_long"
     sides = (FACTOR_SIDE_LONG,)
