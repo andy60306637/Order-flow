@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 
@@ -35,6 +35,8 @@ class ResearchConfig:
     train_ratio: float = 0.5
     # Granularity used to derive rolling-IC-based IR / t-stat.
     ic_period_granularity: str = "month"
+    # Optional regime filter — None means no filtering.
+    regime_filter: Any | None = None
 
 
 @dataclass
@@ -73,7 +75,78 @@ def run_research(
     ensure_builtin_factors()
     if klines is None:
         klines, tick_map = load_research_data(config)
-    tick_map = tick_map if config.use_tick_features else None
+    tick_map_f = tick_map if config.use_tick_features else None
+
+    regime_mask: np.ndarray | None = None
+    rf = config.regime_filter
+    if rf is not None and rf.is_active() and rf.mode == "filter":
+        from research.regime_filter import combine_for_filter, compute_regime_masks
+        raw_masks = compute_regime_masks(klines, rf, tick_map_f)
+        regime_mask = combine_for_filter(len(klines), raw_masks, rf)
+
+    return _analyze_with_config(config, klines, tick_map_f, regime_mask)
+
+
+def run_research_with_regimes(
+    config: ResearchConfig,
+    klines: list[Kline] | None = None,
+    tick_map: TickBarMap | None = None,
+) -> dict[str, ResearchResult]:
+    """
+    Matrix 模式：每個 regime label 獨立跑一次 IC 分析。
+
+    回傳 {"dimension=label": ResearchResult, …}。
+    若 regime_filter 未啟用，回傳 {"(all)": full_result}。
+    Filter 模式時回傳 {"filtered": result}（合併遮罩）。
+    """
+    ensure_builtin_factors()
+    if klines is None:
+        klines, tick_map = load_research_data(config)
+    tick_map_f = tick_map if config.use_tick_features else None
+
+    rf = config.regime_filter
+    if rf is None or not rf.is_active():
+        return {"(all)": _analyze_with_config(config, klines, tick_map_f)}
+
+    from research.regime_filter import combine_for_filter, compute_regime_masks
+    raw_masks = compute_regime_masks(klines, rf, tick_map_f)
+
+    if rf.mode == "filter":
+        combined = combine_for_filter(len(klines), raw_masks, rf)
+        return {"filtered": _analyze_with_config(config, klines, tick_map_f, combined)}
+
+    if rf.mode == "cross_matrix":
+        from research.regime_filter import cross_combination_key
+        results: dict[str, ResearchResult] = {}
+        for combo in rf.get_cross_combinations():
+            combined_mask: np.ndarray | None = None
+            valid = True
+            for dim, lbl in combo:
+                mask = raw_masks.get(f"{dim}={lbl}")
+                if mask is None:
+                    valid = False
+                    break
+                combined_mask = mask if combined_mask is None else (combined_mask & mask)
+            if not valid or combined_mask is None or combined_mask.sum() == 0:
+                continue
+            results[cross_combination_key(combo)] = _analyze_with_config(
+                config, klines, tick_map_f, combined_mask
+            )
+        return results
+
+    # Matrix: one run per label
+    results = {}
+    for label, mask in raw_masks.items():
+        results[label] = _analyze_with_config(config, klines, tick_map_f, mask)
+    return results
+
+
+def _analyze_with_config(
+    config: ResearchConfig,
+    klines: list[Kline],
+    tick_map: TickBarMap | None,
+    regime_mask: np.ndarray | None = None,
+) -> ResearchResult:
     return analyze_factors(
         klines=klines,
         tick_map=tick_map,
@@ -85,6 +158,7 @@ def run_research(
         min_period_samples=config.min_period_samples,
         train_ratio=config.train_ratio,
         ic_period_granularity=config.ic_period_granularity,
+        regime_mask=regime_mask,
     )
 
 
@@ -129,6 +203,7 @@ def analyze_factors(
     min_period_samples: int = 30,
     train_ratio: float = 0.5,
     ic_period_granularity: str = "month",
+    regime_mask: np.ndarray | None = None,
 ) -> ResearchResult:
     ensure_builtin_factors()
     arr = klines_to_arrays(klines) if klines else {}
@@ -148,6 +223,11 @@ def analyze_factors(
     is_time_mask[:time_cut_idx] = True
     oos_time_mask = ~is_time_mask
     cut_time = int(open_times[time_cut_idx]) if time_cut_idx < n_times else 0
+
+    # Apply regime mask: further restrict IS/OOS to bars matching the selected regime.
+    if regime_mask is not None and len(regime_mask) == n_times:
+        is_time_mask = is_time_mask & regime_mask
+        oos_time_mask = oos_time_mask & regime_mask
 
     summary: list[dict[str, Any]] = []
     metrics: list[dict[str, Any]] = []

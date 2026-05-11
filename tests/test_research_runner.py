@@ -64,6 +64,7 @@ class ResearchRunnerTests(unittest.TestCase):
         self.assertIn("lower_wick_to_body_ratio", names)
         self.assertIn("upper_wick_to_body_ratio", names)
         self.assertIn("lower_wick_delta_eff", names)
+        self.assertIn("lower_wick_delta_eff_mr", names)
         self.assertIn("delta_eff_long", names)
         self.assertIn("delta_eff_short", names)
         self.assertIn("funding_rate", names)
@@ -74,20 +75,48 @@ class ResearchRunnerTests(unittest.TestCase):
         lower = get_factor_info("lower_wick_to_body_ratio")
         upper = get_factor_info("upper_wick_to_body_ratio")
         delta = get_factor_info("lower_wick_delta_eff")
+        delta_mr = get_factor_info("lower_wick_delta_eff_mr")
         delta_long = get_factor_info("delta_eff_long")
         delta_short = get_factor_info("delta_eff_short")
+        mr_lwde = get_factor_info("mr_lwde_eff")
+        mr_rbu = get_factor_info("mr_rbu_strength")
+        mr_cvdd = get_factor_info("mr_cvdd_divergence")
 
-        assert lower is not None and upper is not None and delta is not None
+        assert lower is not None and upper is not None and delta is not None and delta_mr is not None
         assert delta_long is not None and delta_short is not None
+        assert mr_lwde is not None and mr_rbu is not None and mr_cvdd is not None
         self.assertEqual(lower["side"], "Long")
         self.assertEqual(upper["side"], "Short")
+        self.assertEqual(delta_mr["side"], "Long")
         self.assertEqual(delta_long["side"], "Long")
         self.assertEqual(delta_short["side"], "Short")
         self.assertEqual(lower["group"], GROUP_MEAN_REVERSION)
         self.assertEqual(delta["group"], GROUP_MICROSTRUCTURE)
+        self.assertEqual(delta_mr["group"], GROUP_MEAN_REVERSION)
+        self.assertEqual(mr_lwde["group"], GROUP_MEAN_REVERSION)
+        self.assertEqual(mr_rbu["group"], GROUP_MEAN_REVERSION)
+        self.assertEqual(mr_cvdd["group"], GROUP_MEAN_REVERSION)
         funding = get_factor_info("funding_rate")
         assert funding is not None
         self.assertEqual(funding["group"], GROUP_CRYPTO_DERIVATIVES)
+
+    def test_lower_wick_delta_eff_mean_reversion_alias_matches_source_factor(self) -> None:
+        source = get_factor("lower_wick_delta_eff")
+        alias = get_factor("lower_wick_delta_eff_mr")
+        assert source is not None and alias is not None
+        klines = [_k(0, 100.0)]
+        tick_map = {
+            klines[0].open_time: np.array([
+                [0.0, 99.0, 2.0, 0.0],
+                [1.0, 99.4, 1.0, 1.0],
+                [2.0, 101.0, 10.0, 0.0],
+            ], dtype=np.float64)
+        }
+
+        np.testing.assert_allclose(
+            alias.compute(klines, tick_map),
+            source.compute(klines, tick_map),
+        )
 
     def test_delta_eff_atomic_long_short_factors_are_opposites(self) -> None:
         klines = [

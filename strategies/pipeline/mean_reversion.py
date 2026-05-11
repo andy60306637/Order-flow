@@ -321,37 +321,25 @@ def _mr_long_entry(
     )
 
 
-# ── LowerWickDeltaEffSignal ───────────────────────────────────────────────────
+# ── LowerWickRatioSignal ──────────────────────────────────────────────────────
 
-class LowerWickDeltaEffSignal(SignalModule):
+class LowerWickRatioSignal(SignalModule):
     """
-    吸收因子：下影線 × Delta 效率（lower_wick_delta_eff）。
+    下影線比例因子（lower_wick_ratio）。
 
-    評估信號K棒（klines[idx-1]）的下影線長度及 kline delta 方向：
-      lower_wick   = min(open, close) − low
-      wick_ratio   = lower_wick / range
-      imbalance    = (taker_buy − taker_sell) / volume    ← kline fallback
-      eff          = wick_ratio × imbalance               ← 綜合指標
-
-    觸發條件（全部滿足）：
-      1. wick_ratio  >= min_wick_ratio  （下影線夠長）
-      2. imbalance   >= min_imbalance   （買方佔優，買壓吸收了賣壓）
-      3. eff         >= min_eff         （綜合指標達標）
+    評估信號K棒（klines[idx-1]）的下影線占比：
+      lower_wick = min(open, close) − low
+      wick_ratio = lower_wick / range
     """
-
-    name = "LowerWickDeltaEff"
+    name = "LowerWickRatio"
 
     def __init__(
         self,
-        min_wick_ratio: float = 0.40,
-        min_imbalance:  float = 0.10,
-        min_eff:        float = 0.04,
+        min_wick_ratio: float = 0.50,
         sl_offset:      float = 0.0,
         min_micro_cvd:  float = 0.0,
     ) -> None:
         self.min_wick_ratio = min_wick_ratio
-        self.min_imbalance  = min_imbalance
-        self.min_eff        = min_eff
         self.sl_offset      = sl_offset
         self.min_micro_cvd  = min_micro_cvd
 
@@ -361,7 +349,7 @@ class LowerWickDeltaEffSignal(SignalModule):
     def detect_k0(self, klines: list[Kline], idx: int) -> Optional[dict]:
         k0  = klines[idx - 1]
         rng = k0.high - k0.low
-        if rng <= 0 or k0.volume <= 0:
+        if rng <= 0:
             return None
 
         body_lo    = min(k0.open, k0.close)
@@ -370,24 +358,11 @@ class LowerWickDeltaEffSignal(SignalModule):
         if wick_ratio < self.min_wick_ratio:
             return None
 
-        taker_buy  = k0.taker_buy_volume
-        taker_sell = k0.volume - taker_buy
-        imbalance  = (taker_buy - taker_sell) / (k0.volume + 1e-10)
-        if imbalance < self.min_imbalance:
-            return None
-
-        eff = wick_ratio * imbalance
-        if eff < self.min_eff:
-            return None
-
         return {
             "direction":  "long",
             "k0_idx":     idx - 1,
             "k0_low":     k0.low,
             "wick_ratio": wick_ratio,
-            "imbalance":  imbalance,
-            "eff":        eff,
-            "delta":      float(taker_buy - taker_sell),
         }
 
     def entry_conditions(
@@ -400,12 +375,9 @@ class LowerWickDeltaEffSignal(SignalModule):
         signal_bar = klines[k0_meta["k0_idx"]]
         return _mr_long_entry(
             klines, k0_idx, k0_meta["k0_low"], self.sl_offset,
-            label         = "MR_LWDE",
+            label         = "MR_LWR",
             meta          = {
                 "wick_ratio": k0_meta["wick_ratio"],
-                "imbalance":  k0_meta["imbalance"],
-                "eff":        k0_meta["eff"],
-                "delta":      k0_meta["delta"],
                 "k0_idx":     k0_meta["k0_idx"],
             },
             tick_map      = tick_map,
@@ -427,10 +399,10 @@ class CVDDivergenceSignal(SignalModule):
     牛背離觸發條件（k0 = klines[idx-1] 為信號棒）：
       1. k0.low ≤ prev_trough.low × (1 + price_tolerance)
          （k0 價格在視窗最低點附近或更低，確認空頭未放棄）
-      2. cvd_k0 > cvd_prev_trough
+      2. cvd_k0 > cvd_prev_trough (if not flipped)
          （CVD 正背離：價格創低，但累積買盤比前低點時更強）
-      3. cvd_divergence ≥ min_cvd_divergence
-         （背離幅度門檻，預設 0 = 任何正背離均觸發）
+         cvd_k0 < cvd_prev_trough (if flipped)
+         （CVD 負向：價格創低，買盤更弱，測試負 Alpha 翻轉）
 
     直覺：空方持續壓低價格，但每次創低時買盤吸收力逐漸增強 → 空頭動能衰竭。
     """
@@ -444,12 +416,14 @@ class CVDDivergenceSignal(SignalModule):
         min_cvd_divergence: float = 0.0,
         sl_offset:          float = 0.0,
         min_micro_cvd:      float = 0.0,
+        flipped:            bool  = False,  # 是否反轉背離邏輯
     ) -> None:
         self.window             = window
         self.price_tolerance    = price_tolerance
         self.min_cvd_divergence = min_cvd_divergence
         self.sl_offset          = sl_offset
         self.min_micro_cvd      = min_micro_cvd
+        self.flipped            = flipped
 
     def can_trade(self, klines: list[Kline], idx: int) -> bool:
         return idx >= self.window + 1
@@ -478,7 +452,13 @@ class CVDDivergenceSignal(SignalModule):
 
         cvd_prev     = cvd_map[prev_trough.open_time]
         cvd_k0       = cvd_map[k0.open_time]
-        cvd_diverge  = cvd_k0 - cvd_prev
+
+        if self.flipped:
+            # 反轉邏輯：CVD 創低（更弱）時進場
+            cvd_diverge = cvd_prev - cvd_k0
+        else:
+            # 正常牛背離：CVD 較高（較強）時進場
+            cvd_diverge = cvd_k0 - cvd_prev
 
         if cvd_diverge <= self.min_cvd_divergence:
             return None
@@ -491,6 +471,7 @@ class CVDDivergenceSignal(SignalModule):
             "cvd_k0":          cvd_k0,
             "cvd_prev":        cvd_prev,
             "cvd_divergence":  cvd_diverge,
+            "is_flipped":      self.flipped,
         }
 
     def entry_conditions(
@@ -503,13 +484,14 @@ class CVDDivergenceSignal(SignalModule):
         signal_bar = klines[k0_meta["k0_idx"]]
         return _mr_long_entry(
             klines, k0_idx, k0_meta["k0_low"], self.sl_offset,
-            label         = "MR_CVDD",
+            label         = "MR_CVDD_F" if k0_meta.get("is_flipped") else "MR_CVDD",
             meta          = {
                 "prev_trough_low": k0_meta["prev_trough_low"],
                 "cvd_k0":          k0_meta["cvd_k0"],
                 "cvd_prev":        k0_meta["cvd_prev"],
                 "cvd_divergence":  k0_meta["cvd_divergence"],
                 "k0_idx":          k0_meta["k0_idx"],
+                "is_flipped":      k0_meta.get("is_flipped"),
             },
             tick_map      = tick_map,
             trigger_price = signal_bar.high,
@@ -545,14 +527,16 @@ class EntryManagementStage(PipelineStage):
 
     def __init__(
         self,
-        atr_period: int   = 14,
-        atr_k:      float = 1.0,
-        max_sl_pct: float = 0.03,   # 最大停損距離：入場價的 3%
+        atr_period:   int   = 14,
+        atr_k:        float = 1.0,
+        max_sl_pct:   float = 0.03,   # 最大停損距離：入場價的 3%
+        min_stop_pct: float = 0.0015, # 停損距離最小值（相對入場價），防止費用侵蝕
     ) -> None:
-        self.atr_period = atr_period
-        self.atr_k      = atr_k
-        self.max_sl_pct = max_sl_pct
-        self._atr_comp  = ATRComponent(period=atr_period)
+        self.atr_period   = atr_period
+        self.atr_k        = atr_k
+        self.max_sl_pct   = max_sl_pct
+        self.min_stop_pct = min_stop_pct
+        self._atr_comp    = ATRComponent(period=atr_period)
 
     def process(self, ctx: PipelineContext) -> Optional[PipelineContext]:
         if ctx.entry_price is None or not ctx.alpha_meta:
@@ -577,6 +561,11 @@ class EntryManagementStage(PipelineStage):
         cap_stop = entry * (1.0 - self.max_sl_pct)
         stop     = max(raw_stop, cap_stop)   # 取較高（距離入場較近）
 
+        # 停損距離下限（防止費用侵蝕）
+        floor_stop = entry * (1.0 - self.min_stop_pct)
+        if stop > floor_stop:   # stop 太高（距離太小），拒絕此筆交易
+            return None
+
         if entry <= stop:
             return None
 
@@ -589,6 +578,7 @@ class EntryManagementStage(PipelineStage):
             "sl_basis": "ATR",
             "atr":      atr,
             "atr_k":    self.atr_k,
+            "stop_pct": (entry - stop) / entry, # 供診斷用
             "time":     None,                 # TODO: 因子衰退週期設置後填入
             "info":     None,                 # TODO: 事件驅動出場規則
             "regime":   None,                 # TODO: Regime 變化出場
@@ -685,14 +675,13 @@ def build_mean_reversion_pipeline(
     # SessionComponent
     allowed_sessions:     Sequence[str]  = ("asian", "london", "ny", "overlap"),
     # ── Stage 2：Alpha（三因子 OR 組合）────────────────────────────────────────
-    # 因子 a：LowerWickDeltaEff（吸收因子）
-    lw_min_wick_ratio: float = 0.40,
-    lw_min_imbalance:  float = 0.10,
-    lw_min_eff:        float = 0.04,
+    # 因子 a：LowerWickRatio（影線吸收因子，取代 LWDE）
+    lw_min_wick_ratio: float = 0.50,
     # 因子 b：CVDDivergence（買賣盤背離）
     cvd_window:             int   = 20,
     cvd_price_tolerance:    float = 0.002,
     cvd_min_divergence:     float = 0.0,
+    cvd_flipped:            bool  = True,   # 預設翻轉（因原始 IC 為負）
     # 因子 c：ReversalBarUp（型態因子）
     sma_period:           int   = 20,
     min_lower_wick_ratio: float = 0.5,
@@ -701,15 +690,18 @@ def build_mean_reversion_pipeline(
     sl_offset:     float = 0.0,
     min_micro_cvd: float = 0.0,   # execution bar Micro-CVD 最低門檻
     # ── Stage 3：EntryManagement ──────────────────────────────────────────────
-    atr_period: int   = 14,
-    atr_k:      float = 1.0,
-    max_sl_pct: float = 0.03,
+    atr_period:   int   = 14,
+    atr_k:        float = 1.0,
+    max_sl_pct:   float = 0.03,
+    min_stop_pct: float = 0.0015,   # 停損距離下限，防止費用侵蝕
     # ── Stage 4：RR + Fee（WickReversalV4 基準）─────────────────────────────
-    rr_ratio:        float                   = 2.0,    # 2RR baseline
+    rr_ratio:        float                   = 1.5,      # V8 優化值：1.5RR
+    time_decay_bars: int                     = 30,       # V8 優化值：30 根 K 棒時間離場
     capital_cfg:     Optional[CapitalConfig] = None,
     taker_fee_rate:  float                   = 0.00032,  # 0.032% taker fee
     slippage_rate:   float                   = 0.00002,  # 0.2 bps slippage
     fee_cover_ratio: float                   = 1.2,      # WickReversalV4 多單基準
+    enabled_signals: Sequence[str]           = ("reversal",), # 預設僅使用 V8 表現最佳的 RBU
 ) -> TradingPipeline:
     """
     均值回歸 Pipeline 工廠函式。
@@ -724,7 +716,7 @@ def build_mean_reversion_pipeline(
                                  ‖ ReversalBarUpSignal
                                    （OR 組合，trigger = signal_bar.HIGH, Micro-CVD 驗證）
     Stage 3  EntryManagementStage — ATR(14) 停損 + max_sl_pct cap
-                                    出場骨架：TP/SL/Time(TODO)/Info(TODO)/Regime(TODO)
+                                    出場骨架：TP/SL/Time/Info(TODO)/Regime(TODO)
     Stage 4  RRStage + FeeCoverRatioStage
 
     範例（1m K線，Binance USDT Perp）：
@@ -758,10 +750,8 @@ def build_mean_reversion_pipeline(
     session_comp = SessionComponent()
 
     # ── Stage 2 signals ───────────────────────────────────────────────────────
-    lower_wick_sig = LowerWickDeltaEffSignal(
+    lower_wick_sig = LowerWickRatioSignal(
         min_wick_ratio = lw_min_wick_ratio,
-        min_imbalance  = lw_min_imbalance,
-        min_eff        = lw_min_eff,
         sl_offset      = sl_offset,
         min_micro_cvd  = min_micro_cvd,
     )
@@ -771,6 +761,7 @@ def build_mean_reversion_pipeline(
         min_cvd_divergence = cvd_min_divergence,
         sl_offset          = sl_offset,
         min_micro_cvd      = min_micro_cvd,
+        flipped            = cvd_flipped,
     )
     reversal_sig = ReversalBarUpSignal(
         sma_period           = sma_period,
@@ -779,6 +770,16 @@ def build_mean_reversion_pipeline(
         sl_offset            = sl_offset,
         min_micro_cvd        = min_micro_cvd,
     )
+
+    # ── 篩選啟用的訊號 ────────────────────────────────────────────────────────
+    all_modules = {
+        "lower_wick": lower_wick_sig,
+        "cvd":        cvd_sig,
+        "reversal":   reversal_sig,
+    }
+    active_modules = [all_modules[k] for k in enabled_signals if k in all_modules]
+    if not active_modules:
+        active_modules = [reversal_sig] # Fallback
 
     gate     = PositionGateStage(max_positions=max_positions)
     cooldown = CooldownStage(cooldown_ms=cooldown_ms)
@@ -795,16 +796,20 @@ def build_mean_reversion_pipeline(
             },
         ),
         AlphaStage(
-            modules = [lower_wick_sig, cvd_sig, reversal_sig],
+            modules = active_modules,
             mode    = "OR",
         ),
         EntryManagementStage(
-            atr_period = atr_period,
-            atr_k      = atr_k,
-            max_sl_pct = max_sl_pct,
+            atr_period   = atr_period,
+            atr_k        = atr_k,
+            max_sl_pct   = max_sl_pct,
+            min_stop_pct = min_stop_pct,
         ),
         RRStage(
-            exit_cfg    = ExitConfig(tp_rr_ratio=rr_ratio),
+            exit_cfg    = ExitConfig(
+                tp_rr_ratio     = rr_ratio,
+                time_decay_bars = time_decay_bars,
+            ),
             capital_cfg = capital_cfg or CapitalConfig(),
             min_rr      = rr_ratio,
         ),

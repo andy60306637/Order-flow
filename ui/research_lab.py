@@ -5,20 +5,17 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, Qt, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -26,48 +23,60 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtCore import Qt
-
-from config import base as cfg_base
-from research.base import FACTOR_GROUPS, FACTOR_SIDE_LABELS, FACTOR_SIDES, factor_sides_label
-from research.registry import ensure_builtin_factors, get_factor, list_factors
-from research.runner import ResearchConfig, run_research
-from ui.time_slice_widget import TimeSliceWidget
-from utils.ui_settings import ui_settings
-
 
 import pyqtgraph as pg
 import numpy as np
 from datetime import datetime, timezone
 
+from config import base as cfg_base
+from research.regime_filter import RegimeFilterConfig, label_display_name
+from research.registry import ensure_builtin_factors, list_factors
+from research.runner import ResearchConfig, run_research, run_research_with_regimes
+from ui.factors_dialog import FactorsDialog
+from ui.parameters_dialog import ParametersDialog
+from ui.regime_filter_dialog import RegimeFilterDialog
+from ui.time_slice_dialog import TimeSliceDialog
+from ui.time_slice_widget import TimeSliceWidget
+from utils.ui_settings import ui_settings
+
+# ── Style constants ───────────────────────────────────────────────────────────
+
+_S_DIM  = "color: #787b86; font-size: 11px;"
+_S_INFO = "color: #d1d4dc; font-size: 11px;"
+_S_OK   = "color: #26a69a; font-size: 11px;"
+
+# ── IC Time-Series Chart ──────────────────────────────────────────────────────
+
 class FactorPerformanceChart(QWidget):
     """Time-series chart for factor Rank IC."""
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self._glw = pg.GraphicsLayoutWidget()
         self._glw.setBackground("#131722")
         layout.addWidget(self._glw)
-        
+
         self._plot = self._glw.addPlot()
         self._plot.setLabel("left", "Oriented Rank IC (Rolling)", color="#d1d4dc")
         self._plot.getAxis("left").setTextPen("#d1d4dc")
         self._plot.getAxis("bottom").setTextPen("#787b86")
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         self._plot.addLegend(offset=(10, 10))
-        
-        # Crosshair
+
         self._v_line = pg.InfiniteLine(angle=90, movable=False, pen="#787b86")
-        self._h_line = pg.InfiniteLine(angle=0, movable=False, pen="#787b86")
+        self._h_line = pg.InfiniteLine(angle=0,  movable=False, pen="#787b86")
         self._plot.addItem(self._v_line, ignoreBounds=True)
         self._plot.addItem(self._h_line, ignoreBounds=True)
-        
-        self._proxy = pg.SignalProxy(self._plot.scene().sigMouseMoved, rateLimit=60, slot=self._mouse_moved)
-        self._lines = {}
-        self._data = {} # {name: (x, y)}
-        self._timestamps = []
+
+        self._proxy = pg.SignalProxy(
+            self._plot.scene().sigMouseMoved, rateLimit=60, slot=self._mouse_moved
+        )
+        self._lines: dict = {}
+        self._data:  dict = {}
+        self._timestamps: list = []
         self._cutoff_line: pg.InfiniteLine | None = None
 
         self._hover_label = pg.TextItem(anchor=(0, 0), color="#d1d4dc")
@@ -82,62 +91,49 @@ class FactorPerformanceChart(QWidget):
         if not self._timestamps:
             return
 
-        x = np.array(self._timestamps) / 1000.0 # Convert to seconds for Axis
-        self._plot.setAxisItems({'bottom': pg.DateAxisItem()})
+        x = np.array(self._timestamps) / 1000.0
+        self._plot.setAxisItems({"bottom": pg.DateAxisItem()})
 
-        colors = ["#26a69a", "#ef5350", "#2196f3", "#ff9800", "#9c27b0", "#e91e63", "#4caf50", "#ffeb3b"]
-
-        factors = ts_data.get("factors", {})
-        for i, (name, y_list) in enumerate(factors.items()):
+        colors = ["#26a69a", "#ef5350", "#2196f3", "#ff9800",
+                  "#9c27b0", "#e91e63", "#4caf50", "#ffeb3b"]
+        for i, (name, y_list) in enumerate(ts_data.get("factors", {}).items()):
             if not y_list:
                 continue
             y = np.array(y_list)
-            color = colors[i % len(colors)]
-            line = self._plot.plot(x, y, pen=pg.mkPen(color, width=1.5), name=name)
+            line = self._plot.plot(x, y, pen=pg.mkPen(colors[i % len(colors)], width=1.5), name=name)
             self._lines[name] = line
             self._data[name] = (x, y)
 
-        # IS/OOS boundary vertical line
         cut_ts = ts_data.get("train_cutoff_ts", 0)
         if cut_ts:
             self._cutoff_line = pg.InfiniteLine(
-                pos=cut_ts / 1000.0,
-                angle=90,
-                movable=False,
+                pos=cut_ts / 1000.0, angle=90, movable=False,
                 pen=pg.mkPen("#f59e0b", width=1, style=Qt.PenStyle.DashLine),
-                label="IS | OOS",
-                labelOpts={"color": "#f59e0b", "position": 0.95},
+                label="IS | OOS", labelOpts={"color": "#f59e0b", "position": 0.95},
             )
             self._plot.addItem(self._cutoff_line, ignoreBounds=True)
 
-    def _mouse_moved(self, evt):
+    def _mouse_moved(self, evt) -> None:
         pos = evt[0]
-        if self._plot.sceneBoundingRect().contains(pos):
-            mouse_point = self._plot.vb.mapSceneToView(pos)
-            self._v_line.setPos(mouse_point.x())
-            self._h_line.setPos(mouse_point.y())
-            
-            # Find nearest timestamp
-            if not self._timestamps:
-                return
-            
-            x_val = mouse_point.x()
-            vx_arr = np.array(self._timestamps)/1000.0
-            idx = np.searchsorted(vx_arr, x_val)
-            if idx >= len(self._timestamps):
-                idx = len(self._timestamps) - 1
-            
-            ts = self._timestamps[idx]
-            dt_str = datetime.fromtimestamp(ts/1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-            
-            text = f"Time: {dt_str}\n"
-            for name, (vx, vy) in self._data.items():
-                if idx < len(vy):
-                    val = vy[idx]
-                    text += f"{name}: {val:.4f}\n"
-            
-            self._hover_label.setHtml(f'<div style="background-color: #1e222d; padding: 5px; border: 1px solid #363c4e;">{text}</div>')
-            self._hover_label.setPos(mouse_point.x(), mouse_point.y())
+        if not self._plot.sceneBoundingRect().contains(pos):
+            return
+        mp = self._plot.vb.mapSceneToView(pos)
+        self._v_line.setPos(mp.x())
+        self._h_line.setPos(mp.y())
+        if not self._timestamps:
+            return
+        idx = int(np.searchsorted(np.array(self._timestamps) / 1000.0, mp.x()))
+        idx = min(idx, len(self._timestamps) - 1)
+        ts  = self._timestamps[idx]
+        dt_str = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        text = f"Time: {dt_str}\n"
+        for name, (vx, vy) in self._data.items():
+            if idx < len(vy):
+                text += f"{name}: {vy[idx]:.4f}\n"
+        self._hover_label.setHtml(
+            f'<div style="background-color:#1e222d;padding:5px;border:1px solid #363c4e;">{text}</div>'
+        )
+        self._hover_label.setPos(mp.x(), mp.y())
 
     def clear(self) -> None:
         for line in self._lines.values():
@@ -146,12 +142,159 @@ class FactorPerformanceChart(QWidget):
             self._plot.removeItem(self._cutoff_line)
             self._cutoff_line = None
         self._lines = {}
-        self._data = {}
+        self._data  = {}
         self._timestamps = []
 
+
+# ── Regime Matrix Widget ──────────────────────────────────────────────────────
+
+_METRIC_KEYS = {
+    "OOS Rank IC": "oos_oriented_rank_ic",
+    "OOS IC IR":   "oos_oriented_ic_ir",
+    "OOS t-stat":  "oos_oriented_ic_t_stat",
+}
+
+
+def _ic_bg_color(value: float, metric_key: str) -> str:
+    if not np.isfinite(value):
+        return "#1e222d"
+    if metric_key == "oos_oriented_rank_ic":
+        if value >= 0.05:  return "#163029"
+        if value >= 0.02:  return "#152623"
+        if value > 0:      return "#141f1d"
+        if value <= -0.05: return "#2e1616"
+        if value <= -0.02: return "#241515"
+        if value < 0:      return "#1d1414"
+    elif metric_key == "oos_oriented_ic_t_stat":
+        a = abs(value)
+        if a >= 2.0:  return "#163029" if value > 0 else "#2e1616"
+        if a >= 1.65: return "#152623" if value > 0 else "#241515"
+    return "#1e222d"
+
+
+def _ic_text_color(value: float, metric_key: str) -> str:
+    if not np.isfinite(value):
+        return "#4a4e5a"
+    if metric_key == "oos_oriented_ic_t_stat":
+        a = abs(value)
+        if a >= 2.0:  return "#d1d4dc"
+        if a >= 1.65: return "#9598a1"
+        return "#4a4e5a"
+    return "#d1d4dc"
+
+
+class RegimeMatrixWidget(QWidget):
+    """Factor × Regime IC 矩陣表格。"""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Metric:"))
+        self._metric_combo = QComboBox()
+        self._metric_combo.addItems(list(_METRIC_KEYS.keys()))
+        self._metric_combo.currentIndexChanged.connect(self._refresh)
+        top.addWidget(self._metric_combo)
+        top.addStretch()
+        self._info_label = QLabel("")
+        self._info_label.setStyleSheet(_S_DIM)
+        top.addWidget(self._info_label)
+        layout.addLayout(top)
+
+        self._table = QTableWidget()
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setDefaultSectionSize(28)
+        layout.addWidget(self._table)
+
+        self._results: dict[str, dict] = {}
+
+    def set_data(self, results: dict[str, dict]) -> None:
+        self._results = results
+        self._refresh()
+
+    def clear(self) -> None:
+        self._results = {}
+        self._table.clear()
+        self._table.setRowCount(0)
+        self._table.setColumnCount(0)
+        self._info_label.setText("")
+
+    def _refresh(self) -> None:
+        if not self._results:
+            self._table.clear()
+            self._table.setRowCount(0)
+            self._table.setColumnCount(0)
+            return
+
+        metric_label = self._metric_combo.currentText()
+        metric_key   = _METRIC_KEYS.get(metric_label, "oos_oriented_rank_ic")
+
+        regime_keys: list[str] = list(self._results.keys())
+        factor_names: list[str] = []
+        seen: set[str] = set()
+        for res in self._results.values():
+            for row in res.get("summary", []):
+                name = row["factor"]
+                if name not in seen:
+                    factor_names.append(name)
+                    seen.add(name)
+
+        if not factor_names or not regime_keys:
+            return
+
+        # matrix[factor][col_idx] = (value, n_oos)
+        matrix: dict[str, list[tuple[float, int]]] = {f: [] for f in factor_names}
+        for rk in regime_keys:
+            summary_map = {row["factor"]: row for row in self._results[rk].get("summary", [])}
+            for f in factor_names:
+                row = summary_map.get(f, {})
+                val = row.get(metric_key, float("nan"))
+                n   = row.get("oos_sample_count", 0)
+                matrix[f].append((float(val) if val is not None else float("nan"), int(n)))
+
+        self._table.setRowCount(len(factor_names) + 1)
+        self._table.setColumnCount(len(regime_keys))
+        self._table.setHorizontalHeaderLabels([label_display_name(k) for k in regime_keys])
+        self._table.setVerticalHeaderLabels(list(factor_names) + ["n (OOS)"])
+
+        for r, fname in enumerate(factor_names):
+            for c, rk in enumerate(regime_keys):
+                val, n = matrix[fname][c]
+                text = f"{val:+.4f}" if np.isfinite(val) else "—"
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item.setToolTip(
+                    f"Factor: {fname}\nRegime: {label_display_name(rk)}\n"
+                    f"{metric_label}: {text}\nn(OOS): {n:,}"
+                )
+                item.setBackground(QColor(_ic_bg_color(val, metric_key)))
+                item.setForeground(QColor(_ic_text_color(val, metric_key)))
+                self._table.setItem(r, c, item)
+
+        n_row = len(factor_names)
+        for c, rk in enumerate(regime_keys):
+            n_max = max((matrix[f][c][1] for f in factor_names), default=0)
+            item = QTableWidgetItem(f"{n_max:,}")
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setForeground(QColor("#787b86"))
+            self._table.setItem(n_row, c, item)
+
+        self._table.resizeColumnsToContents()
+        self._info_label.setText(
+            f"{len(regime_keys)} regimes × {len(factor_names)} factors = "
+            f"{len(regime_keys) * len(factor_names)} cells"
+        )
+
+
+# ── Worker Thread ─────────────────────────────────────────────────────────────
+
 class ResearchWorkerThread(QThread):
-    result_ready = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    result_ready        = pyqtSignal(dict)
+    matrix_result_ready = pyqtSignal(dict)
+    error               = pyqtSignal(str)
 
     def __init__(self, config: ResearchConfig, parent=None) -> None:
         super().__init__(parent)
@@ -159,10 +302,17 @@ class ResearchWorkerThread(QThread):
 
     def run(self) -> None:
         try:
-            self.result_ready.emit(run_research(self._config).to_dict())
+            rf = self._config.regime_filter
+            if rf is not None and rf.is_active() and rf.mode in ("matrix", "cross_matrix"):
+                results = run_research_with_regimes(self._config)
+                self.matrix_result_ready.emit({k: v.to_dict() for k, v in results.items()})
+            else:
+                self.result_ready.emit(run_research(self._config).to_dict())
         except Exception as exc:
             self.error.emit(str(exc))
 
+
+# ── Main Research Lab Widget ──────────────────────────────────────────────────
 
 class ResearchLab(QWidget):
     """Vectorized factor IC and quantile research UI."""
@@ -171,11 +321,40 @@ class ResearchLab(QWidget):
         super().__init__(parent)
         ensure_builtin_factors()
         self._saved = ui_settings.get("research_lab_config", {})
+
+        # ── State (persisted between dialog opens) ────────────────────────────
+        self._selected_factors_list: list[str] = list(
+            self._saved.get("factors") or list_factors(include_tick=True)
+        )
+        self._factor_side_filter_val: str  = self._saved.get("factor_side_filter", "")
+        self._factor_group_filter_val: str = self._saved.get("factor_group_filter", "")
+        self._horizons_str:   str   = self._saved.get("horizons",    "1,3,6,12")
+        self._quantiles_val:  int   = int(self._saved.get("quantiles",  5))
+        self._entry_lag_val:  int   = int(self._saved.get("entry_lag",  1))
+        self._train_ratio_val: float = float(self._saved.get("train_ratio", 0.5))
+        regime_data = self._saved.get("regime_filter")
+        self._regime_config: RegimeFilterConfig | None = (
+            RegimeFilterConfig.from_dict(regime_data) if regime_data else None
+        )
+
+        # ── Persistent hidden TimeSliceWidget (not in any layout) ─────────────
+        self._time_slice = TimeSliceWidget()
+
         self._worker: Optional[ResearchWorkerThread] = None
         self._last_result: dict | None = None
+        self._last_matrix_result: dict | None = None
         self._restore_done = False
+
         self._setup_ui()
+
+        # Load symbol and restore months after symbol combo is created
+        self._time_slice.load_symbol(self._symbol_combo.currentText())
+        self._time_slice.set_selected_months(self._saved.get("selected_months", []))
+
+        self._update_all_statuses()
         self._restore_done = True
+
+    # ── UI Setup ──────────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
         root = QSplitter(Qt.Orientation.Horizontal)
@@ -183,12 +362,13 @@ class ResearchLab(QWidget):
 
         controls = QWidget()
         controls.setFixedWidth(340)
-        controls_layout = QVBoxLayout(controls)
-        controls_layout.setContentsMargins(8, 8, 8, 8)
-        controls_layout.setSpacing(6)
+        cl = QVBoxLayout(controls)
+        cl.setContentsMargins(8, 8, 8, 8)
+        cl.setSpacing(6)
 
+        # ── Research Dataset ──────────────────────────────────────────────────
         data_box = QGroupBox("Research Dataset")
-        data_layout = QVBoxLayout(data_box)
+        dl = QVBoxLayout(data_box)
         self._symbol_combo = QComboBox()
         self._symbol_combo.addItems(cfg_base.SYMBOLS)
         if self._saved.get("symbol") in cfg_base.SYMBOLS:
@@ -198,121 +378,89 @@ class ResearchLab(QWidget):
         self._interval_combo.setCurrentText(self._saved.get("interval", "1m"))
         self._tick_check = QCheckBox("Use tick-derived factors when available")
         self._tick_check.setChecked(self._saved.get("use_tick_features", True))
-        data_layout.addWidget(QLabel("Symbol"))
-        data_layout.addWidget(self._symbol_combo)
-        data_layout.addWidget(QLabel("Interval"))
-        data_layout.addWidget(self._interval_combo)
-        data_layout.addWidget(self._tick_check)
-        controls_layout.addWidget(data_box)
+        dl.addWidget(QLabel("Symbol"))
+        dl.addWidget(self._symbol_combo)
+        dl.addWidget(QLabel("Interval"))
+        dl.addWidget(self._interval_combo)
+        dl.addWidget(self._tick_check)
+        cl.addWidget(data_box)
 
-        slice_box = QGroupBox("Time Slice")
-        slice_layout = QVBoxLayout(slice_box)
-        self._time_slice = TimeSliceWidget()
-        slice_layout.addWidget(self._time_slice)
-        controls_layout.addWidget(slice_box, stretch=1)
+        # ── Analysis Configuration (4 button rows) ────────────────────────────
+        cfg_box = QGroupBox("Analysis Configuration")
+        cfg_l = QVBoxLayout(cfg_box)
+        cfg_l.setSpacing(5)
 
-        factor_box = QGroupBox("Factors")
-        factor_layout = QVBoxLayout(factor_box)
-        self._factor_side_filter = QComboBox()
-        self._factor_side_filter.addItem("All Directions", "")
-        for side in FACTOR_SIDES:
-            self._factor_side_filter.addItem(FACTOR_SIDE_LABELS[side], side)
-        side_idx = self._factor_side_filter.findData(self._saved.get("factor_side_filter", ""))
-        self._factor_side_filter.setCurrentIndex(max(0, side_idx))
+        def _row(label: str) -> tuple[QPushButton, QLabel, QHBoxLayout]:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            btn = QPushButton(label)
+            btn.setFixedWidth(118)
+            lbl = QLabel("—")
+            lbl.setStyleSheet(_S_DIM)
+            row.addWidget(btn)
+            row.addWidget(lbl, stretch=1)
+            return btn, lbl, row
 
-        self._factor_group_filter = QComboBox()
-        self._factor_group_filter.addItem("All Groups", "")
-        for group in FACTOR_GROUPS:
-            self._factor_group_filter.addItem(group, group)
-        group_idx = self._factor_group_filter.findData(self._saved.get("factor_group_filter", ""))
-        self._factor_group_filter.setCurrentIndex(max(0, group_idx))
+        self._ts_btn,    self._ts_status,    ts_row    = _row("Time Slice...")
+        self._fac_btn,   self._fac_status,   fac_row   = _row("Factors...")
+        self._param_btn, self._param_status, param_row = _row("Parameters...")
+        self._regime_btn, self._regime_status, reg_row = _row("Regime...")
+        self._regime_btn.setToolTip("設定 Regime 條件過濾 / 矩陣分析")
 
-        factor_layout.addWidget(QLabel("Side"))
-        factor_layout.addWidget(self._factor_side_filter)
-        factor_layout.addWidget(QLabel("Group"))
-        factor_layout.addWidget(self._factor_group_filter)
+        for row in (ts_row, fac_row, param_row, reg_row):
+            cfg_l.addLayout(row)
 
-        factor_button_row = QHBoxLayout()
-        self._check_visible_btn = QPushButton("Check Visible")
-        self._clear_visible_btn = QPushButton("Clear Visible")
-        self._check_visible_btn.clicked.connect(lambda: self._set_visible_factor_checks(Qt.CheckState.Checked))
-        self._clear_visible_btn.clicked.connect(lambda: self._set_visible_factor_checks(Qt.CheckState.Unchecked))
-        factor_button_row.addWidget(self._check_visible_btn)
-        factor_button_row.addWidget(self._clear_visible_btn)
-        factor_layout.addLayout(factor_button_row)
+        self._ts_btn.clicked.connect(self._on_ts_btn_clicked)
+        self._fac_btn.clicked.connect(self._on_fac_btn_clicked)
+        self._param_btn.clicked.connect(self._on_param_btn_clicked)
+        self._regime_btn.clicked.connect(self._on_regime_btn_clicked)
 
-        self._factor_list = QListWidget()
-        self._factor_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
-        self._load_factor_list()
-        factor_layout.addWidget(self._factor_list)
-        self._apply_factor_filters()
-        controls_layout.addWidget(factor_box, stretch=1)
+        cl.addWidget(cfg_box, stretch=1)
 
-        param_box = QGroupBox("Research Parameters")
-        param_layout = QVBoxLayout(param_box)
-        self._horizon_edit = QComboBox()
-        self._horizon_edit.setEditable(True)
-        self._horizon_edit.addItems(["1,3,6,12", "1,2,3,5", "3,6,12,24"])
-        self._horizon_edit.setCurrentText(self._saved.get("horizons", "1,3,6,12"))
-        self._quantile_spin = QSpinBox()
-        self._quantile_spin.setRange(2, 10)
-        self._quantile_spin.setValue(int(self._saved.get("quantiles", 5)))
-        self._entry_lag_spin = QSpinBox()
-        self._entry_lag_spin.setRange(0, 10)
-        self._entry_lag_spin.setValue(int(self._saved.get("entry_lag", 1)))
-        self._train_ratio_spin = QDoubleSpinBox()
-        self._train_ratio_spin.setRange(0.1, 0.9)
-        self._train_ratio_spin.setSingleStep(0.05)
-        self._train_ratio_spin.setDecimals(2)
-        self._train_ratio_spin.setValue(float(self._saved.get("train_ratio", 0.5)))
-        param_layout.addWidget(QLabel("Forward Horizons (bars)"))
-        param_layout.addWidget(self._horizon_edit)
-        param_layout.addWidget(QLabel("Quantiles"))
-        param_layout.addWidget(self._quantile_spin)
-        param_layout.addWidget(QLabel("Entry Lag (bars)"))
-        param_layout.addWidget(self._entry_lag_spin)
-        param_layout.addWidget(QLabel("Train Ratio"))
-        param_layout.addWidget(self._train_ratio_spin)
-        controls_layout.addWidget(param_box)
-
-        button_row = QHBoxLayout()
-        self._run_btn = QPushButton("Run Research")
-        self._export_btn = QPushButton("Export Package")
+        # ── Action buttons ────────────────────────────────────────────────────
+        btn_row_layout = QHBoxLayout()
+        self._run_btn    = QPushButton("Run Research")
+        self._export_btn = QPushButton("Export")
         self._import_btn = QPushButton("Import")
         self._export_btn.setEnabled(False)
         self._run_btn.clicked.connect(self._on_run)
         self._export_btn.clicked.connect(self._on_export)
         self._import_btn.clicked.connect(self._on_import)
-        button_row.addWidget(self._run_btn)
-        button_row.addWidget(self._export_btn)
-        button_row.addWidget(self._import_btn)
-        controls_layout.addLayout(button_row)
+        btn_row_layout.addWidget(self._run_btn)
+        btn_row_layout.addWidget(self._export_btn)
+        btn_row_layout.addWidget(self._import_btn)
+        cl.addLayout(btn_row_layout)
 
         self._status = QLabel("")
-        self._status.setStyleSheet("color: #787b86; font-size: 11px;")
-        controls_layout.addWidget(self._status)
+        self._status.setStyleSheet(_S_DIM)
+        cl.addWidget(self._status)
 
         root.addWidget(controls)
 
+        # ── Result Tabs ───────────────────────────────────────────────────────
         self._tabs = QTabWidget()
-        self._summary_table = QTableWidget()
-        self._ortho_table = QTableWidget()
-        self._ts_chart = FactorPerformanceChart()
-        self._metrics_table = QTableWidget()
-        self._quantile_table = QTableWidget()
-        self._monthly_table = QTableWidget()
-        self._yearly_table = QTableWidget()
+        self._regime_matrix    = RegimeMatrixWidget()
+        self._summary_table    = QTableWidget()
+        self._ortho_table      = QTableWidget()
+        self._ts_chart         = FactorPerformanceChart()
+        self._metrics_table    = QTableWidget()
+        self._quantile_table   = QTableWidget()
+        self._monthly_table    = QTableWidget()
+        self._yearly_table     = QTableWidget()
         self._correlation_table = QTableWidget()
         self._unavailable_table = QTableWidget()
-        self._tabs.addTab(self._summary_table, "Factor Ranking")
-        self._tabs.addTab(self._ortho_table, "Orthogonal Ranking")
-        self._tabs.addTab(self._ts_chart, "IC Time Series")
-        self._tabs.addTab(self._metrics_table, "IC by Horizon")
-        self._tabs.addTab(self._quantile_table, "Quantiles")
-        self._tabs.addTab(self._monthly_table, "Monthly Stability")
-        self._tabs.addTab(self._yearly_table, "Yearly Stability")
+        self._tabs.addTab(self._regime_matrix,     "Regime Matrix")
+        self._tabs.addTab(self._summary_table,     "Factor Ranking")
+        self._tabs.addTab(self._ortho_table,       "Orthogonal Ranking")
+        self._tabs.addTab(self._ts_chart,          "IC Time Series")
+        self._tabs.addTab(self._metrics_table,     "IC by Horizon")
+        self._tabs.addTab(self._quantile_table,    "Quantiles")
+        self._tabs.addTab(self._monthly_table,     "Monthly Stability")
+        self._tabs.addTab(self._yearly_table,      "Yearly Stability")
         self._tabs.addTab(self._correlation_table, "Factor Correlations")
         self._tabs.addTab(self._unavailable_table, "Unavailable")
+        self._regime_matrix_tab_idx = 0
+
         root.addWidget(self._tabs)
         root.setStretchFactor(0, 0)
         root.setStretchFactor(1, 1)
@@ -322,120 +470,155 @@ class ResearchLab(QWidget):
         layout.addWidget(root)
 
         self._symbol_combo.currentTextChanged.connect(self._on_symbol_changed)
-        self._time_slice.load_symbol(self._symbol_combo.currentText())
-        self._time_slice.set_selected_months(self._saved.get("selected_months", []))
         self._connect_persistence()
 
-    def _load_factor_list(self) -> None:
-        selected = set(self._saved.get("factors", []))
-        if not selected:
-            selected = set(list_factors(include_tick=True))
-        group_order = {group: idx for idx, group in enumerate(FACTOR_GROUPS)}
+    # ── Config dialog handlers ────────────────────────────────────────────────
 
-        def sort_key(name: str) -> tuple[int, str]:
-            factor = get_factor(name)
-            group_idx = group_order.get(factor.group if factor is not None else "", len(group_order))
-            return group_idx, name
+    def _on_ts_btn_clicked(self) -> None:
+        dlg = TimeSliceDialog(
+            self,
+            symbol=self._symbol_combo.currentText(),
+            selected_months=self._time_slice.selected_months(),
+        )
+        if dlg.exec() == TimeSliceDialog.DialogCode.Accepted:
+            months = dlg.get_selected_months()
+            self._time_slice.load_symbol(self._symbol_combo.currentText())
+            self._time_slice.set_selected_months(months)
+            self._update_ts_status()
+            self._save_config()
 
-        for name in sorted(list_factors(include_tick=True), key=sort_key):
-            factor = get_factor(name)
-            suffix = " [tick]" if factor is not None and factor.requires_ticks else ""
-            side = factor_sides_label(factor.sides) if factor is not None else ""
-            group = factor.group if factor is not None else ""
-            item = QListWidgetItem(f"{name}{suffix}\n{side} | {group}")
-            item.setToolTip(f"{side} | {group}")
-            item.setData(Qt.ItemDataRole.UserRole, name)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if name in selected else Qt.CheckState.Unchecked)
-            self._factor_list.addItem(item)
+    def _on_fac_btn_clicked(self) -> None:
+        dlg = FactorsDialog(
+            self,
+            selected_factors=self._selected_factors_list,
+            side_filter=self._factor_side_filter_val,
+            group_filter=self._factor_group_filter_val,
+        )
+        if dlg.exec() == FactorsDialog.DialogCode.Accepted:
+            self._selected_factors_list   = dlg.get_selected_factors()
+            self._factor_side_filter_val  = dlg.get_side_filter()
+            self._factor_group_filter_val = dlg.get_group_filter()
+            self._update_fac_status()
+            self._save_config()
 
-    def _on_factor_filter_changed(self) -> None:
-        self._apply_factor_filters()
-        self._save_config()
+    def _on_param_btn_clicked(self) -> None:
+        dlg = ParametersDialog(
+            self,
+            horizons=self._horizons_str,
+            quantiles=self._quantiles_val,
+            entry_lag=self._entry_lag_val,
+            train_ratio=self._train_ratio_val,
+        )
+        if dlg.exec() == ParametersDialog.DialogCode.Accepted:
+            self._horizons_str    = dlg.get_horizons_str()
+            self._quantiles_val   = dlg.get_quantiles()
+            self._entry_lag_val   = dlg.get_entry_lag()
+            self._train_ratio_val = dlg.get_train_ratio()
+            self._update_param_status()
+            self._save_config()
 
-    def _apply_factor_filters(self) -> None:
-        side_filter = self._factor_side_filter.currentData() or ""
-        group_filter = self._factor_group_filter.currentData() or ""
-        for i in range(self._factor_list.count()):
-            item = self._factor_list.item(i)
-            factor = get_factor(str(item.data(Qt.ItemDataRole.UserRole)))
-            hidden = False
-            if factor is None:
-                hidden = True
-            elif side_filter and side_filter not in factor.sides:
-                hidden = True
-            elif group_filter and factor.group != group_filter:
-                hidden = True
-            item.setHidden(hidden)
+    def _on_regime_btn_clicked(self) -> None:
+        dlg = RegimeFilterDialog(self, self._regime_config)
+        if dlg.exec() == RegimeFilterDialog.DialogCode.Accepted:
+            self._regime_config = dlg.get_config()
+            self._update_regime_status()
+            self._save_config()
 
-    def _set_visible_factor_checks(self, state: Qt.CheckState) -> None:
-        for i in range(self._factor_list.count()):
-            item = self._factor_list.item(i)
-            if not item.isHidden():
-                item.setCheckState(state)
-        self._save_config()
+    # ── Status label updaters ─────────────────────────────────────────────────
+
+    def _update_ts_status(self) -> None:
+        months = self._time_slice.selected_months()
+        if not months:
+            self._ts_status.setText("未設定")
+            self._ts_status.setStyleSheet(_S_DIM)
+        else:
+            n = len(months)
+            preview = ", ".join(sorted(months)[:2])
+            if n > 2:
+                preview += f" …(+{n - 2})"
+            self._ts_status.setText(f"{preview} ({n}個月)")
+            self._ts_status.setStyleSheet(_S_INFO)
+
+    def _update_fac_status(self) -> None:
+        n_sel   = len(self._selected_factors_list)
+        n_total = len(list_factors(include_tick=True))
+        self._fac_status.setText(f"{n_sel} / {n_total} 個因子")
+        self._fac_status.setStyleSheet(_S_INFO if n_sel > 0 else _S_DIM)
+
+    def _update_param_status(self) -> None:
+        self._param_status.setText(
+            f"H:{self._horizons_str} | Q:{self._quantiles_val} | lag:{self._entry_lag_val}"
+        )
+        self._param_status.setStyleSheet(_S_INFO)
+
+    def _update_regime_status(self) -> None:
+        rc = self._regime_config
+        if rc is None or not rc.is_active():
+            self._regime_status.setText("Inactive")
+            self._regime_status.setStyleSheet(_S_DIM)
+        else:
+            if rc.mode == "matrix":
+                detail = f"{rc.active_label_count()} labels"
+            elif rc.mode == "cross_matrix":
+                detail = f"{rc.cross_combination_count()} combos"
+            else:
+                detail = f"{rc.active_label_count()} labels"
+            mode_str = {"matrix": "Matrix", "cross_matrix": "Cross×", "filter": "Filter"}.get(rc.mode, rc.mode)
+            self._regime_status.setText(f"● {mode_str} ({detail})")
+            self._regime_status.setStyleSheet(_S_OK)
+
+    def _update_all_statuses(self) -> None:
+        self._update_ts_status()
+        self._update_fac_status()
+        self._update_param_status()
+        self._update_regime_status()
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _connect_persistence(self) -> None:
         save = lambda *_: self._save_config()
         self._symbol_combo.currentTextChanged.connect(save)
         self._interval_combo.currentTextChanged.connect(save)
         self._tick_check.toggled.connect(save)
-        self._horizon_edit.currentTextChanged.connect(save)
-        self._quantile_spin.valueChanged.connect(save)
-        self._entry_lag_spin.valueChanged.connect(save)
-        self._train_ratio_spin.valueChanged.connect(save)
-        self._time_slice.selection_changed.connect(save)
-        self._factor_list.itemChanged.connect(save)
-        self._factor_side_filter.currentIndexChanged.connect(self._on_factor_filter_changed)
-        self._factor_group_filter.currentIndexChanged.connect(self._on_factor_filter_changed)
 
     def _on_symbol_changed(self, symbol: str) -> None:
         self._time_slice.load_symbol(symbol)
+        self._update_ts_status()
 
-    def _selected_factors(self) -> list[str]:
-        names: list[str] = []
-        for i in range(self._factor_list.count()):
-            item = self._factor_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                names.append(str(item.data(Qt.ItemDataRole.UserRole)))
-        return names
-
-    def _horizons(self) -> list[int]:
+    def _parse_horizons(self, text: str) -> list[int]:
         values: list[int] = []
-        for raw in self._horizon_edit.currentText().split(","):
+        for raw in text.split(","):
             raw = raw.strip()
-            if not raw:
-                continue
-            values.append(max(1, int(raw)))
+            if raw.isdigit():
+                values.append(max(1, int(raw)))
         return sorted(set(values))
 
     def _build_config(self) -> ResearchConfig | None:
         slices = self._normalize_slices(self._time_slice.get_slices())
         if not slices:
-            QMessageBox.warning(self, "No Time Slice", "Select at least one time slice for research.")
+            QMessageBox.warning(self, "No Time Slice",
+                                "Please open Time Slice and select at least one period.")
             return None
-        factors = self._selected_factors()
-        if not factors:
-            QMessageBox.warning(self, "No Factors", "Select at least one research factor.")
+        if not self._selected_factors_list:
+            QMessageBox.warning(self, "No Factors",
+                                "Please open Factors and select at least one factor.")
             return None
-        try:
-            horizons = self._horizons()
-        except ValueError:
-            QMessageBox.warning(self, "Invalid Horizons", "Use comma-separated positive integers, e.g. 1,3,6,12.")
-            return None
+        horizons = self._parse_horizons(self._horizons_str)
         if not horizons:
-            QMessageBox.warning(self, "Invalid Horizons", "Use at least one positive horizon.")
+            QMessageBox.warning(self, "Invalid Horizons",
+                                "Please open Parameters and set at least one horizon.")
             return None
         return ResearchConfig(
             symbol=self._symbol_combo.currentText(),
             interval=self._interval_combo.currentText(),
             slices=slices,
-            factor_names=factors,
+            factor_names=self._selected_factors_list,
             horizons=horizons,
-            quantiles=self._quantile_spin.value(),
+            quantiles=self._quantiles_val,
             use_tick_features=self._tick_check.isChecked(),
-            entry_lag=self._entry_lag_spin.value(),
-            train_ratio=self._train_ratio_spin.value(),
+            entry_lag=self._entry_lag_val,
+            train_ratio=self._train_ratio_val,
+            regime_filter=self._regime_config,
         )
 
     def _normalize_slices(self, slices: list) -> list:
@@ -447,6 +630,8 @@ class ResearchLab(QWidget):
                 normalized.append(item)
         return normalized
 
+    # ── Run / Result ──────────────────────────────────────────────────────────
+
     def _on_run(self) -> None:
         if self._worker and self._worker.isRunning():
             return
@@ -456,22 +641,29 @@ class ResearchLab(QWidget):
         self._save_config()
         self._run_btn.setEnabled(False)
         self._export_btn.setEnabled(False)
-        self._status.setText("Running vectorized research...")
+        rc = self._regime_config
+        if rc is not None and rc.is_active() and rc.mode == "matrix":
+            self._status.setText(f"Running Matrix IC ({rc.active_label_count()} regimes)...")
+        elif rc is not None and rc.is_active() and rc.mode == "cross_matrix":
+            self._status.setText(f"Running Cross Matrix IC ({rc.cross_combination_count()} combos)...")
+        else:
+            self._status.setText("Running vectorized research...")
         self._worker = ResearchWorkerThread(config, self)
         self._worker.result_ready.connect(self._on_result_ready)
+        self._worker.matrix_result_ready.connect(self._on_matrix_result_ready)
         self._worker.error.connect(self._on_error)
         self._worker.finished.connect(lambda: self._run_btn.setEnabled(True))
         self._worker.start()
 
     def _on_result_ready(self, result: dict) -> None:
         self._last_result = result
-        self._fill_table(self._summary_table, result.get("summary", []))
-        self._fill_table(self._ortho_table, result.get("orthogonal_summary", []))
+        self._fill_table(self._summary_table,     result.get("summary", []))
+        self._fill_table(self._ortho_table,       result.get("orthogonal_summary", []))
         self._ts_chart.set_data(result.get("timeseries_ic", {}))
-        self._fill_table(self._metrics_table, result.get("metrics", []))
-        self._fill_table(self._quantile_table, result.get("quantiles", []))
-        self._fill_table(self._monthly_table, result.get("stability_monthly", []))
-        self._fill_table(self._yearly_table, result.get("stability_yearly", []))
+        self._fill_table(self._metrics_table,     result.get("metrics", []))
+        self._fill_table(self._quantile_table,    result.get("quantiles", []))
+        self._fill_table(self._monthly_table,     result.get("stability_monthly", []))
+        self._fill_table(self._yearly_table,      result.get("stability_yearly", []))
         self._fill_table(self._correlation_table, result.get("factor_correlations", []))
         self._fill_table(self._unavailable_table, result.get("unavailable", []))
         self._export_btn.setEnabled(True)
@@ -479,9 +671,29 @@ class ResearchLab(QWidget):
             f"Done | rows={result.get('rows', 0)} | factors={len(result.get('summary', []))}"
         )
 
+    def _on_matrix_result_ready(self, results: dict) -> None:
+        self._last_matrix_result = results
+        self._regime_matrix.set_data(results)
+        self._tabs.setCurrentIndex(self._regime_matrix_tab_idx)
+        if results:
+            first = next(iter(results.values()))
+            self._last_result = first
+            self._fill_table(self._summary_table,     first.get("summary", []))
+            self._fill_table(self._ortho_table,       first.get("orthogonal_summary", []))
+            self._ts_chart.set_data(first.get("timeseries_ic", {}))
+            self._fill_table(self._metrics_table,     first.get("metrics", []))
+            self._fill_table(self._unavailable_table, first.get("unavailable", []))
+        self._export_btn.setEnabled(bool(self._last_result))
+        total_rows = sum(r.get("rows", 0) for r in results.values())
+        self._status.setText(
+            f"Matrix Done | {len(results)} regimes | total rows={total_rows:,}"
+        )
+
     def _on_error(self, msg: str) -> None:
         self._status.setText(f"Error: {msg}")
         QMessageBox.critical(self, "Research Error", msg)
+
+    # ── Table helper ──────────────────────────────────────────────────────────
 
     def _fill_table(self, table: QTableWidget, rows: list[dict]) -> None:
         table.clear()
@@ -496,96 +708,79 @@ class ResearchLab(QWidget):
         for r, row in enumerate(rows):
             for c, key in enumerate(headers):
                 val = row.get(key, "")
-                if isinstance(val, float):
-                    text = f"{val:.6g}"
-                else:
-                    text = str(val)
+                text = f"{val:.6g}" if isinstance(val, float) else str(val)
                 table.setItem(r, c, QTableWidgetItem(text))
         table.resizeColumnsToContents()
+
+    # ── Export / Import ───────────────────────────────────────────────────────
 
     def _on_export(self) -> None:
         if not self._last_result:
             return
-        
-        symbol = self._symbol_combo.currentText()
-        interval = self._interval_combo.currentText()
+        symbol    = self._symbol_combo.currentText()
+        interval  = self._interval_combo.currentText()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_dir_name = f"{symbol}_{interval}_{timestamp}"
-        
-        base_report_dir = Path("docs/reports/factor_analysis")
-        base_report_dir.mkdir(parents=True, exist_ok=True)
-        
-        suggested_path = base_report_dir / default_dir_name / "full_result.json"
-        suggested_path.parent.mkdir(parents=True, exist_ok=True)
-        
+        base_dir  = Path("docs/reports/factor_analysis")
+        base_dir.mkdir(parents=True, exist_ok=True)
+        suggested = base_dir / f"{symbol}_{interval}_{timestamp}" / "full_result.json"
+        suggested.parent.mkdir(parents=True, exist_ok=True)
         path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Research Package (as full_result.json)",
-            str(suggested_path),
-            "JSON Files (full_result.json)",
+            self, "Save Research Package",
+            str(suggested), "JSON Files (*.json)",
         )
         if not path:
             return
-            
-        target_json = Path(path)
-        target_dir = target_json.parent
-        target_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save JSON (contains all data including timeseries_ic and orthogonal_summary)
-        target_json.write_text(json.dumps(self._last_result, indent=2), encoding="utf-8")
-        
-        # Save CSV Bundle in the same directory
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(self._last_result, indent=2), encoding="utf-8")
         for key, rows in self._last_result.items():
             if key == "timeseries_ic":
-                continue # Skip timeseries in CSV bundle, or format differently if needed
+                continue
             if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
                 continue
-            csv_path = target_dir / f"{key}.csv"
-            with csv_path.open("w", newline="", encoding="utf-8") as fh:
+            with (target.parent / f"{key}.csv").open("w", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
                 writer.writeheader()
                 writer.writerows(rows)
-        
-        self._status.setText(f"Package saved to {target_dir}")
-        QMessageBox.information(self, "Export Successful", f"Research package saved to:\n{target_dir}")
+        self._status.setText(f"Package saved to {target.parent}")
+        QMessageBox.information(self, "Export Successful",
+                                f"Research package saved to:\n{target.parent}")
 
     def _on_import(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Import Research Result",
-            str(Path("docs/reports/factor_analysis")),
-            "JSON Files (*.json)",
+            self, "Import Research Result",
+            str(Path("docs/reports/factor_analysis")), "JSON Files (*.json)",
         )
         if not path:
             return
-            
         try:
             with open(path, "r", encoding="utf-8") as f:
                 result = json.load(f)
-            
-            # Simple validation
             if "summary" not in result or "metrics" not in result:
-                raise ValueError("Invalid research result file (missing summary or metrics)")
-                
+                raise ValueError("Invalid file (missing summary or metrics)")
             self._on_result_ready(result)
             self._status.setText(f"Imported: {Path(path).parent.name}")
-            QMessageBox.information(self, "Import Successful", f"Successfully imported research results from:\n{path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Import Error", f"Failed to import results: {str(e)}")
+            QMessageBox.information(self, "Import Successful",
+                                    f"Results imported from:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Import Error", str(exc))
+
+    # ── Persistence ───────────────────────────────────────────────────────────
 
     def _save_config(self) -> None:
         if not self._restore_done:
             return
         ui_settings.set("research_lab_config", {
-            "symbol": self._symbol_combo.currentText(),
-            "interval": self._interval_combo.currentText(),
-            "use_tick_features": self._tick_check.isChecked(),
-            "horizons": self._horizon_edit.currentText(),
-            "quantiles": self._quantile_spin.value(),
-            "entry_lag": self._entry_lag_spin.value(),
-            "train_ratio": self._train_ratio_spin.value(),
-            "factors": self._selected_factors(),
-            "factor_side_filter": self._factor_side_filter.currentData() or "",
-            "factor_group_filter": self._factor_group_filter.currentData() or "",
-            "selected_months": self._time_slice.selected_months(),
+            "symbol":              self._symbol_combo.currentText(),
+            "interval":            self._interval_combo.currentText(),
+            "use_tick_features":   self._tick_check.isChecked(),
+            "horizons":            self._horizons_str,
+            "quantiles":           self._quantiles_val,
+            "entry_lag":           self._entry_lag_val,
+            "train_ratio":         self._train_ratio_val,
+            "factors":             self._selected_factors_list,
+            "factor_side_filter":  self._factor_side_filter_val,
+            "factor_group_filter": self._factor_group_filter_val,
+            "selected_months":     self._time_slice.selected_months(),
+            "regime_filter":       self._regime_config.to_dict() if self._regime_config else None,
         })
