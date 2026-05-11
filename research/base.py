@@ -24,6 +24,11 @@ GROUP_MEAN_REVERSION = "Mean-Reversion & Extreme Factors"
 GROUP_VOLATILITY = "Volatility & Compression Factors"
 GROUP_CRYPTO_DERIVATIVES = "Crypto Derivatives & Alternative Factors"
 GROUP_PRICE_ACTION = "Price Action & Chart Patterns"
+GROUP_LIQUIDITY_SWEEP = "Liquidity Sweep & Reclaim Factors"
+GROUP_CVD_DIVERGENCE = "CVD Divergence Factors"
+GROUP_ORDER_FLOW_ABSORPTION = "Order Flow Absorption Factors"
+GROUP_VOLUME_PROFILE_ALPHA = "Volume Profile Alpha Factors"
+GROUP_EXHAUSTION_RECLAIM = "Exhaustion & Reclaim Factors"
 FACTOR_GROUPS = (
     GROUP_MICROSTRUCTURE,
     GROUP_REGIME,
@@ -33,6 +38,11 @@ FACTOR_GROUPS = (
     GROUP_VOLATILITY,
     GROUP_CRYPTO_DERIVATIVES,
     GROUP_PRICE_ACTION,
+    GROUP_LIQUIDITY_SWEEP,
+    GROUP_CVD_DIVERGENCE,
+    GROUP_ORDER_FLOW_ABSORPTION,
+    GROUP_VOLUME_PROFILE_ALPHA,
+    GROUP_EXHAUSTION_RECLAIM,
 )
 
 

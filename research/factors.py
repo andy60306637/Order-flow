@@ -214,6 +214,90 @@ def _delta_n(values: np.ndarray, n: int) -> np.ndarray:
     return out
 
 
+def _rolling_volume_profile(
+    high: np.ndarray,
+    low: np.ndarray,
+    volume: np.ndarray,
+    window: int,
+    n_bins: int = 24,
+    va_pct: float = 0.70,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rolling volume profile returning (POC, VAL) per bar.
+
+    For each bar i, the profile is built from the window bars ending at i
+    (inclusive). Volume is distributed across price bins proportionally to
+    the fraction of each bar's high-low range that overlaps each bin.
+
+    Returns:
+        poc: price of the highest-volume bin centre (NaN when insufficient data)
+        val: lower edge of the Value Area (lowest bin of the ~va_pct volume cluster)
+    """
+    n = len(high)
+    poc_out = np.full(n, np.nan, dtype=np.float64)
+    val_out = np.full(n, np.nan, dtype=np.float64)
+
+    for i in range(window - 1, n):
+        h_w = high[i - window + 1 : i + 1]
+        l_w = low[i - window + 1 : i + 1]
+        v_w = volume[i - window + 1 : i + 1]
+
+        p_min = l_w.min()
+        p_max = h_w.max()
+        if p_max <= p_min or not (np.isfinite(p_min) and np.isfinite(p_max)):
+            continue
+
+        edges = np.linspace(p_min, p_max, n_bins + 1)
+        bin_los = edges[:-1]
+        bin_his = edges[1:]
+
+        # Overlap of each bar against each bin: (window, n_bins)
+        bar_his = h_w[:, None]
+        bar_los = l_w[:, None]
+        overlaps = np.maximum(0.0, np.minimum(bar_his, bin_his) - np.maximum(bar_los, bin_los))
+
+        bar_rngs = (h_w - l_w)[:, None]
+        nonzero = (bar_rngs[:, 0] > 0)
+        weights = np.zeros_like(overlaps)
+        if nonzero.any():
+            weights[nonzero] = overlaps[nonzero] / bar_rngs[nonzero]
+        # Zero-range bars: concentrate volume at the nearest bin
+        for jj in np.where(~nonzero)[0]:
+            b = int(np.clip(np.searchsorted(bin_his, l_w[jj], side="left"), 0, n_bins - 1))
+            weights[jj, b] = 1.0
+
+        vol_bins = (v_w[:, None] * weights).sum(axis=0)
+
+        poc_bin = int(np.argmax(vol_bins))
+        poc_out[i] = (edges[poc_bin] + edges[poc_bin + 1]) / 2.0
+
+        total = vol_bins.sum()
+        if total <= 0:
+            continue
+
+        # Expand value area from POC outward, adding the higher-volume neighbour first
+        lo, hi = poc_bin, poc_bin
+        area = vol_bins[poc_bin]
+        target = total * va_pct
+
+        while area < target:
+            can_lo = lo > 0
+            can_hi = hi < n_bins - 1
+            if not can_lo and not can_hi:
+                break
+            add_lo = vol_bins[lo - 1] if can_lo else -1.0
+            add_hi = vol_bins[hi + 1] if can_hi else -1.0
+            if add_lo >= add_hi:
+                lo -= 1
+                area += vol_bins[lo]
+            else:
+                hi += 1
+                area += vol_bins[hi]
+
+        val_out[i] = edges[lo]
+
+    return poc_out, val_out
+
+
 # ---------------------------------------------------------------------------
 # Group 1 · Micro-structure & Order Flow
 # Wick and Delta Efficiency Factors
