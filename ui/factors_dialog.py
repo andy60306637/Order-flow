@@ -131,11 +131,11 @@ class FactorsDialog(QDialog):
         for i in range(self._list.count()):
             item = self._list.item(i)
             f = get_factor(str(item.data(Qt.ItemDataRole.UserRole)))
-            item.setHidden(
+            item.setHidden(bool(
                 f is None
-                or (side  and side  not in f.sides)
-                or (group and f.group != group)
-            )
+                or (bool(side)  and side  not in f.sides)
+                or (bool(group) and f.group != group)
+            ))
 
     def _set_visible(self, state: Qt.CheckState) -> None:
         for i in range(self._list.count()):
