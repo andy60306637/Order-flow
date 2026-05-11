@@ -290,6 +290,8 @@ def _pair_signals(signals: List[StrategySignal]):
     open_count = 0
 
     for sig in signals:
+        if isinstance(sig, dict):
+            raise TypeError(f"Expected StrategySignal, got dict: {sig}")
         fp = sig.fill_price or sig.price   # 優先使用實際成交價
         ts = sig.fill_time or sig.open_time  # 優先使用 tick 時間戳
         if sig.signal_type == "long_entry":

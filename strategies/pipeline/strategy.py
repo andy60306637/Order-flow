@@ -62,6 +62,8 @@ class MultiPipelineStrategy(StrategyBase):
         bars_held:      dict[str, int]  = {}   # pipeline_name → bars held count
 
         for i in range(1, n):
+            if i % 5000 == 0:
+                print(f"  [Strategy] Progress: {i}/{n} bars...")
             k = klines[i]
 
             # ── 持倉中：出場檢查 ──────────────────────────────────────────────

@@ -49,3 +49,4 @@ def list_factor_infos(include_tick: bool = True) -> list[dict[str, object]]:
 
 def ensure_builtin_factors() -> None:
     import research.factors  # noqa: F401
+    import research.mr_alpha_ic_factors  # noqa: F401
