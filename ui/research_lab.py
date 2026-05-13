@@ -777,13 +777,30 @@ class ResearchLab(QWidget):
             return
         try:
             with open(path, "r", encoding="utf-8") as f:
-                result = json.load(f)
-            if "summary" not in result or "metrics" not in result:
-                raise ValueError("Invalid file (missing summary or metrics)")
-            self._on_result_ready(result)
-            self._status.setText(f"Imported: {Path(path).parent.name}")
-            QMessageBox.information(self, "Import Successful",
-                                    f"Results imported from:\n{path}")
+                data = json.load(f)
+            if not isinstance(data, dict) or not data:
+                raise ValueError("Invalid file: empty or not a JSON object")
+
+            # Detect format: matrix result has regime-label keys whose values are
+            # result dicts; regular result has "summary"/"metrics" at top level.
+            _RESULT_FIELDS = {"summary", "metrics", "quantiles", "rows"}
+            is_matrix = (
+                not _RESULT_FIELDS.intersection(data.keys())
+                and all(isinstance(v, dict) and "summary" in v for v in data.values())
+            )
+
+            if is_matrix:
+                self._on_matrix_result_ready(data)
+                self._status.setText(f"Imported matrix: {Path(path).parent.name}")
+                QMessageBox.information(self, "Import Successful",
+                                        f"Matrix results imported from:\n{path}")
+            else:
+                if "summary" not in data or "metrics" not in data:
+                    raise ValueError("Invalid file (missing summary or metrics)")
+                self._on_result_ready(data)
+                self._status.setText(f"Imported: {Path(path).parent.name}")
+                QMessageBox.information(self, "Import Successful",
+                                        f"Results imported from:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "Import Error", str(exc))
 

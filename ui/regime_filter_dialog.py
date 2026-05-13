@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -70,17 +71,18 @@ class _DimSection(QWidget):
         self._enable_chk = QCheckBox("啟用此維度")
         box_layout.addWidget(self._enable_chk)
 
-        # Label checkboxes
+        # Label checkboxes — grid layout (4 per row) so long names don't overflow
         self._label_frame = QWidget()
-        label_layout = QHBoxLayout(self._label_frame)
+        label_layout = QGridLayout(self._label_frame)
         label_layout.setContentsMargins(0, 0, 0, 0)
-        label_layout.setSpacing(6)
+        label_layout.setHorizontalSpacing(14)
+        label_layout.setVerticalSpacing(4)
         self._label_chks: dict[str, QCheckBox] = {}
-        for lbl in labels:
+        _COLS = 4
+        for i, lbl in enumerate(labels):
             chk = QCheckBox(lbl)
             self._label_chks[lbl] = chk
-            label_layout.addWidget(chk)
-        label_layout.addStretch()
+            label_layout.addWidget(chk, i // _COLS, i % _COLS)
         box_layout.addWidget(self._label_frame)
 
         # Param widgets (dimension-specific)
@@ -112,7 +114,7 @@ class _DimSection(QWidget):
             sp = QSpinBox()
             sp.setRange(50, 500)
             sp.setValue(100)
-            sp.setFixedWidth(64)
+            sp.setMinimumWidth(80)
             layout.addWidget(sp)
             self._params["lookback"] = sp
             layout.addStretch()
@@ -122,7 +124,7 @@ class _DimSection(QWidget):
             w = QSpinBox()
             w.setRange(5, 200)
             w.setValue(24)
-            w.setFixedWidth(56)
+            w.setMinimumWidth(72)
             layout.addWidget(w)
             self._params["window"] = w
 
@@ -130,7 +132,7 @@ class _DimSection(QWidget):
             lb = QSpinBox()
             lb.setRange(20, 500)
             lb.setValue(100)
-            lb.setFixedWidth(64)
+            lb.setMinimumWidth(80)
             layout.addWidget(lb)
             self._params["lookback"] = lb
             layout.addStretch()
@@ -140,7 +142,7 @@ class _DimSection(QWidget):
             w = QSpinBox()
             w.setRange(5, 200)
             w.setValue(24)
-            w.setFixedWidth(56)
+            w.setMinimumWidth(72)
             layout.addWidget(w)
             self._params["window"] = w
 
@@ -149,7 +151,8 @@ class _DimSection(QWidget):
             ts.setRange(0.01, 1000.0)
             ts.setValue(1.0)
             ts.setSingleStep(0.1)
-            ts.setFixedWidth(72)
+            ts.setDecimals(2)
+            ts.setMinimumWidth(90)
             layout.addWidget(ts)
             self._params["tick_size"] = ts
 
@@ -159,7 +162,7 @@ class _DimSection(QWidget):
             va.setValue(0.70)
             va.setSingleStep(0.05)
             va.setDecimals(2)
-            va.setFixedWidth(60)
+            va.setMinimumWidth(76)
             layout.addWidget(va)
             self._params["value_area_pct"] = va
             layout.addStretch()
@@ -220,7 +223,7 @@ class RegimeFilterDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Regime Filter 設定")
-        self.setMinimumWidth(700)
+        self.setMinimumWidth(820)
         self.setModal(True)
 
         root = QVBoxLayout(self)
