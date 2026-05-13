@@ -715,14 +715,16 @@ class ResearchLab(QWidget):
     # ── Export / Import ───────────────────────────────────────────────────────
 
     def _on_export(self) -> None:
-        if not self._last_result:
+        is_matrix = bool(self._last_matrix_result)
+        if not is_matrix and not self._last_result:
             return
         symbol    = self._symbol_combo.currentText()
         interval  = self._interval_combo.currentText()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_dir  = Path("docs/reports/factor_analysis")
         base_dir.mkdir(parents=True, exist_ok=True)
-        suggested = base_dir / f"{symbol}_{interval}_{timestamp}" / "full_result.json"
+        json_name = "matrix_result.json" if is_matrix else "full_result.json"
+        suggested = base_dir / f"{symbol}_{interval}_{timestamp}" / json_name
         suggested.parent.mkdir(parents=True, exist_ok=True)
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Research Package",
@@ -732,16 +734,36 @@ class ResearchLab(QWidget):
             return
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(self._last_result, indent=2), encoding="utf-8")
-        for key, rows in self._last_result.items():
-            if key == "timeseries_ic":
-                continue
-            if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
-                continue
-            with (target.parent / f"{key}.csv").open("w", newline="", encoding="utf-8") as fh:
-                writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
-                writer.writeheader()
-                writer.writerows(rows)
+
+        if is_matrix:
+            # Full matrix: {regime_label: result_dict, …}
+            target.write_text(
+                json.dumps(self._last_matrix_result, indent=2), encoding="utf-8"
+            )
+            # Merged summary CSV — one row per (regime, factor) for easy comparison
+            merged: list[dict] = []
+            for regime_key, result_dict in self._last_matrix_result.items():
+                for row in result_dict.get("summary", []):
+                    merged.append({"regime": regime_key, **row})
+            if merged:
+                with (target.parent / "matrix_summary.csv").open(
+                    "w", newline="", encoding="utf-8"
+                ) as fh:
+                    writer = csv.DictWriter(fh, fieldnames=list(merged[0].keys()))
+                    writer.writeheader()
+                    writer.writerows(merged)
+        else:
+            target.write_text(json.dumps(self._last_result, indent=2), encoding="utf-8")
+            for key, rows in self._last_result.items():
+                if key == "timeseries_ic":
+                    continue
+                if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+                    continue
+                with (target.parent / f"{key}.csv").open("w", newline="", encoding="utf-8") as fh:
+                    writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+                    writer.writeheader()
+                    writer.writerows(rows)
+
         self._status.setText(f"Package saved to {target.parent}")
         QMessageBox.information(self, "Export Successful",
                                 f"Research package saved to:\n{target.parent}")

@@ -604,6 +604,61 @@ def build_bar_map(ticks: np.ndarray,
     return {ot: ticks[lo:hi] for ot, (lo, hi) in bar_ranges.items()}
 
 
+def build_bar_map_streaming(
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+    kline_times: list[tuple[int, int]],
+) -> dict[int, np.ndarray] | None:
+    """Memory-efficient bar map: processes monthly shards one at a time via mmap.
+
+    Unlike load_range_sharded + build_bar_map, this never allocates a single
+    contiguous array for the full time range. Each shard is mmap-opened (backed
+    by disk), sliced into bar buckets, and the reference is kept alive only
+    through the returned dict values. Peak RAM is bounded by the OS page-cache
+    rather than total tick count (avoids OOM for 1-year datasets).
+
+    Returns None if shards are incomplete or unavailable — caller should fall
+    back to the legacy load_range_sharded path.
+    """
+    manifest = _load_shard_manifest(symbol)
+    if manifest is None:
+        return None
+
+    month_entries: dict[str, dict] = manifest.get("months", {})
+    month_keys = _iter_month_keys(start_ms, end_ms)
+    if not month_keys:
+        return {}
+
+    merged: dict[int, list[np.ndarray]] = {}
+    for month_key in month_keys:
+        entry = month_entries.get(month_key)
+        if entry is None:
+            return None  # incomplete shards — signal caller to fall back
+        path = _cache_dir() / entry["path"]
+        if not path.exists():
+            return None
+
+        # mmap_mode="r": backed by disk, no RAM copy unless accessed.
+        # The view shard[lo:hi] holds a reference to the mmap so the file
+        # handle stays open as long as bar_map dict entries referencing it live.
+        shard: np.ndarray = np.load(str(path), mmap_mode="r")
+        times = shard[:, 0]
+        lo = int(np.searchsorted(times, start_ms, side="left"))
+        hi = int(np.searchsorted(times, end_ms,   side="right"))
+        if lo >= hi:
+            continue
+        chunk = shard[lo:hi]  # mmap view — zero allocation
+        for ot, arr in build_bar_map(chunk, kline_times).items():
+            merged.setdefault(ot, []).append(arr)
+
+    # Bars spanning a month boundary (≤1 per boundary) need their chunks merged.
+    return {
+        ot: vs[0] if len(vs) == 1 else np.concatenate(vs, axis=0)
+        for ot, vs in merged.items()
+    }
+
+
 def build_bar_ranges(
     ticks: np.ndarray,
     kline_times: list[tuple[int, int]],

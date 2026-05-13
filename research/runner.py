@@ -98,22 +98,35 @@ def run_research_with_regimes(
     回傳 {"dimension=label": ResearchResult, …}。
     若 regime_filter 未啟用，回傳 {"(all)": full_result}。
     Filter 模式時回傳 {"filtered": result}（合併遮罩）。
+
+    優化：factor values / forward returns / period keys 在所有 regime 之間共用，
+    每個 regime run 只重算與 mask 相關的 IC、quantile、stability 部分。
     """
     ensure_builtin_factors()
     if klines is None:
         klines, tick_map = load_research_data(config)
     tick_map_f = tick_map if config.use_tick_features else None
 
+    ctx = _precompute_research_context(
+        klines, tick_map_f, config.factor_names, config.horizons,
+        config.use_tick_features, config.entry_lag, config.ic_period_granularity,
+    )
+
+    def _run(mask: np.ndarray | None) -> ResearchResult:
+        return _analyze_with_precomputed(
+            ctx, mask, config.quantiles, config.min_period_samples, config.train_ratio,
+        )
+
     rf = config.regime_filter
     if rf is None or not rf.is_active():
-        return {"(all)": _analyze_with_config(config, klines, tick_map_f)}
+        return {"(all)": _run(None)}
 
     from research.regime_filter import combine_for_filter, compute_regime_masks
     raw_masks = compute_regime_masks(klines, rf, tick_map_f)
 
     if rf.mode == "filter":
         combined = combine_for_filter(len(klines), raw_masks, rf)
-        return {"filtered": _analyze_with_config(config, klines, tick_map_f, combined)}
+        return {"filtered": _run(combined)}
 
     if rf.mode == "cross_matrix":
         from research.regime_filter import cross_combination_key
@@ -129,16 +142,11 @@ def run_research_with_regimes(
                 combined_mask = mask if combined_mask is None else (combined_mask & mask)
             if not valid or combined_mask is None or combined_mask.sum() == 0:
                 continue
-            results[cross_combination_key(combo)] = _analyze_with_config(
-                config, klines, tick_map_f, combined_mask
-            )
+            results[cross_combination_key(combo)] = _run(combined_mask)
         return results
 
     # Matrix: one run per label
-    results = {}
-    for label, mask in raw_masks.items():
-        results[label] = _analyze_with_config(config, klines, tick_map_f, mask)
-    return results
+    return {label: _run(mask) for label, mask in raw_masks.items()}
 
 
 def _analyze_with_config(
@@ -164,20 +172,21 @@ def _analyze_with_config(
 
 def load_research_data(config: ResearchConfig) -> tuple[list[Kline], TickBarMap | None]:
     from core.kline_cache import load_range_as_klines
-    from core.tick_cache import build_bar_map, load_range_sharded
+    from core.tick_cache import build_bar_map, build_bar_map_streaming, load_range_sharded
 
     all_klines: list[Kline] = []
-    tick_parts: list[np.ndarray] = []
+    # Each entry: (tick_symbol, start_ms, end_ms, kline_times_for_segment)
+    segments_info: list[tuple[str, int, int, list[tuple[int, int]]]] = []
 
     for sl in config.slices:
         segment_symbols = getattr(sl, "segment_symbols", []) or []
         for idx, (start_ms, end_ms) in enumerate(sl.segments):
             tick_symbol = segment_symbols[idx] if idx < len(segment_symbols) else config.symbol
-            all_klines.extend(load_range_as_klines(config.symbol, config.interval, start_ms, end_ms))
+            seg_klines = load_range_as_klines(config.symbol, config.interval, start_ms, end_ms)
+            all_klines.extend(seg_klines)
             if config.use_tick_features:
-                ticks = load_range_sharded(tick_symbol, start_ms, end_ms)
-                if ticks is not None and len(ticks) > 0:
-                    tick_parts.append(ticks)
+                kline_times = [(k.open_time, k.close_time) for k in seg_klines]
+                segments_info.append((tick_symbol, start_ms, end_ms, kline_times))
 
     seen: dict[int, Kline] = {}
     for k in all_klines:
@@ -185,7 +194,36 @@ def load_research_data(config: ResearchConfig) -> tuple[list[Kline], TickBarMap 
     klines = [seen[t] for t in sorted(seen)]
 
     tick_map = None
-    if config.use_tick_features and tick_parts and klines:
+    if not config.use_tick_features or not segments_info or not klines:
+        return klines, tick_map
+
+    # Try streaming path first: processes one monthly shard at a time via mmap,
+    # never allocating a contiguous array for the full range (avoids OOM).
+    streaming_ok = True
+    merged: dict[int, list[np.ndarray]] = {}
+    for tick_symbol, start_ms, end_ms, kline_times in segments_info:
+        seg_map = build_bar_map_streaming(tick_symbol, start_ms, end_ms, kline_times)
+        if seg_map is None:
+            streaming_ok = False
+            break
+        for ot, arr in seg_map.items():
+            merged.setdefault(ot, []).append(arr)
+
+    if streaming_ok:
+        if merged:
+            tick_map = {
+                ot: vs[0] if len(vs) == 1 else np.concatenate(vs, axis=0)
+                for ot, vs in merged.items()
+            }
+        return klines, tick_map
+
+    # Legacy fallback: concatenates all ticks into one array — may OOM for large ranges.
+    tick_parts: list[np.ndarray] = []
+    for tick_symbol, start_ms, end_ms, _ in segments_info:
+        ticks = load_range_sharded(tick_symbol, start_ms, end_ms)
+        if ticks is not None and len(ticks) > 0:
+            tick_parts.append(ticks)
+    if tick_parts:
         ticks = np.concatenate(tick_parts, axis=0) if len(tick_parts) > 1 else tick_parts[0]
         ticks = ticks[ticks[:, 0].argsort()]
         tick_map = build_bar_map(ticks, [(k.open_time, k.close_time) for k in klines])
@@ -205,6 +243,30 @@ def analyze_factors(
     ic_period_granularity: str = "month",
     regime_mask: np.ndarray | None = None,
 ) -> ResearchResult:
+    ctx = _precompute_research_context(
+        klines, tick_map, factor_names, horizons,
+        use_tick_features, entry_lag, ic_period_granularity,
+    )
+    return _analyze_with_precomputed(
+        ctx, regime_mask, quantiles, min_period_samples, train_ratio,
+    )
+
+
+def _precompute_research_context(
+    klines: list[Kline],
+    tick_map: TickBarMap | None,
+    factor_names: list[str],
+    horizons: list[int],
+    use_tick_features: bool,
+    entry_lag: int,
+    ic_period_granularity: str,
+) -> dict[str, Any]:
+    """Compute everything that does NOT depend on the regime mask, so it can be
+    reused across multiple regime runs (matrix / cross_matrix modes).
+
+    Heavy items: factor.compute() (often touches tick_map), forward returns,
+    per-bar period ids for monthly / yearly stability.
+    """
     ensure_builtin_factors()
     arr = klines_to_arrays(klines) if klines else {}
     close = arr.get("close", np.array([], dtype=np.float64))
@@ -215,28 +277,10 @@ def analyze_factors(
         for h in horizons
     }
 
-    # --- Global IS/OOS temporal split (shared across all functions) ---
-    n_times = len(open_times)
-    train_ratio_c = max(0.1, min(0.9, float(train_ratio)))
-    time_cut_idx = int(n_times * train_ratio_c)
-    is_time_mask = np.zeros(n_times, dtype=bool)
-    is_time_mask[:time_cut_idx] = True
-    oos_time_mask = ~is_time_mask
-    cut_time = int(open_times[time_cut_idx]) if time_cut_idx < n_times else 0
-
-    # Apply regime mask: further restrict IS/OOS to bars matching the selected regime.
-    if regime_mask is not None and len(regime_mask) == n_times:
-        is_time_mask = is_time_mask & regime_mask
-        oos_time_mask = oos_time_mask & regime_mask
-
-    summary: list[dict[str, Any]] = []
-    metrics: list[dict[str, Any]] = []
-    qrows: list[dict[str, Any]] = []
-    monthly: list[dict[str, Any]] = []
-    yearly: list[dict[str, Any]] = []
-    unavailable: list[dict[str, str]] = []
     factor_values: dict[str, np.ndarray] = {}
     factor_orientations: dict[str, int] = {}
+    factor_meta: dict[str, dict[str, Any]] = {}
+    unavailable: list[dict[str, str]] = []
 
     for name in factor_names:
         factor = get_factor(name)
@@ -246,29 +290,98 @@ def analyze_factors(
         if factor.requires_ticks and (not use_tick_features or tick_map is None):
             unavailable.append({"factor": name, "reason": "tick_data_unavailable"})
             continue
-
         values = factor.compute(klines, tick_map)
         factor_values[name] = values
-        orientation = _factor_orientation(factor.sides)
-        factor_orientations[name] = orientation
+        factor_orientations[name] = _factor_orientation(factor.sides)
+        factor_meta[name] = {
+            "requires_ticks": factor.requires_ticks,
+            "sides": factor.sides,
+            "group": factor.group,
+        }
+
+    month_ids, month_labels = _period_ids(open_times, "month")
+    year_ids, year_labels = _period_ids(open_times, "year")
+    if ic_period_granularity == "year":
+        ic_ids, ic_labels = year_ids, year_labels
+    else:
+        ic_ids, ic_labels = month_ids, month_labels
+
+    return {
+        "klines_count": len(klines),
+        "open_times": open_times,
+        "fwd": fwd,
+        "factor_values": factor_values,
+        "factor_orientations": factor_orientations,
+        "factor_meta": factor_meta,
+        "unavailable": unavailable,
+        "ic_period_ids": ic_ids,
+        "ic_period_labels": ic_labels,
+        "month_ids": month_ids,
+        "month_labels": month_labels,
+        "year_ids": year_ids,
+        "year_labels": year_labels,
+    }
+
+
+def _analyze_with_precomputed(
+    ctx: dict[str, Any],
+    regime_mask: np.ndarray | None,
+    quantiles: int,
+    min_period_samples: int,
+    train_ratio: float,
+) -> ResearchResult:
+    open_times: np.ndarray = ctx["open_times"]
+    fwd: dict[int, np.ndarray] = ctx["fwd"]
+    factor_values: dict[str, np.ndarray] = ctx["factor_values"]
+    factor_orientations: dict[str, int] = ctx["factor_orientations"]
+    factor_meta: dict[str, dict[str, Any]] = ctx["factor_meta"]
+    unavailable: list[dict[str, str]] = list(ctx["unavailable"])
+    ic_ids: np.ndarray = ctx["ic_period_ids"]
+    month_ids: np.ndarray = ctx["month_ids"]
+    month_labels: dict[int, str] = ctx["month_labels"]
+    year_ids: np.ndarray = ctx["year_ids"]
+    year_labels: dict[int, str] = ctx["year_labels"]
+
+    # --- Global IS/OOS temporal split (shared across all factors) ---
+    n_times = len(open_times)
+    train_ratio_c = max(0.1, min(0.9, float(train_ratio)))
+    time_cut_idx = int(n_times * train_ratio_c)
+    is_time_mask = np.zeros(n_times, dtype=bool)
+    is_time_mask[:time_cut_idx] = True
+    oos_time_mask = ~is_time_mask
+    cut_time = int(open_times[time_cut_idx]) if time_cut_idx < n_times else 0
+
+    full_regime_mask: np.ndarray | None = None
+    if regime_mask is not None and len(regime_mask) == n_times:
+        is_time_mask = is_time_mask & regime_mask
+        oos_time_mask = oos_time_mask & regime_mask
+        full_regime_mask = regime_mask
+
+    summary: list[dict[str, Any]] = []
+    metrics: list[dict[str, Any]] = []
+    qrows: list[dict[str, Any]] = []
+    monthly: list[dict[str, Any]] = []
+    yearly: list[dict[str, Any]] = []
+
+    for name, values in factor_values.items():
+        meta = factor_meta[name]
+        orientation = factor_orientations[name]
 
         factor_metrics: list[dict[str, Any]] = []
         for horizon, returns in fwd.items():
             is_period_ic = _per_period_ic(
-                values, returns, open_times,
-                granularity=ic_period_granularity,
+                values, returns, ic_ids,
                 min_samples=min_period_samples,
                 restrict_mask=is_time_mask,
             )
             oos_period_ic = _per_period_ic(
-                values, returns, open_times,
-                granularity=ic_period_granularity,
+                values, returns, ic_ids,
                 min_samples=min_period_samples,
                 restrict_mask=oos_time_mask,
             )
             metric = _metric_row(
                 name, horizon, values, returns, orientation,
-                is_period_ic, oos_period_ic, oos_time_mask,
+                is_period_ic, oos_period_ic, is_time_mask, oos_time_mask,
             )
             metrics.append(metric)
             factor_metrics.append(metric)
@@ -279,22 +392,29 @@ def analyze_factors(
                 name, horizon, values, returns, quantiles, orientation, is_time_mask, oos_time_mask,
             ))
             monthly.extend(_stability_rows(
-                name, horizon, values, returns, open_times, "month", quantiles, min_period_samples, cut_time,
+                name, horizon, values, returns, open_times,
+                month_ids, month_labels, quantiles, min_period_samples, cut_time,
+                regime_mask=full_regime_mask,
             ))
             yearly.extend(_stability_rows(
-                name, horizon, values, returns, open_times, "year", quantiles, min_period_samples, cut_time,
+                name, horizon, values, returns, open_times,
+                year_ids, year_labels, quantiles, min_period_samples, cut_time,
+                regime_mask=full_regime_mask,
             ))
 
         summary.append(_summary_row(
             name,
-            factor.requires_ticks,
-            factor.sides,
-            factor.group,
+            meta["requires_ticks"],
+            meta["sides"],
+            meta["group"],
             orientation,
             factor_metrics,
         ))
 
-    ts_ic = _calculate_timeseries_ic(factor_values, fwd, open_times, factor_orientations, cut_time=cut_time)
+    ts_ic = _calculate_timeseries_ic(
+        factor_values, fwd, open_times, factor_orientations,
+        cut_time=cut_time, regime_mask=full_regime_mask,
+    )
     ortho_summary = _orthogonalize_factors(factor_values, fwd, factor_orientations, is_time_mask, oos_time_mask)
     correlations = _factor_correlations(factor_values, is_time_mask, oos_time_mask)
     summary.sort(key=lambda r: float(r.get("rank_score", 0.0)), reverse=True)
@@ -306,7 +426,7 @@ def analyze_factors(
         stability_yearly=yearly,
         factor_correlations=correlations,
         unavailable=unavailable,
-        rows=len(klines),
+        rows=ctx["klines_count"],
         timeseries_ic=ts_ic,
         orthogonal_summary=ortho_summary,
     )
@@ -322,6 +442,7 @@ def _calculate_timeseries_ic(
     open_times: np.ndarray,
     orientations: dict[str, int],
     cut_time: int = 0,
+    regime_mask: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Stepped rolling Rank IC. Includes train_cutoff_ts for IS/OOS boundary rendering."""
     if not factor_values or not fwd_returns:
@@ -351,6 +472,8 @@ def _calculate_timeseries_ic(
             v_win = values[start:end]
             r_win = returns[start:end]
             mask = _valid_mask(v_win, r_win)
+            if regime_mask is not None:
+                mask = mask & regime_mask[start:end]
             if mask.sum() < 20:
                 ic_series.append(0.0)
                 continue
@@ -543,20 +666,25 @@ def _interval_to_ms(interval: str) -> int | None:
 def _per_period_ic(
     values: np.ndarray,
     returns: np.ndarray,
-    open_times: np.ndarray,
-    granularity: str,
+    period_ids: np.ndarray,
     min_samples: int,
     restrict_mask: np.ndarray | None = None,
 ) -> list[float]:
-    """Rank IC per sub-period, optionally restricted to IS or OOS bars."""
-    if len(open_times) == 0:
+    """Rank IC per sub-period, optionally restricted to IS or OOS bars.
+
+    period_ids: int64 per-bar period id (e.g. months-since-epoch). np.unique
+    sorts numerically which is also chronological.
+    """
+    if len(period_ids) == 0:
         return []
-    keys = np.array([_period_key(int(ts), granularity) for ts in open_times], dtype=object)
+    base = _valid_mask(values, returns)
+    if restrict_mask is not None:
+        base = base & restrict_mask
+    if not base.any():
+        return []
     out: list[float] = []
-    for period in sorted(set(keys)):
-        mask = (keys == period) & _valid_mask(values, returns)
-        if restrict_mask is not None:
-            mask = mask & restrict_mask
+    for period in np.unique(period_ids[base]):
+        mask = base & (period_ids == period)
         if int(mask.sum()) < min_samples:
             continue
         ic = _corr(_rank(values[mask]), _rank(returns[mask]))
@@ -585,12 +713,13 @@ def _metric_row(
     orientation: int,
     is_period_ic: list[float],
     oos_period_ic: list[float],
+    is_mask: np.ndarray,
     oos_mask: np.ndarray,
 ) -> dict[str, Any]:
-    # Full-sample IC (kept for reference / backward compat)
-    mask = _valid_mask(values, returns)
-    x = values[mask]
-    y = returns[mask]
+    # IS IC — regime-conditional (is_mask already includes regime_mask & IS split).
+    is_valid = is_mask & _valid_mask(values, returns)
+    x = values[is_valid]
+    y = returns[is_valid]
     ic = _corr(x, y)
     rank_ic = _corr(_rank(x), _rank(y))
 
@@ -625,7 +754,7 @@ def _metric_row(
         "oriented_ic_ir": float(oriented_ir),
         "oriented_ic_t_stat": float(oriented_t_stat),
         "ic_periods": len(is_period_ic),
-        "sample_count": int(mask.sum()),
+        "sample_count": int(is_valid.sum()),
         # OOS fields
         "oos_ic": oos_ic,
         "oos_rank_ic": oos_rank_ic,
@@ -805,18 +934,22 @@ def _stability_rows(
     values: np.ndarray,
     returns: np.ndarray,
     open_times: np.ndarray,
-    granularity: str,
+    period_ids: np.ndarray,
+    period_labels: dict[int, str],
     quantiles: int,
     min_samples: int,
     cut_time: int,
+    regime_mask: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
-    if len(open_times) == 0:
+    if len(period_ids) == 0:
         return []
-    keys = np.array([_period_key(int(ts), granularity) for ts in open_times], dtype=object)
+    base_valid = _valid_mask(values, returns)
+    if regime_mask is not None:
+        base_valid = base_valid & regime_mask
     rows: list[dict[str, Any]] = []
-    for period in sorted(set(keys)):
-        period_mask = keys == period
-        mask = period_mask & _valid_mask(values, returns)
+    for period_id in np.unique(period_ids):
+        period_mask = period_ids == period_id
+        mask = period_mask & base_valid
         x = values[mask]
         y = returns[mask]
         if len(x) < min_samples:
@@ -837,7 +970,7 @@ def _stability_rows(
         rows.append({
             "factor": factor,
             "horizon": horizon,
-            "period": period,
+            "period": period_labels.get(int(period_id), str(int(period_id))),
             "ic": _corr(x, y),
             "rank_ic": _corr(_rank(x), _rank(y)),
             "spread_qhigh_qlow": spread,
@@ -865,7 +998,8 @@ def _factor_correlations(
             b = factor_values[names[j]]
             if len(a) != len(b):
                 continue
-            full_m = _valid_mask(a, b)
+            # Use IS∪OOS as "full" so all three windows (full/IS/OOS) are regime-conditional.
+            full_m = (is_mask | oos_mask) & _valid_mask(a, b)
             if int(full_m.sum()) < 30:
                 continue
             is_m = is_mask & full_m
@@ -899,6 +1033,34 @@ def _period_key(ts_ms: int, granularity: str) -> str:
 
     dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
     return f"{dt.year:04d}" if granularity == "year" else f"{dt.year:04d}-{dt.month:02d}"
+
+
+def _period_ids(
+    open_times: np.ndarray,
+    granularity: str,
+) -> tuple[np.ndarray, dict[int, str]]:
+    """Vectorized per-bar period id + id->label map.
+
+    For "month": id = months-since-epoch (int64). For "year": id = year (e.g. 2026).
+    Comparison by integer is much cheaper than the old string-based approach,
+    and label formatting only happens once per unique period at output time.
+    """
+    if len(open_times) == 0:
+        return np.array([], dtype=np.int64), {}
+    dt = open_times.astype("datetime64[ms]")
+    if granularity == "year":
+        ids = (dt.astype("datetime64[Y]").astype(np.int64) + 1970).astype(np.int64)
+        labels = {int(u): f"{int(u):04d}" for u in np.unique(ids)}
+        return ids, labels
+    # default: month
+    ids = dt.astype("datetime64[M]").astype(np.int64)
+    labels: dict[int, str] = {}
+    for u in np.unique(ids):
+        u_int = int(u)
+        y = 1970 + u_int // 12
+        m = 1 + u_int % 12
+        labels[u_int] = f"{y:04d}-{m:02d}"
+    return ids.astype(np.int64), labels
 
 
 def _valid_mask(x: np.ndarray, y: np.ndarray) -> np.ndarray:
