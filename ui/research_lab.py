@@ -289,6 +289,381 @@ class RegimeMatrixWidget(QWidget):
         )
 
 
+# ── IC Visualization helpers ──────────────────────────────────────────────────
+
+def _monthly_ic_bg(val: float) -> str:
+    if not np.isfinite(val): return "#1e222d"
+    if val >= 0.06:  return "#0d3b2e"
+    if val >= 0.04:  return "#163029"
+    if val >= 0.02:  return "#152623"
+    if val > 0:      return "#141f1d"
+    if val <= -0.06: return "#3b0d0d"
+    if val <= -0.04: return "#2e1616"
+    if val <= -0.02: return "#241515"
+    if val < 0:      return "#1d1414"
+    return "#1e222d"
+
+
+def _monthly_ic_fg(val: float) -> str:
+    if not np.isfinite(val): return "#4a4e5a"
+    a = abs(val)
+    if a >= 0.04: return "#d1d4dc"
+    if a >= 0.02: return "#9598a1"
+    return "#6b6e78"
+
+
+def _corr_bg(val: float, diagonal: bool = False) -> str:
+    if diagonal: return "#2a2d3a"
+    if not np.isfinite(val): return "#1e222d"
+    a = abs(val)
+    if val > 0:
+        if a >= 0.7: return "#0d3b2e"
+        if a >= 0.5: return "#163029"
+        if a >= 0.3: return "#152623"
+        if a >= 0.1: return "#141f1d"
+    else:
+        if a >= 0.7: return "#3b0d0d"
+        if a >= 0.5: return "#2e1616"
+        if a >= 0.3: return "#241515"
+        if a >= 0.1: return "#1d1414"
+    return "#1e222d"
+
+
+def _corr_fg(val: float) -> str:
+    if not np.isfinite(val): return "#4a4e5a"
+    a = abs(val)
+    if a >= 0.5: return "#d1d4dc"
+    if a >= 0.3: return "#9598a1"
+    return "#6b6e78"
+
+
+# ── Quantile Returns Chart ─────────────────────────────────────────────────────
+
+class QuantileReturnsChart(QWidget):
+    """Bar chart: mean return by quantile bucket, IS/OOS selectable."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        ctrl = QHBoxLayout()
+        ctrl.setSpacing(8)
+        self._factor_combo  = QComboBox()
+        self._horizon_combo = QComboBox()
+        self._sample_combo  = QComboBox()
+        self._sample_combo.addItems(["out_of_sample", "in_sample"])
+        for lbl, w in [("Factor:", self._factor_combo), ("Horizon:", self._horizon_combo), ("Sample:", self._sample_combo)]:
+            ctrl.addWidget(QLabel(lbl))
+            ctrl.addWidget(w)
+        ctrl.addStretch()
+        self._spread_lbl = QLabel("")
+        self._spread_lbl.setStyleSheet(_S_DIM)
+        ctrl.addWidget(self._spread_lbl)
+        layout.addLayout(ctrl)
+
+        self._glw = pg.GraphicsLayoutWidget()
+        self._glw.setBackground("#131722")
+        layout.addWidget(self._glw)
+
+        self._plot = self._glw.addPlot()
+        self._plot.getAxis("left").setTextPen("#d1d4dc")
+        self._plot.getAxis("bottom").setTextPen("#787b86")
+        self._plot.showGrid(x=False, y=True, alpha=0.15)
+        self._plot.setLabel("left", "Mean Return (%)", color="#d1d4dc")
+        self._plot.setLabel("bottom", "Quantile", color="#787b86")
+
+        self._data: dict[tuple, list[dict]] = {}
+        self._factor_combo.currentTextChanged.connect(self._refresh)
+        self._horizon_combo.currentTextChanged.connect(self._refresh)
+        self._sample_combo.currentTextChanged.connect(self._refresh)
+
+    def set_data(self, quantile_rows: list[dict]) -> None:
+        self._data = {}
+        factors: list[str]  = []
+        horizons: list[str] = []
+        for row in quantile_rows:
+            k = (row["factor"], int(row["horizon"]), row["sample"])
+            self._data.setdefault(k, []).append(row)
+            if row["factor"] not in factors:
+                factors.append(row["factor"])
+            h = str(row["horizon"])
+            if h not in horizons:
+                horizons.append(h)
+        for combo, items in [(self._factor_combo, factors), (self._horizon_combo, sorted(horizons, key=int))]:
+            prev = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(items)
+            if prev in items:
+                combo.setCurrentText(prev)
+            combo.blockSignals(False)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._plot.clear()
+        self._spread_lbl.setText("")
+        factor      = self._factor_combo.currentText()
+        horizon_str = self._horizon_combo.currentText()
+        sample      = self._sample_combo.currentText()
+        if not factor or not horizon_str:
+            return
+        rows = self._data.get((factor, int(horizon_str), sample), [])
+        if not rows:
+            return
+        rows = sorted(rows, key=lambda r: r["quantile"])
+        n_q = len(rows)
+        x = np.arange(1, n_q + 1, dtype=float)
+        y = np.array([r["mean_return"] * 100.0 for r in rows])  # percent
+
+        for xi, yi in zip(x, y):
+            brush = "#26a69a" if yi >= 0 else "#ef5350"
+            self._plot.addItem(
+                pg.BarGraphItem(x=[xi], height=[yi], width=0.65,
+                                brush=brush, pen=pg.mkPen("#0d1117", width=1))
+            )
+        self._plot.addItem(
+            pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("#4a4e5a", width=1)),
+            ignoreBounds=True,
+        )
+        self._plot.getAxis("bottom").setTicks([[(int(xi), f"Q{int(xi)}") for xi in x]])
+
+        spread_pct = (y[-1] - y[0]) if n_q >= 2 else 0.0
+        wr_parts = [
+            f"Q{r['quantile']}:{r.get('win_rate', float('nan')):.0f}%"
+            for r in rows if np.isfinite(r.get("win_rate", float("nan")))
+        ]
+        self._spread_lbl.setText(
+            f"spread={spread_pct:+.3f}%  |  " + "  ".join(wr_parts)
+        )
+
+
+# ── Monthly IC Heatmap ─────────────────────────────────────────────────────────
+
+class MonthlyICHeatmap(QWidget):
+    """Factor × Month Rank IC heat table."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        ctrl = QHBoxLayout()
+        ctrl.setSpacing(8)
+        self._horizon_combo = QComboBox()
+        self._metric_combo  = QComboBox()
+        self._metric_combo.addItems(["rank_ic", "ic"])
+        ctrl.addWidget(QLabel("Horizon:")); ctrl.addWidget(self._horizon_combo)
+        ctrl.addWidget(QLabel("Metric:"));  ctrl.addWidget(self._metric_combo)
+        ctrl.addStretch()
+        self._info_lbl = QLabel("")
+        self._info_lbl.setStyleSheet(_S_DIM)
+        ctrl.addWidget(self._info_lbl)
+        layout.addLayout(ctrl)
+
+        self._table = QTableWidget()
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setDefaultSectionSize(24)
+        layout.addWidget(self._table)
+
+        self._raw: list[dict] = []
+        self._horizon_combo.currentTextChanged.connect(self._refresh)
+        self._metric_combo.currentTextChanged.connect(self._refresh)
+
+    def set_data(self, stability_monthly: list[dict]) -> None:
+        self._raw = stability_monthly
+        horizons: list[str] = []
+        for row in stability_monthly:
+            h = str(row["horizon"])
+            if h not in horizons:
+                horizons.append(h)
+        prev_h = self._horizon_combo.currentText()
+        self._horizon_combo.blockSignals(True)
+        self._horizon_combo.clear()
+        self._horizon_combo.addItems(sorted(horizons, key=int))
+        if prev_h in horizons:
+            self._horizon_combo.setCurrentText(prev_h)
+        self._horizon_combo.blockSignals(False)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._table.clear()
+        self._table.setRowCount(0)
+        self._table.setColumnCount(0)
+        self._info_lbl.setText("")
+        if not self._raw:
+            return
+        horizon_str = self._horizon_combo.currentText()
+        metric      = self._metric_combo.currentText()
+        if not horizon_str:
+            return
+        rows = [r for r in self._raw if int(r["horizon"]) == int(horizon_str)]
+        if not rows:
+            return
+
+        factors: list[str] = []
+        periods: list[str] = []
+        seen_f: set = set()
+        seen_p: set = set()
+        for r in rows:
+            if r["factor"] not in seen_f:
+                factors.append(r["factor"])
+                seen_f.add(r["factor"])
+            if r["period"] not in seen_p:
+                periods.append(r["period"])
+                seen_p.add(r["period"])
+        periods = sorted(periods)
+        data_map: dict[tuple, dict] = {(r["factor"], r["period"]): r for r in rows}
+
+        self._table.setRowCount(len(factors))
+        self._table.setColumnCount(len(periods))
+        self._table.setHorizontalHeaderLabels(periods)
+        self._table.setVerticalHeaderLabels(factors)
+
+        for ri, f in enumerate(factors):
+            for ci, p in enumerate(periods):
+                r = data_map.get((f, p))
+                if r is None:
+                    item = QTableWidgetItem("—")
+                    item.setForeground(QColor("#4a4e5a"))
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self._table.setItem(ri, ci, item)
+                    continue
+                raw_val = r.get(metric, float("nan"))
+                try:
+                    val = float(raw_val) if raw_val is not None else float("nan")
+                except (TypeError, ValueError):
+                    val = float("nan")
+                text = f"{val:+.3f}" if np.isfinite(val) else "—"
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item.setBackground(QColor(_monthly_ic_bg(val)))
+                item.setForeground(QColor(_monthly_ic_fg(val)))
+                item.setToolTip(
+                    f"Factor: {f}\nPeriod: {p}\n{metric}: {text}\n"
+                    f"split: {r.get('split', '')}\nn: {r.get('sample_count', 0)}"
+                )
+                self._table.setItem(ri, ci, item)
+
+        self._table.resizeColumnsToContents()
+        self._info_lbl.setText(f"{len(factors)} factors × {len(periods)} months")
+
+
+# ── Correlation Heatmap ────────────────────────────────────────────────────────
+
+class CorrelationHeatmap(QWidget):
+    """Factor × Factor pairwise correlation heat table."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        ctrl = QHBoxLayout()
+        ctrl.setSpacing(8)
+        self._metric_combo = QComboBox()
+        self._metric_combo.addItems(["spearman", "pearson"])
+        self._window_combo = QComboBox()
+        self._window_combo.addItems(["full", "IS (train)", "OOS (test)"])
+        ctrl.addWidget(QLabel("Metric:")); ctrl.addWidget(self._metric_combo)
+        ctrl.addWidget(QLabel("Window:")); ctrl.addWidget(self._window_combo)
+        ctrl.addStretch()
+        layout.addLayout(ctrl)
+
+        self._table = QTableWidget()
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setDefaultSectionSize(28)
+        layout.addWidget(self._table)
+
+        self._raw: list[dict] = []
+        self._metric_combo.currentTextChanged.connect(self._refresh)
+        self._window_combo.currentTextChanged.connect(self._refresh)
+
+    def set_data(self, correlations: list[dict]) -> None:
+        self._raw = correlations
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._table.clear()
+        self._table.setRowCount(0)
+        self._table.setColumnCount(0)
+        if not self._raw:
+            return
+        metric = self._metric_combo.currentText()
+        window = self._window_combo.currentText()
+        _KEY: dict[tuple, str] = {
+            ("spearman", "full"):       "spearman",
+            ("spearman", "IS (train)"): "spearman_is",
+            ("spearman", "OOS (test)"): "spearman_oos",
+            ("pearson",  "full"):       "pearson",
+            ("pearson",  "IS (train)"): "pearson_is",
+            ("pearson",  "OOS (test)"): "pearson_oos",
+        }
+        key = _KEY.get((metric, window), "spearman")
+
+        names: list[str] = []
+        seen: set = set()
+        for r in self._raw:
+            for f in (r["factor_a"], r["factor_b"]):
+                if f not in seen:
+                    names.append(f)
+                    seen.add(f)
+        n = len(names)
+        idx = {f: i for i, f in enumerate(names)}
+        mat = np.full((n, n), float("nan"))
+        np.fill_diagonal(mat, 1.0)
+        for r in self._raw:
+            i, j = idx[r["factor_a"]], idx[r["factor_b"]]
+            try:
+                v = float(r.get(key, float("nan")))
+            except (TypeError, ValueError):
+                v = float("nan")
+            mat[i, j] = mat[j, i] = v
+
+        self._table.setRowCount(n)
+        self._table.setColumnCount(n)
+        self._table.setHorizontalHeaderLabels(names)
+        self._table.setVerticalHeaderLabels(names)
+        for ri in range(n):
+            for ci in range(n):
+                val = mat[ri, ci]
+                text = f"{val:+.3f}" if np.isfinite(val) else "—"
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item.setBackground(QColor(_corr_bg(val, ri == ci)))
+                item.setForeground(QColor(_corr_fg(val)))
+                item.setToolTip(f"{names[ri]} vs {names[ci]}\n{metric} ({window}): {text}")
+                self._table.setItem(ri, ci, item)
+        self._table.resizeColumnsToContents()
+
+
+# ── IC Visualization Panel ─────────────────────────────────────────────────────
+
+class ICVisualizationPanel(QWidget):
+    """Visualization panel: quantile chart + monthly IC heatmap + correlation matrix."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        inner = QTabWidget()
+        self._quantile_chart  = QuantileReturnsChart()
+        self._monthly_heatmap = MonthlyICHeatmap()
+        self._corr_heatmap    = CorrelationHeatmap()
+        inner.addTab(self._quantile_chart,  "Quantile Returns")
+        inner.addTab(self._monthly_heatmap, "Monthly IC Heatmap")
+        inner.addTab(self._corr_heatmap,    "Correlation Matrix")
+        layout.addWidget(inner)
+
+    def set_data(self, result: dict) -> None:
+        self._quantile_chart.set_data(result.get("quantiles", []))
+        self._monthly_heatmap.set_data(result.get("stability_monthly", []))
+        self._corr_heatmap.set_data(result.get("factor_correlations", []))
+
+
 # ── Worker Thread ─────────────────────────────────────────────────────────────
 
 class ResearchWorkerThread(QThread):
@@ -443,6 +818,7 @@ class ResearchLab(QWidget):
         self._summary_table    = QTableWidget()
         self._ortho_table      = QTableWidget()
         self._ts_chart         = FactorPerformanceChart()
+        self._viz_panel        = ICVisualizationPanel()
         self._metrics_table    = QTableWidget()
         self._quantile_table   = QTableWidget()
         self._monthly_table    = QTableWidget()
@@ -453,6 +829,7 @@ class ResearchLab(QWidget):
         self._tabs.addTab(self._summary_table,     "Factor Ranking")
         self._tabs.addTab(self._ortho_table,       "Orthogonal Ranking")
         self._tabs.addTab(self._ts_chart,          "IC Time Series")
+        self._tabs.addTab(self._viz_panel,         "Visualization")
         self._tabs.addTab(self._metrics_table,     "IC by Horizon")
         self._tabs.addTab(self._quantile_table,    "Quantiles")
         self._tabs.addTab(self._monthly_table,     "Monthly Stability")
@@ -660,6 +1037,7 @@ class ResearchLab(QWidget):
         self._fill_table(self._summary_table,     result.get("summary", []))
         self._fill_table(self._ortho_table,       result.get("orthogonal_summary", []))
         self._ts_chart.set_data(result.get("timeseries_ic", {}))
+        self._viz_panel.set_data(result)
         self._fill_table(self._metrics_table,     result.get("metrics", []))
         self._fill_table(self._quantile_table,    result.get("quantiles", []))
         self._fill_table(self._monthly_table,     result.get("stability_monthly", []))
@@ -681,6 +1059,7 @@ class ResearchLab(QWidget):
             self._fill_table(self._summary_table,     first.get("summary", []))
             self._fill_table(self._ortho_table,       first.get("orthogonal_summary", []))
             self._ts_chart.set_data(first.get("timeseries_ic", {}))
+            self._viz_panel.set_data(first)
             self._fill_table(self._metrics_table,     first.get("metrics", []))
             self._fill_table(self._unavailable_table, first.get("unavailable", []))
         self._export_btn.setEnabled(bool(self._last_result))
