@@ -1060,8 +1060,10 @@ class MainWindow(QMainWindow):
         # ── 頂層頁籤：Tab 0=回測分析  Tab 1=即時看盤 ─────────────────────────
         from ui.backtest_dashboard import BacktestDashboard
         from ui.research_lab import ResearchLab
+        from ui.pipeline_studio import PipelineStudio
         self._backtest_dashboard = BacktestDashboard()
         self._research_lab = ResearchLab()
+        self._pipeline_studio = PipelineStudio()
 
         top_tabs = QTabWidget()
         top_tabs.setTabPosition(QTabWidget.TabPosition.North)
@@ -1070,8 +1072,8 @@ class MainWindow(QMainWindow):
         )
         top_tabs.addTab(self._backtest_dashboard, "📊 回測分析")
         top_tabs.addTab(live_tab_widget,           "📈 即時看盤")
-
         top_tabs.addTab(self._research_lab,        "Research Lab")
+        top_tabs.addTab(self._pipeline_studio,     "🔧 Pipeline 設計室")
 
         self._top_tabs = top_tabs
         self.setCentralWidget(top_tabs)
