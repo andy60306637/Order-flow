@@ -23,7 +23,7 @@ from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QTabWidget,
     QVBoxLayout, QHBoxLayout, QComboBox, QLabel,
-    QFrame, QPushButton,
+    QFrame, QPushButton, QDockWidget,
     QDialog, QTableWidget, QTableWidgetItem, QHeaderView,
     QFileDialog, QMessageBox, QDateTimeEdit,
 )
@@ -1065,18 +1065,72 @@ class MainWindow(QMainWindow):
         self._research_lab = ResearchLab()
         self._pipeline_studio = PipelineStudio()
 
-        top_tabs = QTabWidget()
-        top_tabs.setTabPosition(QTabWidget.TabPosition.North)
-        top_tabs.setStyleSheet(
-            "QTabBar::tab { padding: 6px 20px; font-size: 12px; }"
+        self.setDockOptions(
+            QMainWindow.DockOption.AllowNestedDocks
+            | QMainWindow.DockOption.AllowTabbedDocks
+            | QMainWindow.DockOption.AnimatedDocks
         )
-        top_tabs.addTab(self._backtest_dashboard, "📊 回測分析")
-        top_tabs.addTab(live_tab_widget,           "📈 即時看盤")
-        top_tabs.addTab(self._research_lab,        "Research Lab")
-        top_tabs.addTab(self._pipeline_studio,     "🔧 Pipeline 設計室")
+        self.setTabPosition(
+            Qt.DockWidgetArea.AllDockWidgetAreas,
+            QTabWidget.TabPosition.North,
+        )
+        self.setStyleSheet(
+            self.styleSheet()
+            + """
+            QMainWindow::separator {
+                background: #252b3a;
+                width: 4px;
+                height: 4px;
+            }
+            QDockWidget {
+                color: #d1d4dc;
+                font-size: 12px;
+            }
+            QDockWidget::title {
+                background: #151b28;
+                border: 1px solid #263245;
+                border-bottom: 0;
+                padding: 7px 10px;
+                text-align: left;
+            }
+            QTabBar::tab {
+                background: #151b28;
+                color: #8f96a8;
+                border: 1px solid #263245;
+                border-bottom: 0;
+                padding: 7px 18px;
+                min-width: 128px;
+            }
+            QTabBar::tab:selected {
+                background: #20283a;
+                color: #f2f5f9;
+                border-top: 2px solid #26a69a;
+            }
+            QTabBar::tab:hover {
+                color: #d1d4dc;
+                background: #1d2535;
+            }
+            """
+        )
 
-        self._top_tabs = top_tabs
-        self.setCentralWidget(top_tabs)
+        self._page_docks: dict[str, QDockWidget] = {}
+        dock_specs = [
+            ("backtest", "回測分析", self._backtest_dashboard),
+            ("live", "即時看盤", live_tab_widget),
+            ("research", "Research Lab", self._research_lab),
+            ("pipeline", "Pipeline 設計室", self._pipeline_studio),
+        ]
+        first_dock: QDockWidget | None = None
+        for key, title, widget in dock_specs:
+            dock = self._create_page_dock(key, title, widget)
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+            if first_dock is None:
+                first_dock = dock
+            else:
+                self.tabifyDockWidget(first_dock, dock)
+            self._page_docks[key] = dock
+        if first_dock is not None:
+            first_dock.raise_()
 
     def _on_top_tab_changed(self, index: int) -> None:
         pass  # 各分頁控制列已嵌入於分頁內，無需切換顯示
@@ -1084,6 +1138,25 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════
     # WebSocket 管理
     # ══════════════════════════════════════════════════════════════
+
+    def _create_page_dock(self, key: str, title: str, widget: QWidget) -> QDockWidget:
+        dock = QDockWidget(title, self)
+        dock.setObjectName(f"page_dock_{key}")
+        dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        dock.setWidget(widget)
+        dock.setMinimumSize(420, 280)
+        dock.topLevelChanged.connect(
+            lambda floating, d=dock: self._on_page_dock_floating_changed(d, floating)
+        )
+        return dock
+
+    def _on_page_dock_floating_changed(self, dock: QDockWidget, floating: bool) -> None:
+        if floating and (dock.width() < 900 or dock.height() < 560):
+            dock.resize(1200, 720)
 
     def _refresh_data_root_status(self) -> None:
         root = data_paths.data_root()

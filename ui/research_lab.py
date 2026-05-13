@@ -44,6 +44,28 @@ from utils.ui_settings import ui_settings
 _S_DIM  = "color: #787b86; font-size: 11px;"
 _S_INFO = "color: #d1d4dc; font-size: 11px;"
 _S_OK   = "color: #26a69a; font-size: 11px;"
+_S_FIELD = (
+    "color: #8f96a8; font-size: 10px; font-weight: 700;"
+    " padding: 4px 2px 0 2px;"
+)
+_S_STATUS_DIM = (
+    "QLabel { color: #8f96a8; background: #161c29; border: 1px solid #273145;"
+    " border-radius: 6px; padding: 5px 8px; font-size: 11px; }"
+)
+_S_STATUS_INFO = (
+    "QLabel { color: #dce3ee; background: #1b2636; border: 1px solid #35516d;"
+    " border-radius: 6px; padding: 5px 8px; font-size: 11px; }"
+)
+_S_STATUS_OK = (
+    "QLabel { color: #8fe7d8; background: #122724; border: 1px solid #24796e;"
+    " border-radius: 6px; padding: 5px 8px; font-size: 11px; }"
+)
+
+
+def _field_label(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setStyleSheet(_S_FIELD)
+    return label
 
 # ── IC Time-Series Chart ──────────────────────────────────────────────────────
 
@@ -732,6 +754,104 @@ class ResearchLab(QWidget):
     # ── UI Setup ──────────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
+        self.setObjectName("ResearchLab")
+        self.setStyleSheet(
+            """
+            QWidget#ResearchLab {
+                background: #101621;
+                color: #d1d4dc;
+            }
+            QGroupBox {
+                background: #151c2a;
+                border: 1px solid #263245;
+                border-radius: 8px;
+                margin-top: 18px;
+                padding: 10px 10px 8px 10px;
+                color: #d1d4dc;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 10px;
+                padding: 2px 8px;
+                color: #8fe7d8;
+                background: #101621;
+                border: 1px solid #263245;
+                border-radius: 5px;
+            }
+            QPushButton {
+                background: #20283a;
+                color: #dce3ee;
+                border: 1px solid #334058;
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: #27324a;
+                border-color: #4a6484;
+            }
+            QPushButton:pressed {
+                background: #162235;
+            }
+            QPushButton:disabled {
+                color: #5f6878;
+                background: #161c29;
+                border-color: #252d3d;
+            }
+            QPushButton#primaryRunButton {
+                background: #1f6f66;
+                border-color: #26a69a;
+                color: #f3fffd;
+                font-weight: 700;
+            }
+            QPushButton#primaryRunButton:hover {
+                background: #258477;
+            }
+            QComboBox {
+                background: #101621;
+                color: #dce3ee;
+                border: 1px solid #334058;
+                border-radius: 6px;
+                padding: 5px 8px;
+                min-height: 22px;
+            }
+            QTabWidget::pane {
+                border: 1px solid #263245;
+                background: #131a27;
+            }
+            QTabBar::tab {
+                background: #151c2a;
+                color: #8f96a8;
+                border: 1px solid #263245;
+                border-bottom: 0;
+                padding: 7px 13px;
+            }
+            QTabBar::tab:selected {
+                background: #20283a;
+                color: #f2f5f9;
+                border-top: 2px solid #26a69a;
+            }
+            QTableWidget {
+                background: #101621;
+                alternate-background-color: #141b29;
+                color: #d1d4dc;
+                gridline-color: #263245;
+                border: 1px solid #263245;
+                selection-background-color: #23423f;
+                selection-color: #f2f5f9;
+            }
+            QHeaderView::section {
+                background: #182132;
+                color: #aab3c2;
+                border: 1px solid #263245;
+                padding: 5px;
+                font-weight: 700;
+            }
+            """
+        )
         root = QSplitter(Qt.Orientation.Horizontal)
         root.setHandleWidth(4)
 
@@ -753,9 +873,9 @@ class ResearchLab(QWidget):
         self._interval_combo.setCurrentText(self._saved.get("interval", "1m"))
         self._tick_check = QCheckBox("Use tick-derived factors when available")
         self._tick_check.setChecked(self._saved.get("use_tick_features", True))
-        dl.addWidget(QLabel("Symbol"))
+        dl.addWidget(_field_label("Symbol"))
         dl.addWidget(self._symbol_combo)
-        dl.addWidget(QLabel("Interval"))
+        dl.addWidget(_field_label("Interval"))
         dl.addWidget(self._interval_combo)
         dl.addWidget(self._tick_check)
         cl.addWidget(data_box)
@@ -771,7 +891,8 @@ class ResearchLab(QWidget):
             btn = QPushButton(label)
             btn.setFixedWidth(118)
             lbl = QLabel("—")
-            lbl.setStyleSheet(_S_DIM)
+            lbl.setMinimumHeight(28)
+            lbl.setStyleSheet(_S_STATUS_DIM)
             row.addWidget(btn)
             row.addWidget(lbl, stretch=1)
             return btn, lbl, row
@@ -797,6 +918,7 @@ class ResearchLab(QWidget):
         self._run_btn    = QPushButton("Run Research")
         self._export_btn = QPushButton("Export")
         self._import_btn = QPushButton("Import")
+        self._run_btn.setObjectName("primaryRunButton")
         self._export_btn.setEnabled(False)
         self._run_btn.clicked.connect(self._on_run)
         self._export_btn.clicked.connect(self._on_export)
@@ -907,32 +1029,32 @@ class ResearchLab(QWidget):
         months = self._time_slice.selected_months()
         if not months:
             self._ts_status.setText("未設定")
-            self._ts_status.setStyleSheet(_S_DIM)
+            self._ts_status.setStyleSheet(_S_STATUS_DIM)
         else:
             n = len(months)
             preview = ", ".join(sorted(months)[:2])
             if n > 2:
                 preview += f" …(+{n - 2})"
             self._ts_status.setText(f"{preview} ({n}個月)")
-            self._ts_status.setStyleSheet(_S_INFO)
+            self._ts_status.setStyleSheet(_S_STATUS_INFO)
 
     def _update_fac_status(self) -> None:
         n_sel   = len(self._selected_factors_list)
         n_total = len(list_factors(include_tick=True))
         self._fac_status.setText(f"{n_sel} / {n_total} 個因子")
-        self._fac_status.setStyleSheet(_S_INFO if n_sel > 0 else _S_DIM)
+        self._fac_status.setStyleSheet(_S_STATUS_INFO if n_sel > 0 else _S_STATUS_DIM)
 
     def _update_param_status(self) -> None:
         self._param_status.setText(
             f"H:{self._horizons_str} | Q:{self._quantiles_val} | lag:{self._entry_lag_val}"
         )
-        self._param_status.setStyleSheet(_S_INFO)
+        self._param_status.setStyleSheet(_S_STATUS_INFO)
 
     def _update_regime_status(self) -> None:
         rc = self._regime_config
         if rc is None or not rc.is_active():
             self._regime_status.setText("Inactive")
-            self._regime_status.setStyleSheet(_S_DIM)
+            self._regime_status.setStyleSheet(_S_STATUS_DIM)
         else:
             if rc.mode == "matrix":
                 detail = f"{rc.active_label_count()} labels"
@@ -942,7 +1064,7 @@ class ResearchLab(QWidget):
                 detail = f"{rc.active_label_count()} labels"
             mode_str = {"matrix": "Matrix", "cross_matrix": "Cross×", "filter": "Filter"}.get(rc.mode, rc.mode)
             self._regime_status.setText(f"● {mode_str} ({detail})")
-            self._regime_status.setStyleSheet(_S_OK)
+            self._regime_status.setStyleSheet(_S_STATUS_OK)
 
     def _update_all_statuses(self) -> None:
         self._update_ts_status()
