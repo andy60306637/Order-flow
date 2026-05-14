@@ -72,11 +72,8 @@ VOL_PROFILE_LABELS: list[str] = [
     "price_in_poc_band",
     "price_in_vah_band",
     "price_in_val_band",
-    # Extended labels
-    "near_VAL",           # |close - VAL| <= touch_band_pct  (alias with cleaner name)
     "below_VAL",          # close < VAL  (outside value area on the downside)
     "below_VAL_reclaim",  # prev close < prev VAL  AND  close >= VAL  (reclaim candle)
-    "near_POC",           # |close - POC| <= touch_band_pct  (alias with cleaner name)
     "below_POC",          # close < POC  (lower half of profile, including below VAL)
     "outside_value_area", # close < VAL  OR  close > VAH
 ]
@@ -749,10 +746,6 @@ def _vol_profile_masks(
     bool_arrs["price_in_poc_band"] = has_profile & (np.abs(closes - pocs) <= band)
     bool_arrs["price_in_vah_band"] = has_profile & (np.abs(closes - vahs) <= band)
     bool_arrs["price_in_val_band"] = has_profile & (np.abs(closes - vals) <= band)
-
-    # Extended labels
-    bool_arrs["near_VAL"] = has_profile & (np.abs(closes - vals) <= band)
-    bool_arrs["near_POC"] = has_profile & (np.abs(closes - pocs) <= band)
     bool_arrs["below_VAL"] = has_profile & (closes < vals)
     bool_arrs["below_POC"] = has_profile & (closes < pocs)
     bool_arrs["outside_value_area"] = has_profile & ((closes < vals) | (closes > vahs))
