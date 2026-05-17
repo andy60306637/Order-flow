@@ -7,7 +7,6 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -139,7 +138,8 @@ class BacktestWorkerThread(QThread):
     def _run_single(self, slices, load_klines_fn, load_ticks_fn, bar_map_fn) -> dict:
         """合併所有 segments 執行一次回測。"""
         all_klines = []
-        all_tick_parts = []
+        # 僅記錄需要載入 tick 的 segment，等 kline_times 確定後再建 bar map
+        _tick_segs: list[tuple[str, int, int, str]] = []  # (symbol, start_ms, end_ms, label)
 
         for sl in slices:
             if self._abort:
@@ -152,10 +152,7 @@ class BacktestWorkerThread(QThread):
                 all_klines.extend(klines)
 
                 if self._use_tick_mode:
-                    self.progress.emit(f"Loading ticks {sl.label} ({tick_symbol})…")
-                    ticks = load_ticks_fn(tick_symbol, start_ms, end_ms)
-                    if ticks is not None and len(ticks) > 0:
-                        all_tick_parts.append(ticks)
+                    _tick_segs.append((tick_symbol, start_ms, end_ms, sl.label))
 
         if not all_klines:
             raise ValueError("No klines loaded for the selected time range.")
@@ -166,13 +163,23 @@ class BacktestWorkerThread(QThread):
             seen[k.open_time] = k
         all_klines = [seen[t] for t in sorted(seen)]
 
-        # 合併 tick 資料
-        tick_map = {}
-        if all_tick_parts:
-            merged = np.concatenate(all_tick_parts, axis=0)
-            merged = merged[merged[:, 0].argsort()]  # 時間排序
+        # 建立 tick bar map：streaming-first 逐月 mmap 分片，避免全年資料一次載入 OOM；
+        # shards 不存在時才 fallback 至舊有的 load_range_sharded 路徑。
+        tick_map: dict = {}
+        if _tick_segs:
+            from core.tick_cache import build_bar_map_streaming
             kline_times = [(k.open_time, k.close_time) for k in all_klines]
-            tick_map = bar_map_fn(merged, kline_times)
+            for tick_sym, t_start, t_end, label in _tick_segs:
+                self.progress.emit(f"Loading ticks {label} ({tick_sym})…")
+                streaming = build_bar_map_streaming(tick_sym, t_start, t_end, kline_times)
+                if streaming is not None:
+                    tick_map.update(streaming)
+                else:
+                    # shards 缺失時 fallback：一次性載入（可能 OOM 於超大範圍）
+                    ticks = load_ticks_fn(tick_sym, t_start, t_end)
+                    if ticks is not None and len(ticks) > 0:
+                        partial = bar_map_fn(ticks, kline_times)
+                        tick_map.update(partial)
 
         self.progress.emit("Generating signals…")
         signals = self._strategy.on_history(all_klines, tick_map or None)
