@@ -864,3 +864,4 @@ class MeanReversionPipelineStrategy(MultiPipelineStrategy):
             exit_mod       = ExitModule(ExitConfig(tp_rr_ratio=2.0)),
             initial_equity = 10_000.0,
         )
+
