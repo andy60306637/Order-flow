@@ -20,12 +20,8 @@ import numpy as np
 from core.data_types import Kline
 from research.base import (
     FACTOR_SIDE_LONG,
-    GROUP_CVD_DIVERGENCE,
-    GROUP_EXHAUSTION_RECLAIM,
-    GROUP_LIQUIDITY_SWEEP,
     GROUP_MEAN_REVERSION,
-    GROUP_ORDER_FLOW_ABSORPTION,
-    GROUP_VOLUME_PROFILE_ALPHA,
+    GROUP_MR_LONG,
     FactorBase,
     klines_to_arrays,
     safe_divide,
@@ -198,7 +194,7 @@ class SweepLowReclaimFactor(FactorBase):
 
     name = "sweep_low_reclaim"
     sides = (FACTOR_SIDE_LONG,)
-    group = GROUP_LIQUIDITY_SWEEP
+    group = GROUP_MR_LONG
 
     WINDOW: int = 20
 
@@ -247,7 +243,7 @@ class CvdBullishDivergenceFactor(FactorBase):
 
     name = "cvd_bullish_divergence"
     sides = (FACTOR_SIDE_LONG,)
-    group = GROUP_CVD_DIVERGENCE
+    group = GROUP_MR_LONG
 
     WINDOW: int = 20
     PRICE_TOLERANCE: float = 0.002
@@ -311,7 +307,7 @@ class NegativeDeltaAbsorptionFactor(FactorBase):
 
     name = "negative_delta_absorption"
     sides = (FACTOR_SIDE_LONG,)
-    group = GROUP_ORDER_FLOW_ABSORPTION
+    group = GROUP_MR_LONG
 
     ZSCORE_WINDOW: int = 50
 
@@ -360,7 +356,7 @@ class ValReclaimLongFactor(FactorBase):
 
     name = "val_reclaim_long"
     sides = (FACTOR_SIDE_LONG,)
-    group = GROUP_VOLUME_PROFILE_ALPHA
+    group = GROUP_MR_LONG
 
     WINDOW: int = 20
     N_BINS: int = 24
@@ -374,7 +370,7 @@ class ValReclaimLongFactor(FactorBase):
         out = np.zeros(n, dtype=np.float64)
 
         atr = _atr(arr, 14)
-        _, val = _rolling_volume_profile(arr["high"], low, arr["volume"], self.WINDOW, self.N_BINS)
+        _, val, _ = _rolling_volume_profile(arr["high"], low, arr["volume"], self.WINDOW, self.N_BINS)
 
         mask = (
             np.isfinite(val)
@@ -406,7 +402,7 @@ class PocReversionPotentialFactor(FactorBase):
 
     name = "poc_reversion_potential"
     sides = (FACTOR_SIDE_LONG,)
-    group = GROUP_VOLUME_PROFILE_ALPHA
+    group = GROUP_MR_LONG
 
     WINDOW: int = 20
     N_BINS: int = 24
@@ -421,7 +417,7 @@ class PocReversionPotentialFactor(FactorBase):
         out = np.zeros(n, dtype=np.float64)
 
         atr = _atr(arr, 14)
-        poc, _ = _rolling_volume_profile(arr["high"], arr["low"], arr["volume"], self.WINDOW, self.N_BINS)
+        poc, _, _ = _rolling_volume_profile(arr["high"], arr["low"], arr["volume"], self.WINDOW, self.N_BINS)
 
         valid = np.isfinite(poc) & np.isfinite(atr) & (atr > 0)
         if valid.any():
@@ -446,7 +442,7 @@ class ReturnShockReclaimFactor(FactorBase):
 
     name = "return_shock_reclaim"
     sides = (FACTOR_SIDE_LONG,)
-    group = GROUP_EXHAUSTION_RECLAIM
+    group = GROUP_MR_LONG
 
     N: int = 10
     ZSCORE_WINDOW: int = 100

@@ -12,6 +12,8 @@ from research.base import (
     GROUP_MEAN_REVERSION,
     GROUP_MICROSTRUCTURE,
     GROUP_MOMENTUM,
+    GROUP_MR_LONG,
+    GROUP_MR_SHORT,
     GROUP_PRICE_ACTION,
     GROUP_REGIME,
     GROUP_VOLATILITY,
@@ -135,6 +137,19 @@ def _rolling_percentile(values: np.ndarray, window: int) -> np.ndarray:
     return out
 
 
+def _streak_count(condition: np.ndarray) -> np.ndarray:
+    """Count consecutive True values ending at each position."""
+    out = np.zeros(len(condition), dtype=np.float64)
+    cnt = 0
+    for i in range(len(condition)):
+        if condition[i]:
+            cnt += 1
+            out[i] = float(cnt)
+        else:
+            cnt = 0
+    return out
+
+
 def _rolling_vwap(arr: dict[str, np.ndarray], window: int) -> np.ndarray:
     """Rolling VWAP using typical price = (H+L+C)/3."""
     tp = (arr["high"] + arr["low"] + arr["close"]) / 3.0
@@ -221,8 +236,8 @@ def _rolling_volume_profile(
     window: int,
     n_bins: int = 24,
     va_pct: float = 0.70,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Rolling volume profile returning (POC, VAL) per bar.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Rolling volume profile returning (POC, VAL, VAH) per bar.
 
     For each bar i, the profile is built from the window bars ending at i
     (inclusive). Volume is distributed across price bins proportionally to
@@ -230,11 +245,13 @@ def _rolling_volume_profile(
 
     Returns:
         poc: price of the highest-volume bin centre (NaN when insufficient data)
-        val: lower edge of the Value Area (lowest bin of the ~va_pct volume cluster)
+        val: lower edge of the Value Area (~va_pct volume cluster)
+        vah: upper edge of the Value Area
     """
     n = len(high)
     poc_out = np.full(n, np.nan, dtype=np.float64)
     val_out = np.full(n, np.nan, dtype=np.float64)
+    vah_out = np.full(n, np.nan, dtype=np.float64)
 
     for i in range(window - 1, n):
         h_w = high[i - window + 1 : i + 1]
@@ -294,8 +311,9 @@ def _rolling_volume_profile(
                 area += vol_bins[hi]
 
         val_out[i] = edges[lo]
+        vah_out[i] = edges[hi + 1]
 
-    return poc_out, val_out
+    return poc_out, val_out, vah_out
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +325,7 @@ def _rolling_volume_profile(
 class LowerWickToBodyRatioFactor(FactorBase):
     name = "lower_wick_to_body_ratio"
     sides = (FACTOR_SIDE_LONG,)
-    group = GROUP_MEAN_REVERSION
+    group = GROUP_MR_LONG
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -320,7 +338,7 @@ class LowerWickToBodyRatioFactor(FactorBase):
 class UpperWickToBodyRatioFactor(FactorBase):
     name = "upper_wick_to_body_ratio"
     sides = (FACTOR_SIDE_SHORT,)
-    group = GROUP_MEAN_REVERSION
+    group = GROUP_MR_SHORT
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -334,7 +352,7 @@ class LowerWickDeltaEfficiencyFactor(FactorBase):
     name = "lower_wick_delta_eff"
     requires_ticks = True
     sides = (FACTOR_SIDE_LONG,)
-    group = GROUP_MICROSTRUCTURE
+    group = GROUP_MR_LONG
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         out = np.full(len(klines), np.nan, dtype=np.float64)
@@ -359,7 +377,7 @@ class LowerWickDeltaEfficiencyFactor(FactorBase):
 @register_factor
 class LowerWickDeltaEfficiencyMeanReversionFactor(LowerWickDeltaEfficiencyFactor):
     name = "lower_wick_delta_eff_mr"
-    group = GROUP_MEAN_REVERSION
+    group = GROUP_MR_LONG
 
 
 @register_factor
@@ -1226,7 +1244,7 @@ class DistanceToVwapFactor(FactorBase):
 class UpperWickRatioFactor(FactorBase):
     name = "upper_wick_ratio"
     sides = (FACTOR_SIDE_SHORT,)
-    group = GROUP_MEAN_REVERSION
+    group = GROUP_MR_SHORT
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -1240,7 +1258,7 @@ class UpperWickRatioFactor(FactorBase):
 class LowerWickRatioFactor(FactorBase):
     name = "lower_wick_ratio"
     sides = (FACTOR_SIDE_LONG,)
-    group = GROUP_MEAN_REVERSION
+    group = GROUP_MR_LONG
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -1290,7 +1308,7 @@ class ClosePositionInBarFactor(FactorBase):
 class ReversalBarUpFactor(FactorBase):
     name = "reversal_bar_up"
     sides = (FACTOR_SIDE_LONG,)
-    group = GROUP_MEAN_REVERSION
+    group = GROUP_MR_LONG
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -1309,7 +1327,7 @@ class ReversalBarUpFactor(FactorBase):
 class ReversalBarDownFactor(FactorBase):
     name = "reversal_bar_down"
     sides = (FACTOR_SIDE_SHORT,)
-    group = GROUP_MEAN_REVERSION
+    group = GROUP_MR_SHORT
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -1552,7 +1570,7 @@ class HighLowRange1mFactor(FactorBase):
 class SweepPinBarLongFactor(FactorBase):
     name = "sweep_pin_bar_long"
     sides = (FACTOR_SIDE_LONG,)
-    group = GROUP_PRICE_ACTION
+    group = GROUP_MR_LONG
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -1574,7 +1592,7 @@ class SweepPinBarLongFactor(FactorBase):
 class SweepPinBarShortFactor(FactorBase):
     name = "sweep_pin_bar_short"
     sides = (FACTOR_SIDE_SHORT,)
-    group = GROUP_PRICE_ACTION
+    group = GROUP_MR_SHORT
 
     def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
         arr = klines_to_arrays(klines)
@@ -1611,4 +1629,287 @@ class MaTrendAlignmentCrossoverFactor(FactorBase):
         mask = cross_up & alignment
         out = np.full(close.shape, np.nan, dtype=np.float64)
         out[mask] = safe_divide(ma20[mask] - ma50[mask], ma50[mask])
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Mean Reversion & Extreme — Long
+# Liquidity Sweep & Reclaim · CVD Divergence · Order Flow Absorption
+# Volume Profile Alpha · Exhaustion & Reclaim
+# ---------------------------------------------------------------------------
+
+@register_factor
+class LiquiditySweepReclaimLongFactor(FactorBase):
+    """Bar sweeps below the 20-bar prior-low then closes back above it."""
+    name = "liq_sweep_reclaim_long"
+    sides = (FACTOR_SIDE_LONG,)
+    group = GROUP_MR_LONG
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        n = 20
+        prev_lows = np.roll(arr["low"], 1)
+        prev_lows[0] = arr["low"][0]
+        min_prev = _rolling_min(prev_lows, n)
+        swept = arr["low"] < min_prev
+        reclaimed = arr["close"] > min_prev
+        lower_wick = safe_divide(
+            np.minimum(arr["open"], arr["close"]) - arr["low"],
+            arr["high"] - arr["low"],
+        )
+        out = np.full(len(arr["close"]), np.nan, dtype=np.float64)
+        mask = swept & reclaimed & ~np.isnan(min_prev)
+        out[mask] = lower_wick[mask]
+        return out
+
+
+@register_factor
+class CvdDivergenceLongFactor(FactorBase):
+    """Bullish CVD divergence: price dropped over N bars but rolling net delta improved."""
+    name = "cvd_divergence_long"
+    sides = (FACTOR_SIDE_LONG,)
+    group = GROUP_MR_LONG
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        n = 20
+        delta = 2.0 * arr["taker_buy_volume"] - arr["volume"]
+        rolling_delta = _rolling_mean(delta, n)
+        prev_delta = np.roll(rolling_delta, n)
+        prev_delta[:n] = np.nan
+        prev_close = np.roll(arr["close"], n)
+        prev_close[:n] = np.nan
+        price_fell = arr["close"] < prev_close
+        cvd_rose = rolling_delta > prev_delta
+        out = np.full(len(arr["close"]), np.nan, dtype=np.float64)
+        mask = price_fell & cvd_rose & ~np.isnan(prev_delta)
+        out[mask] = (rolling_delta - prev_delta)[mask]
+        return out
+
+
+@register_factor
+class OrderFlowAbsorptionLongFactor(FactorBase):
+    """High sell-volume bar that closes near the top — buyers absorbed the selling pressure."""
+    name = "order_flow_absorption_long"
+    sides = (FACTOR_SIDE_LONG,)
+    group = GROUP_MR_LONG
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        sell_vol = arr["volume"] - arr["taker_buy_volume"]
+        sell_z = _rolling_zscore(sell_vol, 20)
+        close_pos = safe_divide(arr["close"] - arr["low"], arr["high"] - arr["low"])
+        out = np.where(
+            (sell_z > 1.0) & (close_pos > 0.6) & ~np.isnan(sell_z),
+            sell_z * close_pos,
+            np.nan,
+        )
+        return out.astype(np.float64)
+
+
+@register_factor
+class VolumeProfileBelowPocLongFactor(FactorBase):
+    """ATR-normalised distance below the rolling 50-bar POC (mean reversion long signal)."""
+    name = "vp_below_poc_long"
+    sides = (FACTOR_SIDE_LONG,)
+    group = GROUP_MR_LONG
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        poc, _, _ = _rolling_volume_profile(arr["high"], arr["low"], arr["volume"], 50)
+        atr = _atr(arr, 14)
+        dist = poc - arr["close"]
+        return np.where((dist > 0) & ~np.isnan(poc), safe_divide(dist, atr), np.nan)
+
+
+@register_factor
+class VolumeProfileValReclaimLongFactor(FactorBase):
+    """Previous bar swept below VAL; current close reclaimed back above it."""
+    name = "vp_val_reclaim_long"
+    sides = (FACTOR_SIDE_LONG,)
+    group = GROUP_MR_LONG
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        _, val, _ = _rolling_volume_profile(arr["high"], arr["low"], arr["volume"], 50)
+        prev_low = np.roll(arr["low"], 1)
+        prev_val = np.roll(val, 1)
+        swept = prev_low < prev_val
+        reclaimed = arr["close"] > val
+        lower_wick = safe_divide(
+            np.minimum(arr["open"], arr["close"]) - arr["low"],
+            arr["high"] - arr["low"],
+        )
+        out = np.full(len(arr["close"]), np.nan, dtype=np.float64)
+        mask = swept & reclaimed & ~np.isnan(val)
+        out[mask] = lower_wick[mask]
+        return out
+
+
+@register_factor
+class ExhaustionReclaimLongFactor(FactorBase):
+    """Bullish reversal bar after 3+ consecutive bearish bars — seller exhaustion."""
+    name = "exhaustion_reclaim_long"
+    sides = (FACTOR_SIDE_LONG,)
+    group = GROUP_MR_LONG
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        close, open_ = arr["close"], arr["open"]
+        rng = arr["high"] - arr["low"]
+        avg_rng = _rolling_mean(rng, 20)
+        bear_streak = _streak_count(close < open_)
+        prev_streak = np.roll(bear_streak, 1)
+        prev_streak[0] = 0.0
+        close_pos = safe_divide(close - arr["low"], rng)
+        mask = (
+            (close > open_)
+            & (prev_streak >= 3)
+            & (rng >= avg_rng * 0.5)
+            & (close_pos >= 0.5)
+            & ~np.isnan(avg_rng)
+        )
+        out = np.full(len(close), np.nan, dtype=np.float64)
+        out[mask] = prev_streak[mask]
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Mean Reversion & Extreme — Short
+# Liquidity Sweep & Reclaim · CVD Divergence · Order Flow Absorption
+# Volume Profile Alpha · Exhaustion & Reclaim
+# ---------------------------------------------------------------------------
+
+@register_factor
+class LiquiditySweepReclaimShortFactor(FactorBase):
+    """Bar sweeps above the 20-bar prior-high then closes back below it."""
+    name = "liq_sweep_reclaim_short"
+    sides = (FACTOR_SIDE_SHORT,)
+    group = GROUP_MR_SHORT
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        n = 20
+        prev_highs = np.roll(arr["high"], 1)
+        prev_highs[0] = arr["high"][0]
+        max_prev = _rolling_max(prev_highs, n)
+        swept = arr["high"] > max_prev
+        reclaimed = arr["close"] < max_prev
+        upper_wick = safe_divide(
+            arr["high"] - np.maximum(arr["open"], arr["close"]),
+            arr["high"] - arr["low"],
+        )
+        out = np.full(len(arr["close"]), np.nan, dtype=np.float64)
+        mask = swept & reclaimed & ~np.isnan(max_prev)
+        out[mask] = upper_wick[mask]
+        return out
+
+
+@register_factor
+class CvdDivergenceShortFactor(FactorBase):
+    """Bearish CVD divergence: price rose over N bars but rolling net delta deteriorated."""
+    name = "cvd_divergence_short"
+    sides = (FACTOR_SIDE_SHORT,)
+    group = GROUP_MR_SHORT
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        n = 20
+        delta = 2.0 * arr["taker_buy_volume"] - arr["volume"]
+        rolling_delta = _rolling_mean(delta, n)
+        prev_delta = np.roll(rolling_delta, n)
+        prev_delta[:n] = np.nan
+        prev_close = np.roll(arr["close"], n)
+        prev_close[:n] = np.nan
+        price_rose = arr["close"] > prev_close
+        cvd_fell = rolling_delta < prev_delta
+        out = np.full(len(arr["close"]), np.nan, dtype=np.float64)
+        mask = price_rose & cvd_fell & ~np.isnan(prev_delta)
+        out[mask] = (prev_delta - rolling_delta)[mask]
+        return out
+
+
+@register_factor
+class OrderFlowAbsorptionShortFactor(FactorBase):
+    """High buy-volume bar that closes near the bottom — sellers absorbed the buying pressure."""
+    name = "order_flow_absorption_short"
+    sides = (FACTOR_SIDE_SHORT,)
+    group = GROUP_MR_SHORT
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        buy_z = _rolling_zscore(arr["taker_buy_volume"], 20)
+        close_pos = safe_divide(arr["close"] - arr["low"], arr["high"] - arr["low"])
+        out = np.where(
+            (buy_z > 1.0) & (close_pos < 0.4) & ~np.isnan(buy_z),
+            buy_z * (1.0 - close_pos),
+            np.nan,
+        )
+        return out.astype(np.float64)
+
+
+@register_factor
+class VolumeProfileAbovePocShortFactor(FactorBase):
+    """ATR-normalised distance above the rolling 50-bar POC (mean reversion short signal)."""
+    name = "vp_above_poc_short"
+    sides = (FACTOR_SIDE_SHORT,)
+    group = GROUP_MR_SHORT
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        poc, _, _ = _rolling_volume_profile(arr["high"], arr["low"], arr["volume"], 50)
+        atr = _atr(arr, 14)
+        dist = arr["close"] - poc
+        return np.where((dist > 0) & ~np.isnan(poc), safe_divide(dist, atr), np.nan)
+
+
+@register_factor
+class VolumeProfileVahReclaimShortFactor(FactorBase):
+    """Previous bar swept above VAH; current close reclaimed back below it."""
+    name = "vp_vah_reclaim_short"
+    sides = (FACTOR_SIDE_SHORT,)
+    group = GROUP_MR_SHORT
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        _, _, vah = _rolling_volume_profile(arr["high"], arr["low"], arr["volume"], 50)
+        prev_high = np.roll(arr["high"], 1)
+        prev_vah = np.roll(vah, 1)
+        swept = prev_high > prev_vah
+        reclaimed = arr["close"] < vah
+        upper_wick = safe_divide(
+            arr["high"] - np.maximum(arr["open"], arr["close"]),
+            arr["high"] - arr["low"],
+        )
+        out = np.full(len(arr["close"]), np.nan, dtype=np.float64)
+        mask = swept & reclaimed & ~np.isnan(vah)
+        out[mask] = upper_wick[mask]
+        return out
+
+
+@register_factor
+class ExhaustionReclaimShortFactor(FactorBase):
+    """Bearish reversal bar after 3+ consecutive bullish bars — buyer exhaustion."""
+    name = "exhaustion_reclaim_short"
+    sides = (FACTOR_SIDE_SHORT,)
+    group = GROUP_MR_SHORT
+
+    def compute(self, klines: list[Kline], tick_map: TickBarMap | None = None) -> np.ndarray:
+        arr = klines_to_arrays(klines)
+        close, open_ = arr["close"], arr["open"]
+        rng = arr["high"] - arr["low"]
+        avg_rng = _rolling_mean(rng, 20)
+        bull_streak = _streak_count(close > open_)
+        prev_streak = np.roll(bull_streak, 1)
+        prev_streak[0] = 0.0
+        close_pos = safe_divide(close - arr["low"], rng)
+        mask = (
+            (close < open_)
+            & (prev_streak >= 3)
+            & (rng >= avg_rng * 0.5)
+            & (close_pos <= 0.5)
+            & ~np.isnan(avg_rng)
+        )
+        out = np.full(len(close), np.nan, dtype=np.float64)
+        out[mask] = prev_streak[mask]
         return out
