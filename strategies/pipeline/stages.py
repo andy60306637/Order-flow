@@ -468,6 +468,62 @@ class TickFactorStage(PipelineStage):
         return ctx
 
 
+# ── EnhancerModule / EnhancerStage ───────────────────────────────────────────
+
+class EnhancerModule(ABC):
+    """
+    Enhancer 篩選模組介面。
+
+    AlphaStage 確認訊號成立後，EnhancerStage 依序執行各 EnhancerModule.evaluate()。
+    回傳 True → 放行；False → 視 mode 決定是否阻斷。
+
+    子類別可透過 ctx.alpha_meta、ctx.klines、ctx.idx、ctx.tick_map 讀取所有已計算資料，
+    無需重新計算（SharedContext 快取由 RegimeStage / TickFactorStage 預先填入）。
+    """
+
+    name: str = "UnnamedEnhancer"
+
+    @abstractmethod
+    def evaluate(self, ctx: PipelineContext) -> bool:
+        """True = 放行，False = 阻斷。"""
+        ...
+
+
+class EnhancerStage(PipelineStage):
+    """
+    可選的訊號增強篩選層，放在 AlphaStage 之後、EntryManagementStage 之前。
+
+    modules 為空（預設）時永遠通過，作為未來 Enhancer 實驗的預留插槽，不影響現有邏輯。
+
+    mode="AND"（預設）：所有 EnhancerModule 皆回傳 True 才通過。
+    mode="OR"：任一 EnhancerModule 回傳 True 即通過。
+    """
+
+    name = "EnhancerStage"
+
+    def __init__(
+        self,
+        modules: list[EnhancerModule] | None = None,
+        mode:    str                         = "AND",
+    ) -> None:
+        self.modules = modules or []
+        self.mode    = mode.upper()
+
+    def process(self, ctx: PipelineContext) -> Optional[PipelineContext]:
+        if not self.modules:
+            return ctx  # 空插槽，直接通過
+
+        if self.mode == "AND":
+            for mod in self.modules:
+                if not mod.evaluate(ctx):
+                    return None
+            return ctx
+
+        if any(mod.evaluate(ctx) for mod in self.modules):
+            return ctx
+        return None
+
+
 # ── PositionGateStage ─────────────────────────────────────────────────────────
 
 class PositionGateStage(PipelineStage):

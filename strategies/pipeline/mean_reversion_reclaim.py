@@ -61,6 +61,7 @@ from strategies.pipeline.pipeline import TradingPipeline
 from strategies.pipeline.runner import MultiPipelineRunner
 from strategies.pipeline.stages import (
     AlphaStage,
+    EnhancerStage,
     PipelineStage,
     PositionGateStage,
     RegimeStage,
@@ -471,19 +472,23 @@ def build_val_reclaim_pipeline(
     min_close_pos:        float = 0.55,
     sl_offset:            float = 0.0,
     min_micro_cvd:        float = 0.0,
+    # ── Stage 2.5：Enhancer（預留插槽，空時無額外開銷）────────────────────────
+    enhancer_modules:     list | None = None,
     # ── Stage 3：EntryManagement（ATR 停損）──────────────────────────────────
     atr_period:   int   = 14,
     atr_k:        float = 1.0,
     max_sl_pct:   float = 0.03,
     min_stop_pct: float = 0.0015,
     # ── Stage 4：RR baseline + TP 調整（POC / VWAP / 2.0R 取最近）──────────
-    rr_ratio:    float                   = 3.0,
-    min_rr_adj:  float                   = 0.8,
-    capital_cfg: Optional[CapitalConfig] = None,
+    rr_ratio:      float                   = 2.0,
+    min_rr_adj:    float                   = 0.8,
+    # use_tp_adjust: bool                    = True,
+    use_tp_adjust: bool                    = False,
+    capital_cfg:   Optional[CapitalConfig] = None,
     # ── Stage 5：費用覆蓋率（0.032% taker + 0.2bps 滑點，cover ratio 1.5）──
     taker_fee_rate:  float = 0.00032,
     slippage_rate:   float = 0.00002,
-    fee_cover_ratio: float = 1.8,
+    fee_cover_ratio: float = 1.5,
 ) -> TradingPipeline:
     """
     VAL Reclaim 均值回歸 Pipeline 工廠函式。
@@ -563,6 +568,7 @@ def build_val_reclaim_pipeline(
             modules = [val_reclaim_sig],
             mode    = "OR",
         ),
+        EnhancerStage(modules=enhancer_modules),
         EntryManagementStage(
             atr_period   = atr_period,
             atr_k        = atr_k,
@@ -574,10 +580,13 @@ def build_val_reclaim_pipeline(
             capital_cfg = capital_cfg or CapitalConfig(),
             min_rr      = rr_ratio,
         ),
-        ValReclaimTPAdjustStage(
-            vp_regime_comp   = vp_comp,
-            vwap_regime_comp = vwap_comp,
-            min_rr_adj       = min_rr_adj,
+        *(
+            [ValReclaimTPAdjustStage(
+                vp_regime_comp   = vp_comp,
+                vwap_regime_comp = vwap_comp,
+                min_rr_adj       = min_rr_adj,
+            )]
+            if use_tp_adjust else []
         ),
         FeeCoverRatioStage(
             taker_fee_rate  = taker_fee_rate,

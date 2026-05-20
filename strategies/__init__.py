@@ -66,3 +66,21 @@ _register_signal_modules()
 # ── Pipeline 策略 ─────────────────────────────────────────────────────────────
 from strategies.pipeline.mean_reversion import MeanReversionPipelineStrategy as _MRStrategy  # noqa: E402, F401
 STRATEGY_REGISTRY[_MRStrategy.name] = _MRStrategy
+
+from strategies.pipeline.mean_reversion_reclaim import ValReclaimPipelineStrategy as _VRStrategy  # noqa: E402, F401
+STRATEGY_REGISTRY[_VRStrategy.name] = _VRStrategy
+
+from strategies.pipeline.ny_cvd_divergence_mr import NYCVDDivergenceMRPipelineStrategy as _NYCVDStrategy  # noqa: E402, F401
+STRATEGY_REGISTRY[_NYCVDStrategy.name] = _NYCVDStrategy
+
+from strategies.pipeline.asian_overextended_cvd_reversal import AsianCVDOEPipelineStrategy as _AsianCVDOEStrategy  # noqa: E402, F401
+STRATEGY_REGISTRY[_AsianCVDOEStrategy.name] = _AsianCVDOEStrategy
+
+from strategies.pipeline.ny_wick_reversal import NYWickReversalPipelineStrategy as _NYWickRevStrategy  # noqa: E402, F401
+STRATEGY_REGISTRY[_NYWickRevStrategy.name] = _NYWickRevStrategy
+
+from strategies.pipeline.vp_below_poc_reversion import VPBelowPOCReversionPipelineStrategy as _VPBelowPOCStrategy  # noqa: E402, F401
+STRATEGY_REGISTRY[_VPBelowPOCStrategy.name] = _VPBelowPOCStrategy
+
+from strategies.pipeline.vp_reclaim import VPReclaimPipelineStrategy as _VPReclaimStrategy  # noqa: E402, F401
+STRATEGY_REGISTRY[_VPReclaimStrategy.name] = _VPReclaimStrategy
