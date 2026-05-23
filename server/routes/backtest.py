@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from datetime import datetime, timezone
 from io import BytesIO
 import logging
@@ -418,6 +419,27 @@ def _serialise_kline(k: Any) -> dict:
     }
 
 
+def _to_jsonable(value: Any) -> Any:
+    """Convert numpy/dataclass values recursively before FastAPI serialization."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return _to_jsonable(dataclasses.asdict(value))
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    if hasattr(value, "item") and callable(value.item) and not isinstance(value, type):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    if hasattr(value, "tolist") and callable(value.tolist) and not isinstance(value, type):
+        try:
+            return _to_jsonable(value.tolist())
+        except Exception:
+            pass
+    return value
+
+
 def _find_bar_index(klines: list, ts_ms: int) -> int | None:
     if not klines or not ts_ms:
         return None
@@ -443,31 +465,15 @@ def _bar_ms(klines: list) -> int:
 def _signal_dict(sig: Any | None) -> dict | None:
     if sig is None:
         return None
-    def safe(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {str(k): safe(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [safe(v) for v in value]
-        if hasattr(value, "item"):
-            try:
-                return value.item()
-            except Exception:
-                pass
-        if hasattr(value, "tolist"):
-            try:
-                return value.tolist()
-            except Exception:
-                pass
-        return value
     return {
         "open_time": int(getattr(sig, "open_time", 0) or 0),
         "price": float(getattr(sig, "price", 0.0) or 0.0),
         "signal_type": str(getattr(sig, "signal_type", "") or ""),
         "label": str(getattr(sig, "label", "") or ""),
-        "stop_price": safe(getattr(sig, "stop_price", None)),
-        "fill_price": safe(getattr(sig, "fill_price", None)),
-        "fill_time": safe(getattr(sig, "fill_time", None)),
-        "meta": safe(dict(getattr(sig, "meta", {}) or {})),
+        "stop_price": _to_jsonable(getattr(sig, "stop_price", None)),
+        "fill_price": _to_jsonable(getattr(sig, "fill_price", None)),
+        "fill_time": _to_jsonable(getattr(sig, "fill_time", None)),
+        "meta": _to_jsonable(dict(getattr(sig, "meta", {}) or {})),
     }
 
 
@@ -605,7 +611,7 @@ def _snapshot_context_for_trade(job, trade_idx: int, context_bars: int = 10) -> 
     except Exception:
         tp_price = None
 
-    return {
+    return _to_jsonable({
         "trade": trade,
         "trade_idx": trade_idx,
         "window": [_serialise_kline(k) for k in window],
@@ -618,7 +624,7 @@ def _snapshot_context_for_trade(job, trade_idx: int, context_bars: int = 10) -> 
         "stop_price": stop_price,
         "tp_price": tp_price,
         "ticks": tick_rows,
-    }
+    })
 
 
 def _build_backtest_workbook(result: dict) -> BytesIO:

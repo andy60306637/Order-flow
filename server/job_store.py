@@ -7,6 +7,27 @@ from enum import Enum
 from typing import Any
 
 
+def _sanitize(obj: Any) -> Any:
+    """Recursively convert numpy scalar/array types to JSON-serializable Python types."""
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(v) for v in obj]
+    # numpy scalars expose .item() which returns the native Python equivalent
+    if hasattr(obj, "item") and callable(obj.item) and not isinstance(obj, type):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+    # numpy arrays
+    if hasattr(obj, "tolist") and callable(obj.tolist) and not isinstance(obj, type):
+        try:
+            return obj.tolist()
+        except Exception:
+            pass
+    return obj
+
+
 class JobStatus(str, Enum):
     PENDING  = "pending"
     RUNNING  = "running"
@@ -31,7 +52,7 @@ class Job:
             "status":   self.status,
             "progress": self.progress,
             "error":    self.error,
-            "result":   self.result,
+            "result":   _sanitize(self.result),
         }
 
 
