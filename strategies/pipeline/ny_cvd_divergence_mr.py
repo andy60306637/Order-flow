@@ -40,6 +40,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Optional
 
+import numpy as np
+
 from core.data_types import Kline
 from strategies.base import StrategySignal, TickBarMap
 from strategies.modules.capital_management import CapitalConfig
@@ -55,6 +57,7 @@ from strategies.pipeline.pipeline import TradingPipeline
 from strategies.pipeline.runner import MultiPipelineRunner
 from strategies.pipeline.stages import (
     AlphaStage,
+    EnhancerModule,
     EnhancerStage,
     PipelineStage,
     PositionGateStage,
@@ -217,6 +220,152 @@ class NYCVDDivergenceLongSignal(SignalModule):
         )
 
 
+# ── Enhancer Modules ──────────────────────────────────────────────────────────
+
+class ReversalBarUpEnhancer(EnhancerModule):
+    """
+    確認 k0 訊號棒有反轉棒結構（純 Kline，無需 tick 資料）：
+      range > avg_range_window 棒均值  ← 活躍棒，非縮量
+      lower_wick_ratio >= min_wick_ratio   ← 下影線佔 range 比例
+      close_pos        >= min_close_pos    ← 收盤位於棒內偏高位置
+    """
+
+    name = "ReversalBarUpEnhancer"
+
+    def __init__(
+        self,
+        min_wick_ratio:   float = 0.50,
+        min_close_pos:    float = 0.60,
+        avg_range_window: int   = 20,
+    ) -> None:
+        self.min_wick_ratio   = min_wick_ratio
+        self.min_close_pos    = min_close_pos
+        self.avg_range_window = avg_range_window
+
+    def evaluate(self, ctx: PipelineContext) -> bool:
+        k0_meta = ctx.alpha_meta.get("k0_meta", {})
+        k0_idx  = k0_meta.get("k0_idx")
+        if k0_idx is None:
+            return False
+        k0  = ctx.klines[k0_idx]
+        rng = k0.high - k0.low
+        if rng <= 0:
+            return False
+        start   = max(0, k0_idx - self.avg_range_window)
+        avg_rng = sum(
+            k.high - k.low for k in ctx.klines[start : k0_idx + 1]
+        ) / max(k0_idx - start + 1, 1)
+        body_lo    = min(k0.open, k0.close)
+        lower_wick = (body_lo - k0.low) / rng
+        close_pos  = (k0.close - k0.low) / rng
+        return (
+            rng > avg_rng
+            and lower_wick >= self.min_wick_ratio
+            and close_pos  >= self.min_close_pos
+        )
+
+
+class LowerWickDeltaEffEnhancer(EnhancerModule):
+    """
+    驗證 k0 下影線區間（low ~ body_low）tick net delta >= min_eff。
+
+    tick_map 不可用（或該棒無 tick / 無下影線 tick）時 fallback 通過（True），
+    確保無 tick 回測不會因此全面阻斷。
+    """
+
+    name = "LowerWickDeltaEffEnhancer"
+
+    def __init__(self, min_eff: float = 0.0) -> None:
+        self.min_eff = min_eff
+
+    def evaluate(self, ctx: PipelineContext) -> bool:
+        if ctx.tick_map is None:
+            return True
+        k0_meta = ctx.alpha_meta.get("k0_meta", {})
+        k0_idx  = k0_meta.get("k0_idx")
+        if k0_idx is None:
+            return False
+        k0    = ctx.klines[k0_idx]
+        ticks = ctx.tick_map.get(k0.open_time)
+        if ticks is None or len(ticks) == 0:
+            return True
+        body_lo = min(k0.open, k0.close)
+        zone    = ticks[ticks[:, 1] <= body_lo]
+        if len(zone) == 0:
+            return True
+        qty       = zone[:, 2]
+        buy_qty   = float(np.sum(qty[zone[:, 3] == 0.0]))
+        total_qty = float(np.sum(qty))
+        if total_qty <= 0:
+            return True
+        return (2.0 * buy_qty - total_qty) / total_qty >= self.min_eff
+
+
+class BuyVolumeZscoreEnhancer(EnhancerModule):
+    """
+    確認 k0 的 taker_buy_volume z-score 在近 window 棒中 >= min_zscore。
+    過濾低量背離：Delta 改善量小且無真實買盤放量支撐的情境。
+    """
+
+    name = "BuyVolumeZscoreEnhancer"
+
+    def __init__(self, window: int = 20, min_zscore: float = 0.5) -> None:
+        self.window     = window
+        self.min_zscore = min_zscore
+
+    def evaluate(self, ctx: PipelineContext) -> bool:
+        k0_meta = ctx.alpha_meta.get("k0_meta", {})
+        k0_idx  = k0_meta.get("k0_idx")
+        if k0_idx is None or k0_idx < self.window:
+            return False
+        bars    = ctx.klines[k0_idx - self.window + 1 : k0_idx + 1]
+        buy_vol = np.array([k.taker_buy_volume for k in bars], dtype=np.float64)
+        std     = float(np.std(buy_vol, ddof=0))
+        if std <= 0.0:
+            return False
+        zscore = (buy_vol[-1] - float(np.mean(buy_vol))) / std
+        return zscore >= self.min_zscore
+
+
+class CVDDivergenceStrengthEnhancer(EnhancerModule):
+    """
+    確認 CVD 背離強度：min_ratio <= cvd_divergence / k0.volume <= max_ratio。
+
+    cvd_divergence = rolling_delta_k0 − prev_delta（n 棒均值差）。
+    除以 k0.volume 使其無量綱，便於跨品種 / 跨時段比較與調參。
+
+    AlphaStage 已保證 cvd_divergence > 0（cvd_rose 條件）。
+    max_ratio=None 表示無上限（預設，等同原版下限過濾）。
+    max_ratio 設定時作為「反轉上限濾網」，排除過強背離（回測顯示強背離負向相關）。
+    """
+
+    name = "CVDDivergenceStrengthEnhancer"
+
+    def __init__(
+        self,
+        min_ratio: float        = 0.05,
+        max_ratio: float | None = None,
+    ) -> None:
+        self.min_ratio = min_ratio
+        self.max_ratio = max_ratio
+
+    def evaluate(self, ctx: PipelineContext) -> bool:
+        k0_meta        = ctx.alpha_meta.get("k0_meta", {})
+        k0_idx         = k0_meta.get("k0_idx")
+        cvd_divergence = k0_meta.get("cvd_divergence")
+        if k0_idx is None or cvd_divergence is None:
+            return False
+        k0_volume = ctx.klines[k0_idx].volume
+        if k0_volume <= 0:
+            return False
+        ratio = cvd_divergence / k0_volume
+        if ratio < self.min_ratio:
+            return False
+        if self.max_ratio is not None and ratio > self.max_ratio:
+            return False
+        return True
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 def build_ny_cvd_divergence_mr_pipeline(
@@ -247,20 +396,41 @@ def build_ny_cvd_divergence_mr_pipeline(
     cvd_window:    int   = 20,
     sl_offset:     float = 0.0,
     min_micro_cvd: float = 0.0,
-    # ── Stage 2.5: Enhancer（預留插槽，空時無額外開銷）──────────────────────
+    # ── Stage 2.5: Enhancer ──────────────────────────────────────────────────
+    # 直接傳入 enhancer_modules 可覆蓋所有 flag（向後相容）
     enhancer_modules: list | None = None,
+    # A. ReversalBarUpEnhancer
+    use_reversal_bar_up:        bool  = False,
+    reversal_bar_min_wick:      float = 0.50,
+    reversal_bar_min_close_pos: float = 0.60,
+    reversal_bar_avg_window:    int   = 20,
+    # B. LowerWickDeltaEffEnhancer（需 tick；tick 不可用時自動 pass）
+    use_lower_wick_delta_eff: bool  = False,
+    lower_wick_delta_eff_min: float = 0.0,
+    # C. BuyVolumeZscoreEnhancer
+    use_buy_volume_zscore: bool  = False,
+    buy_vol_zscore_window: int   = 20,
+    buy_vol_zscore_min:    float = 0.5,
+    # D. CVDDivergenceStrengthEnhancer
+    use_cvd_div_strength: bool        = True,
+    # cvd_div_strength_min: float       = 0.05,
+    cvd_div_strength_min: float       = 0.02,
+    # cvd_div_strength_max: float | None = None,
+    cvd_div_strength_max: float       = 0.15,
     # ── Stage 3: EntryManagement（ATR 停損）─────────────────────────────────
     atr_period:   int   = 14,
     atr_k:        float = 1.0,
-    max_sl_pct:   float = 0.03,
+    # max_sl_pct:   float = 0.03,
+    max_sl_pct:   float = 0.005,
     min_stop_pct: float = 0.0015,
     # ── Stage 4: RR（固定 2.0R）─────────────────────────────────────────────
-    rr_ratio:    float                   = 2.0,
+    # rr_ratio:    float                   = 2.0,
+    rr_ratio:    float                   = 1.3,
     capital_cfg: Optional[CapitalConfig] = None,
     # ── Stage 5: 費用覆蓋率─────────────────────────────────────────────────
     taker_fee_rate:  float = 0.00032,
     slippage_rate:   float = 0.00002,
-    fee_cover_ratio: float = 1.5,
+    fee_cover_ratio: float = 1.7,
 ) -> TradingPipeline:
     """
     NY CVD Divergence MR Pipeline 工廠函式。
@@ -268,6 +438,14 @@ def build_ny_cvd_divergence_mr_pipeline(
     allowed_combos 是單一真相來源：
       - RegimeStage 自動從中推導各維度 union 做快速預篩
       - NYCVDRegimeComboStage 做最終精確 4-tuple 匹配
+
+    Enhancer flags（use_* = False 預設全關，逐一啟用做交叉驗證）：
+      A. use_reversal_bar_up        — k0 反轉棒結構（純 Kline）
+      B. use_lower_wick_delta_eff   — 下影線 tick net delta（需 tick_map）
+      C. use_buy_volume_zscore      — k0 買量 z-score 門檻
+      D. use_cvd_div_strength       — CVD 背離強度（相對 k0 成交量）
+
+    如直接傳入 enhancer_modules，flags 全部被忽略（向後相容）。
     """
     _sessions    = {t[0] for t in allowed_combos}
     _market_vols = {t[1] for t in allowed_combos}
@@ -302,6 +480,30 @@ def build_ny_cvd_divergence_mr_pipeline(
         sl_offset     = sl_offset,
         min_micro_cvd = min_micro_cvd,
     )
+
+    # flag → modules 組裝（直接傳入 enhancer_modules 時略過 flags）
+    if enhancer_modules is None:
+        enhancer_modules = []
+        if use_reversal_bar_up:
+            enhancer_modules.append(ReversalBarUpEnhancer(
+                min_wick_ratio   = reversal_bar_min_wick,
+                min_close_pos    = reversal_bar_min_close_pos,
+                avg_range_window = reversal_bar_avg_window,
+            ))
+        if use_lower_wick_delta_eff:
+            enhancer_modules.append(LowerWickDeltaEffEnhancer(
+                min_eff = lower_wick_delta_eff_min,
+            ))
+        if use_buy_volume_zscore:
+            enhancer_modules.append(BuyVolumeZscoreEnhancer(
+                window     = buy_vol_zscore_window,
+                min_zscore = buy_vol_zscore_min,
+            ))
+        if use_cvd_div_strength:
+            enhancer_modules.append(CVDDivergenceStrengthEnhancer(
+                min_ratio = cvd_div_strength_min,
+                max_ratio = cvd_div_strength_max,
+            ))
 
     return TradingPipeline([
         PositionGateStage(max_positions=max_positions),
@@ -376,6 +578,6 @@ class NYCVDDivergenceMRPipelineStrategy(MultiPipelineStrategy):
         runner = MultiPipelineRunner(defs=[defn])
         super().__init__(
             runner         = runner,
-            exit_mod       = ExitModule(ExitConfig(tp_rr_ratio=2.0)),
+            exit_mod       = ExitModule(ExitConfig(tp_rr_ratio=1.3)),
             initial_equity = 10_000.0,
         )
