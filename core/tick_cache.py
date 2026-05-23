@@ -190,7 +190,7 @@ class LazyCombinedTickBarMap(Mapping[int, np.ndarray]):
             if entry is None:
                 return load_range(symbol, start_ms, end_ms)
 
-            path = _cache_dir() / entry["path"]
+            path = _shard_entry_path(entry)
             if not path.exists():
                 return load_range(symbol, start_ms, end_ms)
 
@@ -287,6 +287,15 @@ def _load_shard_manifest(symbol: str) -> dict | None:
     except Exception as exc:
         logger.error("tick shard manifest load error [%s]: %s", path.name, exc)
         return None
+
+
+def _shard_entry_path(entry: dict) -> Path:
+    """Convert a manifest entry's path to a platform-appropriate Path.
+
+    Manifests written on Windows use backslash separators; normalise to
+    forward slashes so they resolve correctly on Linux/macOS.
+    """
+    return _cache_dir() / Path(entry["path"].replace("\\", "/"))
 
 
 def _load_npz_meta(symbol: str) -> dict | None:
@@ -568,7 +577,7 @@ def load_range_sharded(symbol: str, start_ms: int, end_ms: int) -> np.ndarray | 
         if entry is None:
             return None
 
-        path = _cache_dir() / entry["path"]
+        path = _shard_entry_path(entry)
         if not path.exists():
             return None
 
@@ -635,7 +644,7 @@ def build_bar_map_streaming(
         entry = month_entries.get(month_key)
         if entry is None:
             return None  # incomplete shards — signal caller to fall back
-        path = _cache_dir() / entry["path"]
+        path = _shard_entry_path(entry)
         if not path.exists():
             return None
 

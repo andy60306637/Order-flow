@@ -94,10 +94,11 @@ def main() -> None:
     _apply_dark_palette(app)
 
     # pyqtgraph 全局預設
+    import platform
     pg.setConfigOptions(
         antialias=False,
-        useOpenGL=False,    # OpenGL 在某些 Windows 環境問題多，先關閉
-        background=None,    # 由各 widget 自行設定
+        useOpenGL=(platform.system() != "Windows"),  # Linux/macOS 啟用 OpenGL
+        background=None,
         foreground="#d1d4dc",
     )
 
