@@ -21,6 +21,7 @@ class Job:
         self.status   = JobStatus.PENDING
         self.progress = ""
         self.result: Any  = None
+        self.artifacts: dict[str, Any] = {}
         self.error:  str  = ""
         self._task: asyncio.Task | None = None
 

@@ -35,6 +35,7 @@ def _run_research_sync(req: ResearchRequest) -> dict:
     from backtest.time_slice import TimeSlice, _month_start_ms, _next_month_start_ms
     from research.runner import ResearchConfig, run_research_with_regimes
     from research.registry import ensure_builtin_factors
+    from research.regime_filter import RegimeFilterConfig
 
     ensure_builtin_factors()
 
@@ -50,6 +51,12 @@ def _run_research_sync(req: ResearchRequest) -> dict:
     if not slices:
         raise ValueError("No valid months provided.")
 
+    regime_filter = (
+        RegimeFilterConfig.from_dict(req.regime_filter)
+        if isinstance(req.regime_filter, dict)
+        else req.regime_filter
+    )
+
     cfg = ResearchConfig(
         symbol=req.symbol,
         interval=req.interval,
@@ -60,7 +67,7 @@ def _run_research_sync(req: ResearchRequest) -> dict:
         entry_lag=req.entry_lag,
         train_ratio=req.train_ratio,
         use_tick_features=req.use_tick_features,
-        regime_filter=req.regime_filter,
+        regime_filter=regime_filter,
     )
 
     results_by_regime = run_research_with_regimes(cfg)
@@ -95,6 +102,31 @@ def list_factors(include_tick: bool = True) -> dict:
     from research.registry import ensure_builtin_factors, list_factor_infos
     ensure_builtin_factors()
     return {"factors": list_factor_infos(include_tick=include_tick)}
+
+
+@router.get("/regime-options")
+def regime_options() -> dict:
+    from research.regime_filter import (
+        ALL_DIMENSIONS,
+        DIMENSION_DISPLAY,
+        DIMENSION_LABELS,
+    )
+    return {
+        "modes": ["filter", "matrix", "cross_matrix"],
+        "dimensions": [
+            {
+                "key": dim,
+                "label": DIMENSION_DISPLAY.get(dim, dim),
+                "labels": DIMENSION_LABELS.get(dim, []),
+            }
+            for dim in ALL_DIMENSIONS
+        ],
+        "defaults": {
+            "market_vol": {"lookback": 100},
+            "vwap_zone": {"window": 24, "lookback": 100},
+            "vol_profile": {"window": 24, "tick_size": 1.0, "value_area_pct": 0.70},
+        },
+    }
 
 
 @router.post("/run")

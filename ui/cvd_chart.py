@@ -24,6 +24,7 @@ from PyQt6 import QtCore, QtGui
 from PyQt6.QtCore import Qt, pyqtSignal
 
 import config
+from ui.fonts import mono_family
 
 
 _COLOR_POS   = (38,  166, 154,  50)   # 正 CVD 填色（淡青，更低調）
@@ -298,7 +299,7 @@ class StatsItem(pg.GraphicsObject):
 
         # 字型大小：以行高為基準，最小 7px 最大 11px
         font_px = max(7, min(11, int(row_h * 0.50)))
-        font = QtGui.QFont("Consolas")
+        font = QtGui.QFont(mono_family())
         font.setPixelSize(font_px)
         p.setFont(font)
 

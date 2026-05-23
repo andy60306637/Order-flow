@@ -29,6 +29,7 @@ const nav = [
   { path: '/market',   label: '即時行情' },
   { path: '/backtest', label: '回測儀表板' },
   { path: '/research', label: 'Research Lab' },
+  { path: '/pipeline', label: 'Pipeline 設計室' },
   { path: '/settings', label: '設定' },
 ]
 

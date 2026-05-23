@@ -25,7 +25,9 @@
       <div class="card space-y-2">
         <h2 class="text-sm font-medium">資料根目錄</h2>
         <input v-model="dataRoot" type="text" class="input-field" placeholder="/path/to/data" />
-        <p class="text-xs text-dim">留空則使用預設路徑 (project/data)</p>
+        <div class="text-xs" :class="dataRootStatus?.valid ? 'text-up' : 'text-down'">
+          {{ dataRootStatus ? dataRootStatus.path + ' — ' + dataRootStatus.message : '—' }}
+        </div>
       </div>
 
       <!-- Raw JSON editor -->
@@ -56,6 +58,7 @@ const jsonError = ref('')
 const saveMsg  = ref('')
 const saveOk   = ref(true)
 const settings = ref({})
+const dataRootStatus = ref(null)
 
 const btFields = [
   { key: 'initial_capital', label: '初始資金',   step: '100' },
@@ -87,6 +90,8 @@ async function load() {
   try {
     const { data } = await settingsApi.get()
     settings.value = data
+    const status = await settingsApi.dataRoot()
+    dataRootStatus.value = status.data
   } catch (e) {
     saveMsg.value = '載入失敗：' + e.message
     saveOk.value  = false
@@ -107,7 +112,10 @@ async function save() {
     return
   }
   try {
+    await settingsApi.setDataRoot(settings.value.data_root || '')
     await settingsApi.update(settings.value)
+    const status = await settingsApi.dataRoot()
+    dataRootStatus.value = status.data
     saveMsg.value = '✓ 已儲存'
     saveOk.value  = true
   } catch (e) {

@@ -7,13 +7,14 @@ import { computed } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { LineChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent, AxisPointerComponent } from 'echarts/components'
+import { GridComponent, TooltipComponent, AxisPointerComponent, DataZoomComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 
-use([LineChart, GridComponent, TooltipComponent, AxisPointerComponent, CanvasRenderer])
+use([LineChart, GridComponent, TooltipComponent, AxisPointerComponent, DataZoomComponent, CanvasRenderer])
 
 const props = defineProps({
-  cvd: { type: Array, default: () => [] },  // [{time_ms, value}]
+  cvd:     { type: Array,  default: () => [] },  // [{time_ms, value}]
+  groupId: { type: String, default: 'market' },  // must match KlineChart
 })
 
 const option = computed(() => {
@@ -23,6 +24,7 @@ const option = computed(() => {
   return {
     backgroundColor: '#131722',
     animation: false,
+    group: props.groupId,
     grid: { top: 8, left: 56, right: 8, bottom: 20 },
     tooltip: {
       trigger: 'axis',

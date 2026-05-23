@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from config.server import HOST, PORT, CORS_ORIGINS
-from server.routes import backtest, research, market, settings as settings_route
+from server.routes import backtest, research, market, pipeline, settings as settings_route
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +50,7 @@ app.add_middleware(
 app.include_router(backtest.router)
 app.include_router(research.router)
 app.include_router(market.router)
+app.include_router(pipeline.router)
 app.include_router(settings_route.router)
 
 

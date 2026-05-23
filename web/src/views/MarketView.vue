@@ -43,6 +43,18 @@
 
       <div class="h-4 w-px bg-border mx-1" />
 
+      <select v-model="store.footprintMode" class="select-field w-24 h-6 py-0 text-xs">
+        <option v-for="m in fpModes" :key="m" :value="m">{{ m }}</option>
+      </select>
+
+      <select v-model.number="store.tickMultiplier"
+              class="select-field w-16 h-6 py-0 text-xs"
+              @change="store.setTickMultiplier(store.tickMultiplier)">
+        <option v-for="m in store.tickMultipliers" :key="m" :value="m">{{ m }}x</option>
+      </select>
+
+      <div class="h-4 w-px bg-border mx-1" />
+
       <!-- Connect / Disconnect -->
       <button class="px-3 py-0.5 text-xs rounded border transition-colors"
               :class="store.status === 'connected'
@@ -105,6 +117,7 @@
         <div class="overflow-hidden" style="flex:2">
           <ObHeatmap
             :snapshots="store.hmSnapshots"
+            :trades="store.trades"
             :last-price="store.lastPrice ?? 0"
           />
         </div>
@@ -120,11 +133,17 @@
             <KlineChart
               v-if="activeTab === 'K 線'"
               :klines="store.klines"
+              group-id="market"
               class="w-full h-full"
+              @scroll-left="store.requestMoreHistory()"
             />
             <div v-else-if="activeTab === 'Footprint'"
-                 class="w-full h-full flex items-center justify-center text-dim text-sm">
-              Footprint — 需要 Tick 資料串流（開發中）
+                 class="w-full h-full">
+              <FootprintChart
+                :candles="store.footprints"
+                :mode="store.footprintMode"
+                :tick-size="store.footprintTickSize"
+              />
             </div>
             <div v-else
                  class="w-full h-full flex items-center justify-center text-dim text-sm">
@@ -133,10 +152,11 @@
           </KeepAlive>
         </div>
 
-        <!-- CVD Chart (flex 160) -->
+        <!-- CVD Chart (flex 160) — shares ECharts group for crosshair sync -->
         <div class="overflow-hidden border-t border-border" style="flex:160">
           <div class="text-[10px] text-dim px-1 pt-0.5 shrink-0">CVD</div>
-          <CvdChart :cvd="store.cvd" class="w-full" style="height: calc(100% - 16px)" />
+          <CvdChart :cvd="store.cvd" group-id="market"
+                    class="w-full" style="height: calc(100% - 16px)" />
         </div>
 
         <!-- Stats Panel (fixed 64px 對應 GUI setMaximumHeight(82)) -->
@@ -158,6 +178,7 @@ import { useMarketStore } from '@/stores/market.js'
 import { marketApi } from '@/api/client.js'
 
 import KlineChart    from '@/components/KlineChart.vue'
+import FootprintChart from '@/components/FootprintChart.vue'
 import CvdChart      from '@/components/CvdChart.vue'
 import OrderBookComp from '@/components/OrderBookComp.vue'
 import ObHeatmap     from '@/components/ObHeatmap.vue'
@@ -168,6 +189,7 @@ const symbols   = ref(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'])
 const intervals = ref(['1m', '3m', '5m', '15m', '30m', '1h', '4h'])
 const chartTabs = ['K 線', 'Footprint', '容量分析']
 const activeTab = ref('K 線')
+const fpModes = ['BidxAsk', 'Delta', 'Volume', 'Imbalance']
 
 // ── Computed ─────────────────────────────────────────────────────────────────
 let _prevClose = 0

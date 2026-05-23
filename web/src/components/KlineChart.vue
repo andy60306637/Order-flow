@@ -1,11 +1,12 @@
 <template>
-  <v-chart ref="chartRef" :option="option" autoresize class="w-full h-full" />
+  <v-chart ref="chartRef" :option="option" autoresize class="w-full h-full"
+           @datazoom="_onDataZoom" />
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import VChart from 'vue-echarts'
-import { use } from 'echarts/core'
+import { use, connect, disconnect } from 'echarts/core'
 import { CandlestickChart, BarChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, DataZoomComponent, AxisPointerComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -13,11 +14,30 @@ import { CanvasRenderer } from 'echarts/renderers'
 use([CandlestickChart, BarChart, GridComponent, TooltipComponent, DataZoomComponent, AxisPointerComponent, CanvasRenderer])
 
 const props = defineProps({
-  klines:  { type: Array, default: () => [] },
-  markers: { type: Array, default: () => [] },   // [{time_ms, side, label}]
+  klines:   { type: Array, default: () => [] },
+  markers:  { type: Array, default: () => [] },  // [{time_ms, side, label}]
+  groupId:  { type: String, default: 'market' }, // ECharts connect group
 })
 
+const emit = defineEmits(['scroll-left'])
+
 const chartRef = ref(null)
+
+// Join ECharts crosshair group on mount
+onMounted(() => {
+  if (chartRef.value?.chart) connect(props.groupId)
+})
+onUnmounted(() => {
+  if (chartRef.value?.chart) disconnect(props.groupId)
+})
+
+// Detect scroll to the left edge → request more history
+function _onDataZoom(params) {
+  const start = params?.batch?.[0]?.start ?? params?.start ?? null
+  if (start !== null && start <= 1) {
+    emit('scroll-left')
+  }
+}
 
 const option = computed(() => {
   const times  = props.klines.map(k => new Date(k.time_ms).toISOString().slice(0, 16).replace('T', '\n'))
@@ -30,6 +50,7 @@ const option = computed(() => {
   return {
     backgroundColor: '#131722',
     animation: false,
+    group: props.groupId,
     axisPointer: { link: [{ xAxisIndex: 'all' }] },
     tooltip: {
       trigger: 'axis',

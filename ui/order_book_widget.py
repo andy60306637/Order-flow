@@ -15,6 +15,7 @@ from PyQt6.QtGui import QColor, QPainter, QFont, QFontMetrics
 from PyQt6.QtWidgets import QWidget, QSizePolicy
 
 import config
+from ui.fonts import mono
 
 
 _COLOR_BID_BAR  = QColor(38,  166, 154, 55)   # 半透明綠
@@ -41,8 +42,8 @@ class OrderBookWidget(QWidget):
         )
         self.setAutoFillBackground(False)
 
-        self._font = QFont("Consolas", 9)
-        self._font_sm = QFont("Consolas", 8)
+        self._font = mono(9)
+        self._font_sm = mono(8)
 
     # ──────────────────────────────────────────────────────────────────────────
     def update_ob(

@@ -1,6 +1,11 @@
 # OrderFlow — Binance Futures Order Flow Analyzer
 
-A real-time order flow analysis desktop application for Binance USDT-M Futures, built with Python, PyQt6, and pyqtgraph.
+A real-time order flow analysis application for Binance USDT-M Futures.
+
+The project now supports two runtimes:
+
+- **Linux/Web server**: FastAPI + Vue 3, intended for access from other computers through a browser URL.
+- **Desktop GUI**: PyQt6 + pyqtgraph, kept for local operation and feature parity reference.
 
 ![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
 ![PyQt6](https://img.shields.io/badge/PyQt6-6.4%2B-green)
@@ -116,11 +121,28 @@ All data flows from worker threads to the main thread exclusively via Qt signals
 - Windows / macOS / Linux
 - Active internet connection (Binance Futures public API — no API key required)
 
-### Setup
+### Linux / Web Setup
 
 ```bash
 git clone https://github.com/andy60306637/Order-flow.git
 cd Order-flow
+./setup_linux.sh
+cd web && npm run build && cd ..
+.venv/bin/python server_main.py --host 0.0.0.0 --port 8000
+```
+
+Open `http://<server-ip>:8000` from another computer on the same network.
+
+For development, run the API and Vite separately:
+
+```bash
+.venv/bin/python server_main.py --host 0.0.0.0 --port 8000 --reload
+cd web && npm run dev -- --host 0.0.0.0
+```
+
+### Desktop GUI
+
+```bash
 pip install -r requirements.txt
 python main.py
 ```
@@ -137,6 +159,17 @@ pandas>=1.5.0   # optional but recommended — 10-50x faster zip parsing
 ```
 
 ---
+
+## Web Data Control
+
+The Web UI can inspect and control the active data root from **設定**. Backtest pages read available K-line and Tick coverage from the server-side data root. Tick CSV/ZIP files can be imported by entering a folder path that exists on the server.
+
+The server data root resolution order is:
+
+1. Runtime override set from the Web settings API.
+2. `ORDERFLOW_DATA_ROOT` environment variable.
+3. `.ui_settings.json` `data_root`.
+4. `data/` under the project root.
 
 ## Running the Pre-built Executable (Windows)
 

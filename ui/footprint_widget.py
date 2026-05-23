@@ -49,6 +49,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 
 import config
 from core.data_types import FootprintCandle
+from ui.fonts import mono_family
 
 
 # ── 顏色主題 ──────────────────────────────────────────────────────────────────
@@ -291,7 +292,7 @@ class FootprintItem(pg.GraphicsObject):
             tr = p.worldTransform()
             p.save()
             p.resetTransform()
-            font = QtGui.QFont("Consolas")
+            font = QtGui.QFont(mono_family())
             cur_fpx = -1
             for (dx, dy, dw, dh, align, text, color, fpx) in self._text_cmds:
                 if fpx != cur_fpx:

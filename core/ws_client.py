@@ -64,6 +64,7 @@ class WsClient:
         self._loading_more      = False
         self._rate_limit_wait: float = 0
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._live_bar: Optional[dict[str, Any]] = None
 
         # emit 來源：優先使用明確傳入的 emit，否則用 engine.emit
         if emit is not None:
@@ -135,6 +136,7 @@ class WsClient:
                     history = await self._fetch_history(session)
                     if history:
                         self._emit("history", history)
+                        self._seed_live_bar(history[-1])
 
                         n = config.FOOTPRINT_HISTORY_CANDLES
                         start_row = history[-min(n, len(history))]
@@ -242,6 +244,76 @@ class WsClient:
         except Exception as exc:
             logger.error("History fetch error: %s", exc)
         return []
+
+    def _interval_ms(self) -> int:
+        unit = self._interval[-1]
+        try:
+            value = int(self._interval[:-1])
+        except ValueError:
+            return 60_000
+        if unit == "m":
+            return value * 60_000
+        if unit == "h":
+            return value * 60 * 60_000
+        if unit == "d":
+            return value * 24 * 60 * 60_000
+        return 60_000
+
+    def _seed_live_bar(self, row: list) -> None:
+        try:
+            self._live_bar = {
+                "t": int(row[0]),
+                "T": int(row[6]),
+                "o": str(row[1]),
+                "h": str(row[2]),
+                "l": str(row[3]),
+                "c": str(row[4]),
+                "v": str(row[5]),
+                "x": False,
+            }
+        except (IndexError, TypeError, ValueError):
+            self._live_bar = None
+
+    def _synthetic_kline_from_trade(self, trade: dict) -> dict | None:
+        try:
+            price = float(trade.get("p", 0))
+            qty = float(trade.get("q", 0))
+            trade_time = int(trade.get("T") or trade.get("E") or time.time() * 1000)
+        except (TypeError, ValueError):
+            return None
+        if price <= 0:
+            return None
+
+        interval_ms = self._interval_ms()
+        open_time = (trade_time // interval_ms) * interval_ms
+        close_time = open_time + interval_ms - 1
+        bar = self._live_bar
+
+        if not bar or int(bar.get("t", 0)) != open_time:
+            bar = {
+                "t": open_time,
+                "T": close_time,
+                "o": f"{price:.12g}",
+                "h": f"{price:.12g}",
+                "l": f"{price:.12g}",
+                "c": f"{price:.12g}",
+                "v": f"{qty:.12g}",
+                "x": False,
+            }
+            self._live_bar = bar
+            return {"e": "kline", "E": trade_time, "s": self._symbol.upper(), "k": dict(bar)}
+
+        high = max(float(bar.get("h", price)), price)
+        low = min(float(bar.get("l", price)), price)
+        volume = max(0.0, float(bar.get("v", 0))) + max(0.0, qty)
+        bar.update({
+            "h": f"{high:.12g}",
+            "l": f"{low:.12g}",
+            "c": f"{price:.12g}",
+            "v": f"{volume:.12g}",
+            "x": False,
+        })
+        return {"e": "kline", "E": trade_time, "s": self._symbol.upper(), "k": dict(bar)}
 
     async def _load_more_history(self, end_time_ms: int) -> None:
         try:
@@ -504,7 +576,7 @@ class WsClient:
         sym = self._symbol
         iv  = self._interval
         streams = (
-            f"{sym}@aggTrade"
+            f"{sym}@trade"
             f"/{sym}@depth@100ms"
             f"/{sym}@kline_{iv}"
         )
@@ -549,8 +621,11 @@ class WsClient:
                     payload = msg.get("data", {})
                     event   = payload.get("e", "")
 
-                    if event == "aggTrade":
+                    if event in ("aggTrade", "trade"):
                         self._emit("trade", payload)
+                        synthetic = self._synthetic_kline_from_trade(payload)
+                        if synthetic:
+                            self._emit("kline", synthetic)
                     elif event == "kline":
                         self._emit("kline", payload)
                     elif event == "depthUpdate":

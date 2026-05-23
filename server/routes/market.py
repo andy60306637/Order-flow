@@ -17,11 +17,14 @@ router = APIRouter(tags=["market"])
 
 # symbol:interval → DataEngine instance
 _engines: dict[str, Any] = {}
+_engine_tasks: dict[str, asyncio.Task] = {}
 _engine_locks: dict[str, asyncio.Lock] = {}
 
 # State cache for late-joining clients
 _engine_klines: dict[str, list] = {}   # key → raw Binance REST kline rows
 _engine_ob: dict[str, dict] = {}       # key → {"bids": [[p,q],...], "asks": [[p,q],...]}
+_engine_exchange_info: dict[str, dict] = {}
+_engine_agg_history: dict[str, list] = {}
 
 
 # ── Serialisation ─────────────────────────────────────────────────────────────
@@ -62,6 +65,16 @@ async def _replay_state(ws: WebSocket, key: str) -> None:
                 {"type": "ob_snapshot", "data": _engine_ob[key]},
                 ensure_ascii=False,
             ))
+        if key in _engine_exchange_info:
+            await ws.send_text(json.dumps(
+                {"type": "exchange_info", "data": _engine_exchange_info[key]},
+                ensure_ascii=False,
+            ))
+        if key in _engine_agg_history:
+            await ws.send_text(json.dumps(
+                {"type": "agg_history", "data": _engine_agg_history[key]},
+                ensure_ascii=False,
+            ))
     except Exception as exc:
         logger.warning("_replay_state error for %s: %s", key, exc)
 
@@ -76,8 +89,11 @@ async def _get_or_create_engine(symbol: str, interval: str) -> Any:
         _engine_locks[key] = asyncio.Lock()
 
     async with _engine_locks[key]:
-        if key in _engines:
+        task = _engine_tasks.get(key)
+        if key in _engines and task and not task.done():
             return _engines[key]
+        if task and task.done():
+            _cleanup_finished_engine(key, task)
 
         engine = DataEngine(symbol, interval)
         loop = asyncio.get_event_loop()
@@ -104,6 +120,10 @@ async def _get_or_create_engine(symbol: str, interval: str) -> Any:
                 # Cache history for late-joiners
                 if event_type == "history":
                     _engine_klines[key] = safe
+                elif event_type == "exchange_info":
+                    _engine_exchange_info[key] = safe
+                elif event_type == "agg_history":
+                    _engine_agg_history[key] = safe
                 asyncio.run_coroutine_threadsafe(
                     ws_manager.broadcast(key, {"type": event_type, "data": safe}),
                     loop,
@@ -117,11 +137,32 @@ async def _get_or_create_engine(symbol: str, interval: str) -> Any:
                     "status", "exchange_info"):
             engine.on(evt, _make_broadcast(evt))
 
-        asyncio.ensure_future(engine.start())
+        task = asyncio.create_task(engine.start(), name=f"market-engine:{key}")
+        task.add_done_callback(lambda done_task, engine_key=key: _cleanup_finished_engine(engine_key, done_task))
         _engines[key] = engine
+        _engine_tasks[key] = task
         logger.info("DataEngine started for %s", key)
 
     return _engines[key]
+
+
+def _cleanup_finished_engine(key: str, task: asyncio.Task) -> None:
+    if not task.done():
+        return
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        logger.info("DataEngine cancelled for %s", key)
+    except Exception:
+        logger.exception("DataEngine crashed for %s", key)
+
+    if _engine_tasks.get(key) is task:
+        _engine_tasks.pop(key, None)
+        _engines.pop(key, None)
+        _engine_klines.pop(key, None)
+        _engine_ob.pop(key, None)
+        _engine_exchange_info.pop(key, None)
+        _engine_agg_history.pop(key, None)
 
 
 def _broadcast_ob(key: str, engine: Any, loop: asyncio.AbstractEventLoop) -> None:
@@ -172,5 +213,20 @@ async def market_ws(ws: WebSocket, symbol: str, interval: str) -> None:
             text = await ws.receive_text()
             if text == "ping":
                 await ws.send_text("pong")
+                continue
+            # Handle JSON messages from the client
+            try:
+                msg = json.loads(text)
+                if msg.get("type") == "more_history":
+                    end_time_ms = int(msg.get("end_time_ms", 0))
+                    engine = _engines.get(channel)
+                    if engine and end_time_ms > 0:
+                        loop = asyncio.get_event_loop()
+                        loop.run_in_executor(
+                            None,
+                            lambda: engine.request_more_history(end_time_ms),
+                        )
+            except (json.JSONDecodeError, ValueError):
+                pass
     except WebSocketDisconnect:
         ws_manager.disconnect(ws, channel)

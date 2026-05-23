@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
+from ui.fonts import mono, ui as ui_font
 from strategies import STRATEGY_REGISTRY
 from strategies.pipeline.strategy import MultiPipelineStrategy
 
@@ -203,11 +204,11 @@ class StageCard(QFrame):
         hr.setContentsMargins(10, 0, 10, 0)
 
         badge_lbl = QLabel(badge_text)
-        badge_lbl.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        badge_lbl.setFont(mono(8, bold=True))
         badge_lbl.setStyleSheet("color: rgba(255,255,255,160); background: transparent;")
 
         name_lbl = QLabel(getattr(stage, "name", type(stage).__name__))
-        name_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        name_lbl.setFont(ui_font(10, bold=True))
         name_lbl.setStyleSheet("color: #ffffff; background: transparent;")
         name_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
@@ -227,12 +228,12 @@ class StageCard(QFrame):
         if params:
             for line in params:
                 lbl = QLabel(line)
-                lbl.setFont(QFont("Consolas", 8))
+                lbl.setFont(mono(8))
                 lbl.setStyleSheet("color: #e0e0e0; background: transparent;")
                 bv.addWidget(lbl)
         else:
             lbl = QLabel("  (no scalar params)")
-            lbl.setFont(QFont("Consolas", 8))
+            lbl.setFont(mono(8))
             lbl.setStyleSheet("color: #757575; background: transparent;")
             bv.addWidget(lbl)
 
@@ -272,7 +273,7 @@ class PipelineStudio(QWidget):
         toolbar.addWidget(QLabel("策略:"))
         self._combo = QComboBox()
         self._combo.setMinimumWidth(300)
-        self._combo.setFont(QFont("Segoe UI", 10))
+        self._combo.setFont(ui_font(10))
         self._combo.currentIndexChanged.connect(self._on_strategy_changed)
         toolbar.addWidget(self._combo)
         toolbar.addStretch()
@@ -296,7 +297,7 @@ class PipelineStudio(QWidget):
         ov_grp = QGroupBox("Pipeline 概覽")
         ov_lay = QVBoxLayout(ov_grp)
         self._overview_lbl = QLabel()
-        self._overview_lbl.setFont(QFont("Consolas", 9))
+        self._overview_lbl.setFont(mono(9))
         self._overview_lbl.setWordWrap(True)
         self._overview_lbl.setAlignment(Qt.AlignmentFlag.AlignTop)
         ov_lay.addWidget(self._overview_lbl)
@@ -306,7 +307,7 @@ class PipelineStudio(QWidget):
         det_lay = QVBoxLayout(det_grp)
         self._detail = QTextEdit()
         self._detail.setReadOnly(True)
-        self._detail.setFont(QFont("Consolas", 9))
+        self._detail.setFont(mono(9))
         self._detail.setStyleSheet(
             "QTextEdit { background: #0d1117; color: #c9d1d9; border: none; }"
         )
@@ -386,7 +387,7 @@ class PipelineStudio(QWidget):
         for pi, pdef in enumerate(defs):
             if len(defs) > 1:
                 sep = QLabel(f"── {pdef.name} (weight={pdef.allocation_weight}) ──")
-                sep.setFont(QFont("Segoe UI", 9))
+                sep.setFont(ui_font(9))
                 sep.setStyleSheet(
                     "QLabel { color: #7986cb; margin: 10px 0 4px 0; background: transparent; }"
                 )
