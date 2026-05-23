@@ -28,17 +28,32 @@
         </div>
 
         <button class="config-row" @click="activeConfig = activeConfig === 'factors' ? '' : 'factors'">
-          <span>Factors...</span><em>{{ form.factor_names.length || '—' }}</em>
+          <span>Factors...</span><em>{{ form.factor_names.length || '—' }} / {{ factors.length }}</em>
         </button>
         <div v-if="activeConfig === 'factors'" class="picker factor-picker">
+          <div class="factor-filters">
+            <select v-model="factorSideFilter" class="select-field">
+              <option value="">All Directions</option>
+              <option value="long">Long</option>
+              <option value="short">Short</option>
+            </select>
+            <select v-model="factorGroupFilter" class="select-field">
+              <option value="">All Groups</option>
+              <option v-for="g in factorGroups" :key="g" :value="g">{{ g }}</option>
+            </select>
+          </div>
           <div class="mini-actions">
+            <button @click="checkVisibleFactors">Check Visible</button>
+            <button @click="clearVisibleFactors">Clear Visible</button>
             <button @click="selectAllFactors">All</button>
             <button @click="form.factor_names = []">Clear</button>
           </div>
           <button v-for="f in visibleFactors" :key="f.name"
                   :title="f.description"
                   :class="{ active: form.factor_names.includes(f.name) }"
-                  @click="toggleFactor(f.name)">{{ f.name }}</button>
+                  @click="toggleFactor(f.name)">
+            {{ f.name }}<span v-if="f.requires_ticks"> [tick]</span>
+          </button>
         </div>
 
         <button class="config-row" @click="activeConfig = activeConfig === 'params' ? '' : 'params'">
@@ -90,78 +105,112 @@
       </div>
       <div v-if="progress" class="hint">{{ progress }}</div>
       <div v-if="error" class="hint text-down">錯誤：{{ error }}</div>
+      <div v-if="result && resultStatus" class="hint text-up">{{ resultStatus }}</div>
     </aside>
 
     <main class="research-main">
       <nav class="tabs">
         <button v-for="t in tabs" :key="t" :class="{ active: activeTab === t }" @click="activeTab = t">{{ t }}</button>
       </nav>
+      <div class="result-toolbar">
+        <label>Regime</label>
+        <select v-model="activeRegime" class="select-field">
+          <option v-for="key in regimeKeys" :key="key" :value="key">{{ key }}</option>
+        </select>
+        <span v-if="selectedResult" class="text-dim">
+          rows={{ Number(selectedResult.rows || 0).toLocaleString() }}
+          · factors={{ selectedResult.summary?.length || 0 }}
+          · unavailable={{ selectedResult.unavailable?.length || 0 }}
+        </span>
+        <button class="btn-ghost compact-action" :disabled="!selectedResult" @click="exportSelectedCsv">Export CSV</button>
+      </div>
 
       <section class="tab-body">
         <div v-if="!selectedResult" class="empty-state">No research result loaded.</div>
 
         <template v-else-if="activeTab === 'Regime Matrix'">
+          <div class="matrix-toolbar">
+            <label>Metric</label>
+            <select v-model="matrixMetric" class="select-field">
+              <option v-for="opt in matrixMetricOptions" :key="opt.key" :value="opt.key">{{ opt.label }}</option>
+            </select>
+            <span class="text-dim">{{ regimeKeys.length }} regimes × {{ regimeMatrixRows.length }} factors</span>
+          </div>
           <table class="dense-table">
-            <thead><tr><th>Regime</th><th>Rows</th><th>Top Factor</th><th>Best IC</th><th>Best IR</th><th>Unavailable</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Factor</th>
+                <th v-for="key in regimeKeys" :key="key" @click="activeRegime = key">{{ displayRegimeKey(key) }}</th>
+              </tr>
+            </thead>
             <tbody>
-              <tr v-for="row in regimeRows" :key="row.key" @click="activeRegime = row.key" :class="{ selected: activeRegime === row.key }">
-                <td>{{ row.key }}</td><td>{{ row.rows }}</td><td>{{ row.factor }}</td>
-                <td :class="icColor(row.ic)">{{ fmtIC(row.ic) }}</td>
-                <td :class="icColor(row.ir)">{{ fmtIC(row.ir) }}</td><td>{{ row.unavailable }}</td>
+              <tr v-for="row in regimeMatrixRows" :key="row.factor">
+                <td>{{ row.factor }}</td>
+                <td v-for="key in regimeKeys" :key="key" :class="[icColor(row.values[key]?.value), { selected: activeRegime === key }]" @click="activeRegime = key">
+                  {{ fmtIC(row.values[key]?.value) }}
+                  <span class="cell-sample">n={{ Number(row.values[key]?.n || 0).toLocaleString() }}</span>
+                </td>
               </tr>
             </tbody>
           </table>
+          <div v-if="!regimeMatrixRows.length" class="empty-state compact">No matrix rows for this result.</div>
         </template>
 
         <template v-else-if="activeTab === 'Factor Ranking'">
-          <ResultTable :rows="selectedResult.summary" />
+          <ResultTable :rows="tabRows" />
         </template>
 
         <template v-else-if="activeTab === 'Orthogonal Ranking'">
-          <ResultTable :rows="selectedResult.orthogonal_summary || []" />
+          <ResultTable :rows="tabRows" />
         </template>
 
         <template v-else-if="activeTab === 'IC Time Series'">
           <svg viewBox="0 0 900 420" preserveAspectRatio="none" class="chart-svg">
+            <line v-for="g in [60, 140, 220, 300, 380]" :key="g" x1="34" :y1="g" x2="886" :y2="g" stroke="#2a2e3966" />
+            <line v-if="icTrainCutoffX != null" :x1="icTrainCutoffX" y1="20" :x2="icTrainCutoffX" y2="400" stroke="#ffca28" stroke-width="1" stroke-dasharray="5 4" />
             <path v-for="line in icLines" :key="line.key" :d="line.path" fill="none" :stroke="line.color" stroke-width="2" />
+            <text v-for="(line, i) in icLines" :key="'l' + line.key" :x="42 + (i % 4) * 190" :y="24 + Math.floor(i / 4) * 16" :fill="line.color" font-size="11">
+              {{ line.key }}
+            </text>
           </svg>
+          <div v-if="!icLines.length" class="empty-state compact">No IC time-series values for this result.</div>
         </template>
 
         <template v-else-if="activeTab === 'Visualization'">
           <div class="viz-grid">
             <div class="panel tight">
               <h2 class="panel-title">Monthly IC Heatmap</h2>
-              <GridHeatmap :rows="selectedResult.stability_monthly || []" row-key="factor" col-key="period" value-key="IC" />
+              <GridHeatmap :rows="selectedResult.stability_monthly || []" row-key="factor" col-key="period" value-key="rank_ic" />
             </div>
             <div class="panel tight">
               <h2 class="panel-title">Correlation Matrix</h2>
-              <GridHeatmap :rows="selectedResult.factor_correlations || []" row-key="factor_a" col-key="factor_b" value-key="corr" />
+              <GridHeatmap :rows="selectedResult.factor_correlations || []" row-key="factor_a" col-key="factor_b" value-key="spearman_oos" />
             </div>
           </div>
         </template>
 
         <template v-else-if="activeTab === 'IC by Horizon'">
-          <ResultTable :rows="selectedResult.metrics || []" />
+          <ResultTable :rows="tabRows" />
         </template>
 
         <template v-else-if="activeTab === 'Quantiles'">
-          <ResultTable :rows="selectedResult.quantiles || []" />
+          <ResultTable :rows="tabRows" />
         </template>
 
         <template v-else-if="activeTab === 'Monthly Stability'">
-          <ResultTable :rows="selectedResult.stability_monthly || []" />
+          <ResultTable :rows="tabRows" />
         </template>
 
         <template v-else-if="activeTab === 'Yearly Stability'">
-          <ResultTable :rows="selectedResult.stability_yearly || []" />
+          <ResultTable :rows="tabRows" />
         </template>
 
         <template v-else-if="activeTab === 'Factor Correlations'">
-          <ResultTable :rows="selectedResult.factor_correlations || []" />
+          <ResultTable :rows="tabRows" />
         </template>
 
         <template v-else-if="activeTab === 'Unavailable'">
-          <ResultTable :rows="selectedResult.unavailable || []" />
+          <ResultTable :rows="tabRows" />
         </template>
       </section>
     </main>
@@ -169,7 +218,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, h } from 'vue'
 import { researchApi, backtestApi, settingsApi } from '@/api/client.js'
 
 const ResultTable = {
@@ -191,26 +240,29 @@ const ResultTable = {
         : 'text-text'
     }
   },
-  template: `
-    <table class="dense-table">
-      <thead><tr><th v-for="c in cols" :key="c">{{ c }}</th></tr></thead>
-      <tbody>
-        <tr v-for="(row, i) in rows" :key="i">
-          <td v-for="c in cols" :key="c" :class="cls(row[c])">{{ fmt(row[c]) }}</td>
-        </tr>
-      </tbody>
-    </table>
-  `
+  render() {
+    const rows = Array.isArray(this.rows) ? this.rows : []
+    if (!rows.length) return h('div', { class: 'empty-state compact' }, 'No rows for selected regime.')
+    return h('table', { class: 'dense-table' }, [
+      h('thead', [
+        h('tr', this.cols.map(c => h('th', { key: c }, c))),
+      ]),
+      h('tbody', rows.map((row, i) => h('tr', { key: i }, this.cols.map(c => (
+        h('td', { key: c, class: this.cls(row?.[c]) }, this.fmt(row?.[c]))
+      ))))),
+    ])
+  }
 }
 
 const GridHeatmap = {
   props: { rows: Array, rowKey: String, colKey: String, valueKey: String },
   computed: {
-    rowLabels() { return [...new Set((this.rows || []).map(r => r[this.rowKey]).filter(Boolean))] },
-    colLabels() { return [...new Set((this.rows || []).map(r => r[this.colKey]).filter(Boolean))] },
+    safeRows() { return Array.isArray(this.rows) ? this.rows : [] },
+    rowLabels() { return [...new Set(this.safeRows.map(r => r[this.rowKey]).filter(Boolean))] },
+    colLabels() { return [...new Set(this.safeRows.map(r => r[this.colKey]).filter(Boolean))] },
     cells() {
-      const maxAbs = Math.max(1e-9, ...this.rows.map(r => Math.abs(Number(r[this.valueKey] || 0))))
-      return this.rows.map(r => ({
+      const maxAbs = Math.max(1e-9, ...this.safeRows.map(r => Math.abs(Number(r[this.valueKey] || 0))))
+      return this.safeRows.map(r => ({
         x: this.colLabels.indexOf(r[this.colKey]),
         y: this.rowLabels.indexOf(r[this.rowKey]),
         v: Number(r[this.valueKey] || 0),
@@ -221,17 +273,33 @@ const GridHeatmap = {
       }))
     }
   },
-  template: `
-    <div class="grid-heatmap" :style="{ gridTemplateColumns: '120px repeat(' + Math.max(1, colLabels.length) + ', minmax(34px, 1fr))' }">
-      <span></span><b v-for="c in colLabels" :key="c">{{ c }}</b>
-      <template v-for="r in rowLabels" :key="r">
-        <b>{{ r }}</b>
-        <span v-for="c in colLabels" :key="c" :style="{ background: (cells.find(x => x.key === r + ':' + c) || {}).color || '#151c2a' }">
-          {{ ((cells.find(x => x.key === r + ':' + c) || {}).v ?? 0).toFixed(3) }}
-        </span>
-      </template>
-    </div>
-  `
+  render() {
+    if (!this.safeRows.length) return h('div', { class: 'empty-state compact' }, 'No heatmap rows for selected regime.')
+    const cellMap = new Map(this.cells.map(cell => [cell.key, cell]))
+    const children = [
+      h('span'),
+      ...this.colLabels.map(c => h('b', { key: `h:${c}` }, c)),
+    ]
+    for (const r of this.rowLabels) {
+      children.push(h('b', { key: `r:${r}` }, r))
+      for (const c of this.colLabels) {
+        const cell = cellMap.get(`${r}:${c}`)
+        children.push(h(
+          'span',
+          { key: `${r}:${c}`, style: { background: cell?.color || '#151c2a' } },
+          Number(cell?.v || 0).toFixed(3),
+        ))
+      }
+    }
+    return h(
+      'div',
+      {
+        class: 'grid-heatmap',
+        style: { gridTemplateColumns: `120px repeat(${Math.max(1, this.colLabels.length)}, minmax(34px, 1fr))` },
+      },
+      children,
+    )
+  }
 }
 
 const tabs = [
@@ -242,7 +310,10 @@ const tabs = [
 const activeTab = ref('Regime Matrix')
 const activeConfig = ref('months')
 const activeRegime = ref('(all)')
+const matrixMetric = ref('oos_oriented_rank_ic')
 const factors = ref([])
+const factorSideFilter = ref('')
+const factorGroupFilter = ref('')
 const regimeOptions = ref({ modes: ['filter', 'matrix', 'cross_matrix'], dimensions: [], defaults: {} })
 const running = ref(false)
 const progress = ref('')
@@ -269,25 +340,86 @@ const form = ref({
   },
 })
 
-const visibleFactors = computed(() => factors.value)
+const factorNameSet = computed(() => new Set(factors.value.map(f => f.name)))
+const factorGroups = computed(() => [...new Set(factors.value.map(f => f.group).filter(Boolean))])
+const visibleFactors = computed(() => factors.value.filter(f => {
+  if (factorSideFilter.value && !(f.sides || []).includes(factorSideFilter.value)) return false
+  if (factorGroupFilter.value && f.group !== factorGroupFilter.value) return false
+  return true
+}))
 const selectedResult = computed(() => {
   if (!result.value) return null
-  return result.value[activeRegime.value] || Object.values(result.value)[0] || null
+  if (isSingleResult(result.value)) return result.value
+  return result.value[activeRegime.value] || Object.values(result.value).find(v => isSingleResult(v)) || null
+})
+const resultStatus = computed(() => {
+  if (!result.value) return ''
+  const regimes = isSingleResult(result.value) ? 1 : Object.keys(result.value).length
+  const rows = Object.values(normalizeResultPayload(result.value)).reduce((sum, res) => sum + Number(res.rows || 0), 0)
+  const factorsN = selectedResult.value?.summary?.length || 0
+  return `Done | ${regimes} regime${regimes > 1 ? 's' : ''} | rows=${rows.toLocaleString()} | factors=${factorsN}`
 })
 const regimeRows = computed(() => {
   if (!result.value) return []
   return Object.entries(result.value).map(([key, res]) => {
     const top = (res.summary || [])[0] || {}
-    const h = resultHorizons(res)[0]
     return {
       key,
       rows: res.rows || 0,
       factor: top.factor || '—',
-      ic: h ? top[`IC_h${h}`] : null,
-      ir: h ? top[`IR_h${h}`] : null,
+      ic: top.oos_oriented_rank_ic ?? top.oos_best_rank_ic ?? top.oriented_rank_ic ?? top.best_rank_ic,
+      ir: top.oos_oriented_ic_ir ?? top.oos_ic_ir ?? top.oriented_ic_ir ?? top.ic_ir,
       unavailable: (res.unavailable || []).length,
     }
   })
+})
+const regimeKeys = computed(() => Object.keys(normalizeResultPayload(result.value)))
+const matrixMetricOptions = [
+  { label: 'OOS Rank IC', key: 'oos_oriented_rank_ic', nKey: 'oos_sample_count' },
+  { label: 'OOS IC IR', key: 'oos_oriented_ic_ir', nKey: 'oos_sample_count' },
+  { label: 'OOS t-stat', key: 'oos_oriented_ic_t_stat', nKey: 'oos_sample_count' },
+  { label: 'IS Rank IC', key: 'oriented_rank_ic', nKey: 'sample_count' },
+  { label: 'IS IC IR', key: 'oriented_ic_ir', nKey: 'sample_count' },
+]
+const regimeMatrixRows = computed(() => {
+  const normalized = normalizeResultPayload(result.value)
+  const factorNames = []
+  const seen = new Set()
+  for (const key of regimeKeys.value) {
+    for (const row of normalized[key]?.summary || []) {
+      if (row?.factor && !seen.has(row.factor)) {
+        seen.add(row.factor)
+        factorNames.push(row.factor)
+      }
+    }
+  }
+  const opt = matrixMetricOptions.find(o => o.key === matrixMetric.value) || matrixMetricOptions[0]
+  return factorNames.map(factor => {
+    const values = {}
+    for (const key of regimeKeys.value) {
+      const row = (normalized[key]?.summary || []).find(r => r.factor === factor) || {}
+      values[key] = {
+        value: Number.isFinite(Number(row[opt.key])) ? Number(row[opt.key]) : null,
+        n: row[opt.nKey] || 0,
+      }
+    }
+    return { factor, values }
+  })
+})
+const tabRows = computed(() => {
+  const res = selectedResult.value
+  if (!res) return []
+  const key = {
+    'Factor Ranking': 'summary',
+    'Orthogonal Ranking': 'orthogonal_summary',
+    'IC by Horizon': 'metrics',
+    'Quantiles': 'quantiles',
+    'Monthly Stability': 'stability_monthly',
+    'Yearly Stability': 'stability_yearly',
+    'Factor Correlations': 'factor_correlations',
+    'Unavailable': 'unavailable',
+  }[activeTab.value]
+  return key ? (res[key] || []) : []
 })
 const regimeSummary = computed(() => {
   const active = (form.value.regime_filter.dimensions || []).filter(d => d.enabled && d.selected_labels.length)
@@ -316,13 +448,22 @@ const availableIntervals = computed(() => klineRecords.value.length
 
 const icLines = computed(() => {
   const ts = selectedResult.value?.timeseries_ic || {}
-  const entries = Object.entries(ts).slice(0, 8)
+  const entries = Object.entries(ts.factors || {}).slice(0, 8)
   const colors = ['#26a69a', '#ef5350', '#42a5f5', '#ffca28', '#ab47bc', '#66bb6a', '#ff7043', '#8d6e63']
   return entries.map(([key, arr], idx) => ({
     key,
     color: colors[idx % colors.length],
     path: seriesPath(Array.isArray(arr) ? arr.map(pointValue) : [], 900, 420),
   }))
+})
+const icTrainCutoffX = computed(() => {
+  const ts = selectedResult.value?.timeseries_ic || {}
+  const timestamps = ts.timestamps || []
+  const cutoff = Number(ts.train_cutoff_ts || 0)
+  if (!timestamps.length || !cutoff) return null
+  let idx = timestamps.findIndex(t => Number(t) >= cutoff)
+  if (idx < 0) idx = timestamps.length - 1
+  return 20 + idx * (860 / Math.max(1, timestamps.length - 1))
 })
 
 watch(() => form.value.symbol, () => {
@@ -332,6 +473,9 @@ watch(() => form.value.symbol, () => {
 })
 watch(form, scheduleSaveSettings, { deep: true })
 watch(horizonsInput, scheduleSaveSettings)
+watch(factorSideFilter, scheduleSaveSettings)
+watch(factorGroupFilter, scheduleSaveSettings)
+watch(regimeKeys, selectInitialRegime)
 
 function toggleMonth(m) {
   const i = form.value.selected_months.indexOf(m)
@@ -344,6 +488,15 @@ function toggleFactor(name) {
   else form.value.factor_names.push(name)
 }
 function selectAllFactors() { form.value.factor_names = factors.value.map(f => f.name) }
+function checkVisibleFactors() {
+  const set = new Set(form.value.factor_names)
+  for (const f of visibleFactors.value) set.add(f.name)
+  form.value.factor_names = [...set].filter(name => factorNameSet.value.has(name))
+}
+function clearVisibleFactors() {
+  const visible = new Set(visibleFactors.value.map(f => f.name))
+  form.value.factor_names = form.value.factor_names.filter(name => !visible.has(name))
+}
 function ensureRegimeDimensions() {
   const current = new Map((form.value.regime_filter.dimensions || []).map(d => [d.dimension, d]))
   form.value.regime_filter.dimensions = (regimeOptions.value.dimensions || []).map(dim => {
@@ -382,6 +535,8 @@ function researchSettingsPayload() {
     entry_lag: form.value.entry_lag,
     train_ratio: form.value.train_ratio,
     factors: form.value.factor_names,
+    factor_side_filter: factorSideFilter.value,
+    factor_group_filter: factorGroupFilter.value,
     selected_months: form.value.selected_months,
     regime_filter: form.value.regime_filter,
   }
@@ -400,7 +555,7 @@ function restoreResearchSettings(saved) {
   Object.assign(form.value, {
     symbol: saved.symbol ?? form.value.symbol,
     interval: saved.interval ?? form.value.interval,
-    selected_months: Array.isArray(saved.selected_months) ? saved.selected_months : form.value.selected_months,
+    selected_months: Array.isArray(saved.selected_months) && saved.selected_months.length ? saved.selected_months : form.value.selected_months,
     factor_names: Array.isArray(saved.factors) ? saved.factors : (Array.isArray(saved.factor_names) ? saved.factor_names : form.value.factor_names),
     quantiles: saved.quantiles ?? form.value.quantiles,
     entry_lag: saved.entry_lag ?? form.value.entry_lag,
@@ -409,10 +564,8 @@ function restoreResearchSettings(saved) {
     regime_filter: saved.regime_filter ?? form.value.regime_filter,
   })
   horizonsInput.value = saved.horizons ?? horizonsInput.value
-}
-function resultHorizons(res) {
-  if (!res?.summary?.length) return []
-  return Object.keys(res.summary[0]).filter(k => k.startsWith('IC_h')).map(k => parseInt(k.replace('IC_h', ''))).sort((a, b) => a - b)
+  factorSideFilter.value = saved.factor_side_filter ?? factorSideFilter.value
+  factorGroupFilter.value = saved.factor_group_filter ?? factorGroupFilter.value
 }
 function fmtIC(v) { return typeof v === 'number' ? v.toFixed(4) : '—' }
 function icColor(v) {
@@ -437,18 +590,67 @@ function seriesPath(vals, w, h) {
     return `${i ? 'L' : 'M'}${x} ${y}`
   }).join(' ')
 }
+function isSingleResult(value) {
+  return !!value && typeof value === 'object' && Array.isArray(value.summary) && Array.isArray(value.metrics)
+}
+function normalizeResultPayload(value) {
+  if (!value || typeof value !== 'object') return {}
+  if (isSingleResult(value)) return { '(all)': value }
+  const out = {}
+  for (const [key, res] of Object.entries(value)) {
+    if (isSingleResult(res)) out[key] = res
+  }
+  return out
+}
+function normalizedRegimeFilter() {
+  const rf = form.value.regime_filter
+  const active = (rf?.dimensions || []).some(d => d.enabled && d.selected_labels?.length)
+  return active ? rf : null
+}
+function validSelectedFactors() {
+  return form.value.factor_names.filter(name => factorNameSet.value.has(name))
+}
+function selectInitialRegime() {
+  const normalized = normalizeResultPayload(result.value)
+  const keys = Object.keys(normalized)
+  if (!keys.length) {
+    activeRegime.value = '(all)'
+    return
+  }
+  if (normalized[activeRegime.value]) return
+  activeRegime.value = keys.find(key => {
+    const res = normalized[key]
+    return (res.summary || []).length || (res.metrics || []).length || (res.quantiles || []).length
+  }) || keys[0]
+}
+function displayRegimeKey(key) {
+  return key.split('+').map(part => {
+    const [dim, label] = part.split('=')
+    const short = { session: 'Sess', market_vol: 'MktVol', vwap_zone: 'VWAP', vol_profile: 'VP' }[dim] || dim
+    return label ? `${short}: ${label}` : part
+  }).join(' × ')
+}
 
 async function runResearch() {
   if (running.value) return
   if (!form.value.selected_months.length) { error.value = '請先選擇月份'; return }
-  if (!form.value.factor_names.length) { error.value = '請先選擇因子'; return }
+  const factor_names = validSelectedFactors()
+  if (!factor_names.length) { error.value = '請先選擇有效因子；目前選到的因子已不存在於 registry。'; return }
+  if (factor_names.length !== form.value.factor_names.length) {
+    form.value.factor_names = factor_names
+  }
   running.value = true
   error.value = ''
   progress.value = 'Submitting research job...'
   result.value = null
   try {
     const horizons = horizonsInput.value.split(',').map(Number).filter(Boolean)
-    const { data } = await researchApi.run({ ...form.value, horizons })
+    const { data } = await researchApi.run({
+      ...form.value,
+      factor_names,
+      horizons,
+      regime_filter: normalizedRegimeFilter(),
+    })
     await pollJob(data.job_id)
   } catch (e) {
     error.value = e.message
@@ -461,8 +663,8 @@ async function pollJob(jobId) {
     const { data } = await researchApi.getJob(jobId)
     progress.value = data.progress || ''
     if (data.status === 'done') {
-      result.value = data.result
-      activeRegime.value = Object.keys(data.result || {})[0] || '(all)'
+      result.value = normalizeResultPayload(data.result)
+      selectInitialRegime()
       running.value = false
       progress.value = ''
       return
@@ -484,11 +686,57 @@ function exportJson() {
   a.click()
   URL.revokeObjectURL(url)
 }
+function downloadText(filename, content, type = 'text/plain') {
+  const blob = new Blob([content], { type })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+function csvEscape(value) {
+  if (value == null) return ''
+  const s = typeof value === 'object' ? JSON.stringify(value) : String(value)
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+function rowsToCsv(rows) {
+  if (!rows?.length) return ''
+  const cols = [...new Set(rows.flatMap(row => Object.keys(row || {})))]
+  return [cols.join(','), ...rows.map(row => cols.map(c => csvEscape(row[c])).join(','))].join('\n')
+}
+function exportSelectedCsv() {
+  if (!selectedResult.value) return
+  const rows = activeTab.value === 'Regime Matrix'
+    ? regimeMatrixRows.value.map(row => {
+        const out = { factor: row.factor }
+        for (const key of regimeKeys.value) {
+          out[key] = row.values[key]?.value
+          out[`${key}_n`] = row.values[key]?.n
+        }
+        return out
+      })
+    : (selectedResult.value[{
+        'Factor Ranking': 'summary',
+        'Orthogonal Ranking': 'orthogonal_summary',
+        'IC by Horizon': 'metrics',
+        'Quantiles': 'quantiles',
+        'Monthly Stability': 'stability_monthly',
+        'Yearly Stability': 'stability_yearly',
+        'Factor Correlations': 'factor_correlations',
+        'Unavailable': 'unavailable',
+      }[activeTab.value]] || selectedResult.value.summary || [])
+  const csv = rowsToCsv(rows)
+  if (!csv) return
+  const regime = activeRegime.value.replace(/[^a-zA-Z0-9_-]+/g, '_')
+  const tab = activeTab.value.replace(/[^a-zA-Z0-9_-]+/g, '_')
+  downloadText(`research-${form.value.symbol}-${form.value.interval}-${regime}-${tab}.csv`, csv, 'text/csv')
+}
 async function importJson(ev) {
   const file = ev.target.files?.[0]
   if (!file) return
-  result.value = JSON.parse(await file.text())
-  activeRegime.value = Object.keys(result.value || {})[0] || '(all)'
+  result.value = normalizeResultPayload(JSON.parse(await file.text()))
+  selectInitialRegime()
   ev.target.value = ''
 }
 
@@ -508,6 +756,10 @@ onMounted(async () => {
     if (availableSymbols.value.length) form.value.symbol = availableSymbols.value[0]
     form.value.selected_months = availableMonths.value.slice(-3)
     restoreResearchSettings(settings.data?.research_lab_config)
+    form.value.factor_names = form.value.factor_names.filter(name => factorNameSet.value.has(name))
+    if (!form.value.factor_names.length && factors.value.length) {
+      form.value.factor_names = factors.value.slice(0, 24).map(f => f.name)
+    }
     ensureRegimeDimensions()
     if (!availableIntervals.value.includes(form.value.interval) && availableIntervals.value.length) {
       form.value.interval = availableIntervals.value[0]
@@ -523,7 +775,7 @@ onMounted(async () => {
 <style scoped>
 .research-root { height: calc(100vh - 44px); display: grid; grid-template-columns: 340px minmax(0, 1fr); overflow: hidden; }
 .research-sidebar { border-right: 1px solid #263245; padding: 8px; overflow-y: auto; background: #101621; }
-.research-main { min-width: 0; display: grid; grid-template-rows: 38px minmax(0, 1fr); overflow: hidden; }
+.research-main { min-width: 0; display: grid; grid-template-rows: 38px 34px minmax(0, 1fr); overflow: hidden; }
 .panel { background: #151c2a; border: 1px solid #263245; border-radius: 6px; padding: 10px; margin-bottom: 8px; min-width: 0; }
 .panel.tight { margin: 0; height: 100%; overflow: auto; }
 .panel-title { color: #8fe7d8; font-size: 12px; font-weight: 700; margin-bottom: 8px; }
@@ -536,6 +788,8 @@ onMounted(async () => {
 .disabled-row { opacity: 0.75; }
 .picker { display: flex; flex-wrap: wrap; gap: 4px; max-height: 160px; overflow: auto; margin: 0 0 8px; padding: 4px; border: 1px solid #263245; background: #101621; }
 .factor-picker { max-height: 220px; }
+.factor-filters { width: 100%; display: grid; grid-template-columns: 1fr; gap: 4px; }
+.factor-filters .select-field { width: 100%; height: 28px; font-size: 11px; padding: 2px 6px; }
 .compact-picker { max-height: 86px; }
 .compact-picker.muted { opacity: 0.45; }
 .picker button, .mini-actions button { font-size: 10px; border: 1px solid #334058; color: #8f96a8; padding: 2px 6px; border-radius: 4px; }
@@ -553,13 +807,21 @@ onMounted(async () => {
 .tabs { display: flex; overflow-x: auto; background: #151c2a; border-bottom: 1px solid #263245; }
 .tabs button { color: #8f96a8; border-right: 1px solid #263245; padding: 0 12px; font-size: 12px; white-space: nowrap; }
 .tabs button.active { color: #f2f5f9; background: #20283a; border-top: 2px solid #26a69a; }
+.result-toolbar { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: #101621; border-bottom: 1px solid #263245; font-size: 11px; color: #8f96a8; }
+.result-toolbar .select-field { width: 240px; height: 24px; padding: 1px 6px; font-size: 11px; }
+.compact-action { margin-left: auto; padding: 2px 8px; font-size: 11px; }
 .tab-body { min-height: 0; overflow: auto; padding: 8px; }
 .empty-state { height: 100%; display: grid; place-items: center; color: #8f96a8; }
+.empty-state.compact { height: auto; min-height: 80px; }
+.matrix-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: #8f96a8; font-size: 11px; }
+.matrix-toolbar .select-field { width: 150px; height: 26px; padding: 2px 6px; font-size: 11px; }
 .dense-table { width: 100%; border-collapse: collapse; font-size: 11px; }
 .dense-table th { color: #aab3c2; background: #182132; position: sticky; top: 0; z-index: 1; }
 .dense-table th, .dense-table td { padding: 5px 7px; border: 1px solid #263245; text-align: right; white-space: nowrap; }
 .dense-table th:first-child, .dense-table td:first-child { text-align: left; }
 .dense-table tr.selected { background: #23423f; }
+.dense-table td.selected { background: #23423f; }
+.cell-sample { display: block; margin-top: 2px; color: #6f7888; font-size: 10px; }
 .chart-svg { width: 100%; height: 100%; min-height: 360px; background: #131722; border: 1px solid #263245; }
 .viz-grid { height: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .grid-heatmap { display: grid; gap: 1px; font-size: 10px; min-width: 520px; }
