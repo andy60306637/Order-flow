@@ -714,23 +714,35 @@ async function openSnapshot(idx) {
 }
 
 async function pollJob(jobId, api) {
+  let consecutiveErrors = 0
   while (true) {
     await new Promise(r => setTimeout(r, 1500))
-    const { data } = await api.getJob(jobId)
-    progress.value = data.progress || ''
-    if (data.status === 'done') {
-      stats.value = data.result
-      running.value = false
-      progress.value = ''
-      currentJobId.value = jobId
-      scheduleSaveSettings()
-      return
-    }
-    if (data.status === 'error') {
-      error.value = data.error
-      running.value = false
-      progress.value = ''
-      return
+    try {
+      const { data } = await api.getJob(jobId)
+      consecutiveErrors = 0
+      progress.value = data.progress || ''
+      if (data.status === 'done') {
+        stats.value = data.result
+        running.value = false
+        progress.value = ''
+        currentJobId.value = jobId
+        scheduleSaveSettings()
+        return
+      }
+      if (data.status === 'error') {
+        error.value = data.error
+        running.value = false
+        progress.value = ''
+        return
+      }
+    } catch (e) {
+      consecutiveErrors++
+      if (consecutiveErrors >= 10) {
+        error.value = e.message
+        running.value = false
+        return
+      }
+      progress.value = `Polling... (retry ${consecutiveErrors})`
     }
   }
 }

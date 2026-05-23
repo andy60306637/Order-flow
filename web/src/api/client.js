@@ -13,7 +13,7 @@ export const backtestApi = {
   importTicks:   (payload) => api.post('/api/backtest/tick-cache/import', payload),
   clearTicks:    (symbol)  => api.delete(`/api/backtest/tick-cache/${symbol}`),
   run:           (payload) => api.post('/api/backtest/run', payload),
-  getJob:        (jobId)   => api.get(`/api/backtest/jobs/${jobId}`),
+  getJob:        (jobId)   => api.get(`/api/backtest/jobs/${jobId}`, { timeout: 0 }),
   exportUrl:     (jobId)   => `/api/backtest/jobs/${jobId}/export.xlsx`,
   snapshot:      (jobId, tradeIdx) => api.get(`/api/backtest/jobs/${jobId}/snapshots/${tradeIdx}`),
   listJobs:      ()        => api.get('/api/backtest/jobs'),
@@ -24,7 +24,7 @@ export const researchApi = {
   factors:    (tick=true)  => api.get('/api/research/factors', { params: { include_tick: tick } }),
   regimeOptions: ()        => api.get('/api/research/regime-options'),
   run:        (payload)    => api.post('/api/research/run', payload),
-  getJob:     (jobId)      => api.get(`/api/research/jobs/${jobId}`),
+  getJob:     (jobId)      => api.get(`/api/research/jobs/${jobId}`, { timeout: 0 }),
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────

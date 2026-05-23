@@ -658,22 +658,34 @@ async function runResearch() {
   }
 }
 async function pollJob(jobId) {
+  let consecutiveErrors = 0
   while (true) {
     await new Promise(r => setTimeout(r, 2000))
-    const { data } = await researchApi.getJob(jobId)
-    progress.value = data.progress || ''
-    if (data.status === 'done') {
-      result.value = normalizeResultPayload(data.result)
-      selectInitialRegime()
-      running.value = false
-      progress.value = ''
-      return
-    }
-    if (data.status === 'error') {
-      error.value = data.error
-      running.value = false
-      progress.value = ''
-      return
+    try {
+      const { data } = await researchApi.getJob(jobId)
+      consecutiveErrors = 0
+      progress.value = data.progress || ''
+      if (data.status === 'done') {
+        result.value = normalizeResultPayload(data.result)
+        selectInitialRegime()
+        running.value = false
+        progress.value = ''
+        return
+      }
+      if (data.status === 'error') {
+        error.value = data.error
+        running.value = false
+        progress.value = ''
+        return
+      }
+    } catch (e) {
+      consecutiveErrors++
+      if (consecutiveErrors >= 10) {
+        error.value = e.message
+        running.value = false
+        return
+      }
+      progress.value = `Polling... (retry ${consecutiveErrors})`
     }
   }
 }

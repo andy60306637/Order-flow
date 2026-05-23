@@ -508,7 +508,7 @@ def build_ny_cvd_divergence_mr_pipeline(
     return TradingPipeline([
         PositionGateStage(max_positions=max_positions),
         RegimeStage(
-            components = [mv_comp, vwap_comp, vp_comp, session_comp],
+            components = [session_comp, mv_comp, vwap_comp, vp_comp],
             allowed    = {
                 "market_vol_regime": list(_market_vols),
                 "vwap_dev":          list(_vwap_zones),
