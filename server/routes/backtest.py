@@ -60,17 +60,35 @@ def _scan_available_klines() -> list[dict]:
 
 
 def _scan_tick_coverage() -> list[dict]:
-    """Return tick shard coverage from the active BTCUSDT_shards.json."""
+    """Return aggregated tick shard coverage from all active shard aliases."""
     from core import tick_cache
+    from backtest.time_slice import TimeSliceManager, discover_tick_sources
+
     results: list[dict] = []
     for sym in SYMBOLS:
-        info = tick_cache.info(sym)
-        if info is not None:
+        sources = discover_tick_sources(sym)
+        ranges: list[tuple[int, int]] = []
+        months: set[str] = set()
+        shard_parts = 0
+        for source in sources:
+            info = tick_cache.info(source)
+            if info is None:
+                continue
+            ranges.append((int(info["start_ms"]), int(info["end_ms"])))
+            mgr = TimeSliceManager(source)
+            for shard in mgr.available_shards():
+                if shard.available:
+                    months.add(shard.month_key)
+                    shard_parts += 1
+        if ranges:
             results.append({
-                "symbol":   sym,
-                "start_ms": info["start_ms"],
-                "end_ms":   info["end_ms"],
-                "source":   info.get("source", "unknown"),
+                "symbol":      sym,
+                "start_ms":    min(start for start, _ in ranges),
+                "end_ms":      max(end for _, end in ranges),
+                "source":      "shards",
+                "shard_sets":  len([s for s in sources if tick_cache.info(s) is not None]),
+                "shard_parts": shard_parts,
+                "months":      sorted(months),
             })
     return results
 
@@ -133,7 +151,22 @@ def _month_segments(month_keys: list[str]) -> list[tuple[int, int]]:
 
 
 def _request_slices(req: BacktestRequest) -> list[TimeSlice] | list[tuple[TimeSlice, TimeSlice]]:
-    from backtest.time_slice import TimeSliceManager, WalkForwardConfig
+    from backtest.time_slice import (
+        TimeSliceManager,
+        WalkForwardConfig,
+        build_tick_source_range_slice,
+        build_tick_source_slice,
+        build_tick_source_walk_forward,
+        tick_source_segments,
+    )
+
+    tick_source = req.tick_symbol or req.symbol
+
+    if req.use_tick_mode and req.slice_mode == "multi_select" and req.selected_months:
+        sl = build_tick_source_slice(tick_source, req.selected_months, label="Custom")
+        if not sl.segments:
+            raise ValueError("No tick shards found for the selected months.")
+        return [sl]
 
     if req.slice_mode == "multi_select" and req.selected_months:
         segments = _month_segments(req.selected_months)
@@ -141,16 +174,44 @@ def _request_slices(req: BacktestRequest) -> list[TimeSlice] | list[tuple[TimeSl
             return [TimeSlice(label="Custom", segments=segments)]
 
     if req.slice_mode == "walk_forward":
+        cfg = WalkForwardConfig(
+            n_segments=max(2, req.wf_segments),
+            oos_fraction=min(0.5, max(0.1, req.wf_oos_fraction)),
+            anchored=req.wf_anchored,
+        )
+        if req.use_tick_mode:
+            if req.selected_months:
+                source_segments = tick_source_segments(tick_source, month_keys=req.selected_months)
+                start_ms = None
+                end_ms = None
+            else:
+                source_segments = tick_source_segments(tick_source, start_ms=req.start_ms, end_ms=req.end_ms)
+                start_ms = req.start_ms
+                end_ms = req.end_ms
+            if not source_segments:
+                raise ValueError("No tick shards found for the selected walk-forward range.")
+            slices = build_tick_source_walk_forward(
+                source_segments,
+                cfg,
+                start_ms=start_ms,
+                end_ms=end_ms,
+            )
+            if not slices:
+                raise ValueError("Unable to build walk-forward slices from the selected tick shards.")
+            return slices
+
         mgr = TimeSliceManager(req.tick_symbol or req.symbol)
         return mgr.build_walk_forward(
             req.start_ms,
             req.end_ms,
-            WalkForwardConfig(
-                n_segments=max(2, req.wf_segments),
-                oos_fraction=min(0.5, max(0.1, req.wf_oos_fraction)),
-                anchored=req.wf_anchored,
-            ),
+            cfg,
         )
+
+    if req.use_tick_mode:
+        sl = build_tick_source_range_slice(tick_source, req.start_ms, req.end_ms, label="api_range")
+        if not sl.segments:
+            raise ValueError("No tick shards found for the requested range.")
+        return [sl]
 
     return [TimeSlice(label="api_range", segments=[(req.start_ms, req.end_ms)])]
 

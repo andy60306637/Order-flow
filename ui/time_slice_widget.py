@@ -1,9 +1,6 @@
 """Shard month selector and walk-forward slice builder."""
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -21,27 +18,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from backtest.time_slice import TimeSlice, WalkForwardConfig
-from core import tick_cache
+from backtest.time_slice import TimeSlice, WalkForwardConfig, discover_tick_sources
 
 
 SourceSegment = tuple[int, int, str]
-
-
-def discover_tick_sources(symbol: str) -> list[str]:
-    """Return the base symbol plus all date-ranged shard aliases."""
-    symbol = symbol.upper()
-    datasets: list[str] = []
-    if tick_cache.load_meta(symbol) is not None:
-        datasets.append(symbol)
-
-    tick_dir = Path(__file__).resolve().parent.parent / "data" / "ticks"
-    alias_re = re.compile(rf"^{re.escape(symbol)}_\d{{8}}_\d{{8}}$")
-    for path in sorted(tick_dir.glob(f"{symbol}_*_shards.json")):
-        alias = path.name.removesuffix("_shards.json")
-        if alias_re.match(alias) and tick_cache.load_meta(alias) is not None:
-            datasets.append(alias)
-    return datasets or [symbol]
 
 
 class ShardCalendarWidget(QWidget):

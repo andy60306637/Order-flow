@@ -327,7 +327,7 @@ const klineRange = computed(() => {
   return rec ? { start: msToDate(rec.start_ms), end: msToDate(rec.end_ms), count: rec.count } : null
 })
 const tickRange = computed(() => tickCoverage.value.find(t => t.symbol === form.value.symbol) || null)
-const availableMonths = computed(() => {
+const klineMonths = computed(() => {
   const rec = klineRecords.value.find(r => r.symbol === form.value.symbol && r.interval === form.value.interval)
   if (!rec) return []
   const months = []
@@ -339,6 +339,13 @@ const availableMonths = computed(() => {
     cur.setUTCMonth(cur.getUTCMonth() + 1)
   }
   return months
+})
+const tickMonths = computed(() => {
+  const rec = tickCoverage.value.find(t => t.symbol === form.value.symbol)
+  return Array.isArray(rec?.months) ? rec.months : []
+})
+const availableMonths = computed(() => {
+  return form.value.use_tick_mode ? tickMonths.value : klineMonths.value
 })
 const sliceSummary = computed(() => {
   if (form.value.slice_mode === 'range') return 'Single range from Start to End.'
@@ -584,10 +591,15 @@ watch(() => form.value.symbol, () => {
   const avail = availableIntervals.value
   if (!avail.includes(form.value.interval) && avail.length) form.value.interval = avail[0]
   applyKlineRangeDefaults()
+  sanitizeSelectedMonths()
 })
 watch(() => form.value.interval, () => {
-  if (!restoringSettings) applyKlineRangeDefaults()
+  if (!restoringSettings) {
+    applyKlineRangeDefaults()
+    sanitizeSelectedMonths()
+  }
 })
+watch(() => form.value.use_tick_mode, () => sanitizeSelectedMonths())
 watch(form, scheduleSaveSettings, { deep: true })
 watch(tickImportFolder, scheduleSaveSettings)
 watch(currentJobId, scheduleSaveSettings)
@@ -598,6 +610,14 @@ function applyKlineRangeDefaults(force = true) {
   if (force || !form.value.start_date) form.value.start_date = r.start
   if (force || !form.value.end_date) form.value.end_date = r.end
   if (!form.value.selected_months.length) form.value.selected_months = availableMonths.value.slice(-1)
+}
+
+function sanitizeSelectedMonths() {
+  const avail = availableMonths.value
+  if (!avail.length) return
+  const allowed = new Set(avail)
+  const filtered = form.value.selected_months.filter(m => allowed.has(m))
+  form.value.selected_months = filtered.length ? filtered : avail.slice(-1)
 }
 
 function settingsPayload() {
@@ -751,6 +771,7 @@ async function refreshAvailableData() {
   const { data } = await backtestApi.availableData()
   klineRecords.value = data.klines || []
   tickCoverage.value = data.ticks || []
+  sanitizeSelectedMonths()
 }
 
 async function importTicksFromFolder() {
@@ -810,6 +831,7 @@ onMounted(async () => {
       form.value.interval = availableIntervals.value[0]
     }
     if (!form.value.start_date || !form.value.end_date) applyKlineRangeDefaults(false)
+    sanitizeSelectedMonths()
     settingsReady.value = true
     restoringSettings = false
     await restoreLastResult(settings.data?.backtest_dashboard_last_job_id || saved.last_job_id)

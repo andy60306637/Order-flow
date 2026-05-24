@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
+from core import tick_cache
 from core.tick_cache import _load_shard_manifest, shard_path
 
 
@@ -44,6 +47,9 @@ class WalkForwardConfig:
     n_segments:    int   = 4       # 分幾段（IS + OOS 各 n 組）
     oos_fraction:  float = 0.3     # 每段中 OOS 佔比（0.3 = 後 30%）
     anchored:      bool  = False   # True=擴張視窗, False=滾動視窗
+
+
+SourceSegment = tuple[int, int, str]  # start_ms, end_ms, tick source symbol
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -84,6 +90,154 @@ def _iter_month_keys(start_ms: int, end_ms: int) -> list[str]:
         else:
             cur = cur.replace(month=cur.month + 1)
     return keys
+
+
+def discover_tick_sources(symbol: str) -> list[str]:
+    """Return the base symbol plus all date-ranged shard aliases in the data root."""
+    symbol = symbol.upper()
+    datasets: list[str] = []
+    if tick_cache.load_meta(symbol) is not None:
+        datasets.append(symbol)
+
+    tick_dir = tick_cache.shard_manifest_path(symbol).parent
+    alias_re = re.compile(rf"^{re.escape(symbol)}_\d{{8}}_\d{{8}}$")
+    for path in sorted(Path(tick_dir).glob(f"{symbol}_*_shards.json")):
+        alias = path.name.removesuffix("_shards.json")
+        if alias_re.match(alias) and tick_cache.load_meta(alias) is not None:
+            datasets.append(alias)
+
+    return datasets or [symbol]
+
+
+def tick_source_segments(
+    symbol: str,
+    *,
+    month_keys: list[str] | None = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+) -> list[SourceSegment]:
+    """Return available shard-backed source segments for a base symbol.
+
+    The same calendar month can be split across multiple yearly shard aliases.
+    This mirrors the desktop shard calendar: the returned segment carries the
+    exact tick source symbol needed to load that shard.
+    """
+    month_set = set(month_keys) if month_keys else None
+    segments: list[SourceSegment] = []
+
+    for source in discover_tick_sources(symbol):
+        mgr = TimeSliceManager(source)
+        for shard in mgr.available_shards():
+            if not shard.available:
+                continue
+            if month_set is not None and shard.month_key not in month_set:
+                continue
+
+            seg_start = int(shard.start_ms)
+            seg_end = int(shard.end_ms)
+            if start_ms is not None:
+                seg_start = max(seg_start, int(start_ms))
+            if end_ms is not None:
+                seg_end = min(seg_end, int(end_ms))
+            if seg_start <= seg_end:
+                segments.append((seg_start, seg_end, source))
+
+    return sorted(set(segments), key=lambda item: (item[0], item[1], item[2]))
+
+
+def make_source_slice(label: str, source_segments: list[SourceSegment]) -> TimeSlice:
+    segments = [(start, end) for start, end, _ in source_segments]
+    symbols = [source for _, _, source in source_segments]
+    return TimeSlice(label=label, segments=segments, segment_symbols=symbols)
+
+
+def build_tick_source_slice(symbol: str, month_keys: list[str], label: str = "Custom") -> TimeSlice:
+    return make_source_slice(label, tick_source_segments(symbol, month_keys=month_keys))
+
+
+def build_tick_source_range_slice(
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+    label: str = "Range",
+) -> TimeSlice:
+    return make_source_slice(
+        label,
+        tick_source_segments(symbol, start_ms=start_ms, end_ms=end_ms),
+    )
+
+
+def _clip_source_segments(
+    source_segments: list[SourceSegment],
+    start_ms: int,
+    end_ms: int,
+) -> list[SourceSegment]:
+    clipped: list[SourceSegment] = []
+    for seg_start, seg_end, source in source_segments:
+        start = max(seg_start, start_ms)
+        end = min(seg_end, end_ms)
+        if start <= end:
+            clipped.append((start, end, source))
+    return clipped
+
+
+def build_tick_source_walk_forward(
+    source_segments: list[SourceSegment],
+    cfg: WalkForwardConfig,
+    *,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+) -> list[tuple[TimeSlice, TimeSlice]]:
+    """Build walk-forward slices from explicit tick source segments."""
+    if not source_segments:
+        return []
+
+    range_start = int(start_ms) if start_ms is not None else min(seg[0] for seg in source_segments)
+    range_end = int(end_ms) if end_ms is not None else max(seg[1] for seg in source_segments)
+    total_ms = range_end - range_start
+    n = cfg.n_segments
+    oos_frac = cfg.oos_fraction
+    is_frac = 1.0 - oos_frac
+
+    if n <= 0 or total_ms <= 0:
+        return []
+
+    result: list[tuple[TimeSlice, TimeSlice]] = []
+
+    if cfg.anchored:
+        window_size = total_ms / n
+        for i in range(n):
+            is_end = range_start + int(window_size * (i + is_frac))
+            oos_start = is_end
+            oos_end = range_start + int(window_size * (i + 1))
+            if oos_start >= oos_end:
+                continue
+            is_segments = _clip_source_segments(source_segments, range_start, is_end)
+            oos_segments = _clip_source_segments(source_segments, oos_start, oos_end)
+            if is_segments and oos_segments:
+                result.append((
+                    make_source_slice(f"IS_{i + 1}", is_segments),
+                    make_source_slice(f"OOS_{i + 1}", oos_segments),
+                ))
+    else:
+        window_size = total_ms / (n * is_frac + oos_frac)
+        step = window_size * is_frac
+        for i in range(n):
+            w_start = range_start + int(step * i)
+            is_end = w_start + int(window_size * is_frac)
+            oos_start = is_end
+            oos_end = min(w_start + int(window_size), range_end)
+            if w_start >= range_end or oos_start >= oos_end:
+                continue
+            is_segments = _clip_source_segments(source_segments, w_start, is_end)
+            oos_segments = _clip_source_segments(source_segments, oos_start, oos_end)
+            if is_segments and oos_segments:
+                result.append((
+                    make_source_slice(f"IS_{i + 1}", is_segments),
+                    make_source_slice(f"OOS_{i + 1}", oos_segments),
+                ))
+
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────────
