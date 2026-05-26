@@ -250,13 +250,25 @@
         </div>
       </section>
     </div>
+
+    <div v-if="running" class="backtest-progress-popup" role="status" aria-live="polite">
+      <div class="progress-head">
+        <strong>回測執行進度</strong>
+        <span>{{ progressPercent }}%</span>
+      </div>
+      <div class="progress-bar"><span :style="{ width: `${progressPercent}%` }"></span></div>
+      <div class="progress-message">{{ progress || '回測中...' }}</div>
+      <div v-if="currentJobId" class="progress-job">Job {{ shortJobId }}</div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { backtestApi, settingsApi } from '@/api/client.js'
 import TradeSnapshot from '@/components/TradeSnapshot.vue'
+
+const BACKTEST_ACTIVE_JOB_KEY = 'orderflow.backtest.activeJobId'
 
 const MetricBox = {
   props: { label: String, value: [String, Number], color: String },
@@ -269,6 +281,7 @@ const strategies = ref([])
 const running = ref(false)
 const tickImporting = ref(false)
 const progress = ref('')
+const progressPct = ref(0)
 const tickImportProgress = ref('')
 const error = ref('')
 const stats = ref(null)
@@ -284,6 +297,7 @@ const tickCoverage = ref([])
 const settingsReady = ref(false)
 let saveTimer = null
 let restoringSettings = false
+let pollGeneration = 0
 
 const chartW = 720
 const chartH = 360
@@ -357,6 +371,8 @@ const resultStatus = computed(() => {
   if (!stats.value) return 'Ready'
   return `Done - ${stats.value.trades || 0} trades | Win ${fmtPct(stats.value.win_rate)} | PF ${fmtNum(stats.value.profit_factor)}`
 })
+const progressPercent = computed(() => Math.max(0, Math.min(100, Math.round((progressPct.value || 0) * 100))))
+const shortJobId = computed(() => currentJobId.value ? currentJobId.value.slice(0, 8) : '')
 
 const summaryMetrics = computed(() => {
   const s = stats.value || {}
@@ -689,10 +705,16 @@ async function restoreLastResult(jobId) {
   if (!jobId || stats.value) return
   try {
     const { data } = await backtestApi.getJob(jobId)
+    if ((data.status === 'running' || data.status === 'pending') && !storedBacktestJobId()) {
+      setActiveBacktestJob(jobId)
+      resumeStoredBacktestJob()
+      return
+    }
     if (data.status === 'done' && data.result) {
       currentJobId.value = jobId
       stats.value = data.result
       progress.value = ''
+      progressPct.value = 1
       error.value = ''
     }
   } catch { /* server may have restarted and lost in-memory jobs */ }
@@ -703,6 +725,7 @@ async function runBacktest() {
   running.value = true
   error.value = ''
   progress.value = 'Submitting backtest...'
+  progressPct.value = 0.01
   stats.value = null
   snapshot.value = null
   selectedTradeIndex.value = 0
@@ -714,12 +737,13 @@ async function runBacktest() {
       custom_fee_rate: form.value.custom_fee_rate_pct / 100,
     }
     const { data } = await backtestApi.run(payload)
-    currentJobId.value = data.job_id
+    setActiveBacktestJob(data.job_id)
     scheduleSaveSettings()
-    await pollJob(data.job_id, backtestApi)
+    await pollJob(data.job_id, { immediate: true })
   } catch (e) {
     error.value = e.message
     running.value = false
+    progressPct.value = 0
   }
 }
 
@@ -733,38 +757,94 @@ async function openSnapshot(idx) {
   }
 }
 
-async function pollJob(jobId, api) {
+async function pollJob(jobId, { immediate = false } = {}) {
+  const token = ++pollGeneration
   let consecutiveErrors = 0
+  if (immediate) {
+    try {
+      const done = await syncBacktestJob(jobId)
+      if (done || token !== pollGeneration) return
+    } catch (e) {
+      consecutiveErrors++
+      progress.value = `Polling... (retry ${consecutiveErrors})`
+    }
+  }
   while (true) {
     await new Promise(r => setTimeout(r, 1500))
+    if (token !== pollGeneration) return
     try {
-      const { data } = await api.getJob(jobId)
+      const done = await syncBacktestJob(jobId)
       consecutiveErrors = 0
-      progress.value = data.progress || ''
-      if (data.status === 'done') {
-        stats.value = data.result
-        running.value = false
-        progress.value = ''
-        currentJobId.value = jobId
-        scheduleSaveSettings()
-        return
-      }
-      if (data.status === 'error') {
-        error.value = data.error
-        running.value = false
-        progress.value = ''
-        return
-      }
+      if (done) return
     } catch (e) {
       consecutiveErrors++
       if (consecutiveErrors >= 10) {
         error.value = e.message
         running.value = false
+        progressPct.value = 0
         return
       }
       progress.value = `Polling... (retry ${consecutiveErrors})`
     }
   }
+}
+
+async function syncBacktestJob(jobId) {
+  if (!jobId) return true
+  const { data } = await backtestApi.getJob(jobId)
+  currentJobId.value = jobId
+  progress.value = data.progress || ''
+  progressPct.value = Number.isFinite(Number(data.progress_pct)) ? Number(data.progress_pct) : progressPct.value
+  if (data.status === 'done') {
+    stats.value = data.result
+    running.value = false
+    progress.value = ''
+    progressPct.value = 1
+    clearActiveBacktestJob()
+    scheduleSaveSettings()
+    return true
+  }
+  if (data.status === 'error') {
+    error.value = data.error || 'Backtest job failed.'
+    running.value = false
+    progress.value = ''
+    progressPct.value = 0
+    clearActiveBacktestJob()
+    return true
+  }
+  running.value = data.status === 'running' || data.status === 'pending'
+  return false
+}
+
+function setActiveBacktestJob(jobId) {
+  currentJobId.value = jobId || ''
+  if (!jobId) return
+  try { localStorage.setItem(BACKTEST_ACTIVE_JOB_KEY, jobId) } catch { /* ignore */ }
+}
+function clearActiveBacktestJob() {
+  try { localStorage.removeItem(BACKTEST_ACTIVE_JOB_KEY) } catch { /* ignore */ }
+}
+function storedBacktestJobId() {
+  try { return localStorage.getItem(BACKTEST_ACTIVE_JOB_KEY) || '' } catch { return '' }
+}
+function resumeStoredBacktestJob() {
+  const jobId = storedBacktestJobId()
+  if (!jobId) return
+  running.value = true
+  currentJobId.value = jobId
+  stats.value = null
+  snapshot.value = null
+  progress.value = 'Restoring backtest job status...'
+  progressPct.value = 0.01
+  pollJob(jobId, { immediate: true }).catch(e => {
+    error.value = e.message
+    running.value = false
+    progressPct.value = 0
+  })
+}
+function handleBacktestVisibility() {
+  if (document.visibilityState !== 'visible' || !currentJobId.value || !running.value) return
+  syncBacktestJob(currentJobId.value).catch(() => { /* next poll will retry */ })
 }
 
 async function refreshAvailableData() {
@@ -835,11 +915,20 @@ onMounted(async () => {
     settingsReady.value = true
     restoringSettings = false
     await restoreLastResult(settings.data?.backtest_dashboard_last_job_id || saved.last_job_id)
+    resumeStoredBacktestJob()
   } catch { /* ignore */ }
   finally {
     restoringSettings = false
     settingsReady.value = true
   }
+  document.addEventListener('visibilitychange', handleBacktestVisibility)
+  window.addEventListener('focus', handleBacktestVisibility)
+})
+
+onUnmounted(() => {
+  pollGeneration++
+  document.removeEventListener('visibilitychange', handleBacktestVisibility)
+  window.removeEventListener('focus', handleBacktestVisibility)
 })
 </script>
 
@@ -918,6 +1007,25 @@ onMounted(async () => {
 .result-summary { display: flex; gap: 16px; margin-left: auto; color: #d1d4dc; }
 .result-table-wrap { min-height: 0; overflow: auto; }
 .result-table th, .result-table td { padding: 5px 8px; }
+.backtest-progress-popup {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  width: min(360px, calc(100vw - 36px));
+  z-index: 40;
+  background: #151c2af2;
+  border: 1px solid #334058;
+  border-radius: 6px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.38);
+  padding: 12px;
+  color: #dce3ee;
+}
+.progress-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
+.progress-head strong { color: #8fe7d8; font-size: 13px; }
+.progress-bar { height: 7px; margin: 10px 0 8px; overflow: hidden; background: #0f1420; border: 1px solid #263245; border-radius: 4px; }
+.progress-bar span { display: block; height: 100%; background: linear-gradient(90deg, #26a69a, #42a5f5); transition: width 180ms ease; }
+.progress-message { color: #dce3ee; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.progress-job { margin-top: 5px; color: #8f96a8; font-size: 10px; }
 @media (max-width: 980px) {
   .bt-root { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .bt-sidebar { max-height: 44vh; border-right: 0; border-bottom: 1px solid #2a2e39; }

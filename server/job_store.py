@@ -41,6 +41,7 @@ class Job:
         self.job_id   = job_id
         self.status   = JobStatus.PENDING
         self.progress = ""
+        self.progress_pct = 0.0
         self.result: Any  = None
         self.artifacts: dict[str, Any] = {}
         self.error:  str  = ""
@@ -51,6 +52,7 @@ class Job:
             "job_id":   self.job_id,
             "status":   self.status,
             "progress": self.progress,
+            "progress_pct": self.progress_pct,
             "error":    self.error,
             "result":   _sanitize(self.result),
         }

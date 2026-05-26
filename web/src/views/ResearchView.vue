@@ -295,12 +295,24 @@
         </template>
       </section>
     </main>
+
+    <div v-if="running" class="research-progress-popup" role="status" aria-live="polite">
+      <div class="progress-head">
+        <strong>IC 分析進度</strong>
+        <span>{{ progressPercent }}%</span>
+      </div>
+      <div class="progress-bar"><span :style="{ width: `${progressPercent}%` }"></span></div>
+      <div class="progress-message">{{ progress || '分析中...' }}</div>
+      <div v-if="runningJobId" class="progress-job">Job {{ shortJobId }}</div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, h } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, h } from 'vue'
 import { researchApi, backtestApi, settingsApi } from '@/api/client.js'
+
+const RESEARCH_ACTIVE_JOB_KEY = 'orderflow.research.activeJobId'
 
 const ResultTable = {
   props: { rows: { type: Array, default: () => [] } },
@@ -606,6 +618,8 @@ const factorGroupFilter = ref('')
 const regimeOptions = ref({ modes: ['filter', 'matrix', 'cross_matrix'], dimensions: [], defaults: {} })
 const running = ref(false)
 const progress = ref('')
+const progressPct = ref(0)
+const runningJobId = ref('')
 const error = ref('')
 const result = ref(null)
 const horizonsInput = ref('1,3,6,12')
@@ -613,6 +627,7 @@ const klineRecords = ref([])
 const settingsReady = ref(false)
 let saveTimer = null
 let restoringSettings = false
+let pollGeneration = 0
 
 const form = ref({
   symbol: 'BTCUSDT',
@@ -648,6 +663,8 @@ const resultStatus = computed(() => {
   const factorsN = selectedResult.value?.summary?.length || 0
   return `Done | ${regimes} regime${regimes > 1 ? 's' : ''} | rows=${rows.toLocaleString()} | factors=${factorsN}`
 })
+const progressPercent = computed(() => Math.max(0, Math.min(100, Math.round((progressPct.value || 0) * 100))))
+const shortJobId = computed(() => runningJobId.value ? runningJobId.value.slice(0, 8) : '')
 const regimeRows = computed(() => {
   if (!result.value) return []
   return Object.entries(result.value).map(([key, res]) => {
@@ -930,6 +947,7 @@ async function runResearch() {
   }
   running.value = true
   error.value = ''
+  progressPct.value = 0.01
   progress.value = 'Submitting research job...'
   result.value = null
   try {
@@ -940,43 +958,99 @@ async function runResearch() {
       horizons,
       regime_filter: normalizedRegimeFilter(),
     })
-    await pollJob(data.job_id)
+    setActiveResearchJob(data.job_id)
+    await pollJob(data.job_id, { immediate: true })
   } catch (e) {
     error.value = e.message
     running.value = false
+    progressPct.value = 0
   }
 }
-async function pollJob(jobId) {
+async function pollJob(jobId, { immediate = false } = {}) {
+  const token = ++pollGeneration
   let consecutiveErrors = 0
+  if (immediate) {
+    try {
+      const done = await syncResearchJob(jobId)
+      if (done || token !== pollGeneration) return
+    } catch (e) {
+      consecutiveErrors++
+      progress.value = `Polling... (retry ${consecutiveErrors})`
+    }
+  }
   while (true) {
     await new Promise(r => setTimeout(r, 2000))
+    if (token !== pollGeneration) return
     try {
-      const { data } = await researchApi.getJob(jobId)
+      const done = await syncResearchJob(jobId)
       consecutiveErrors = 0
-      progress.value = data.progress || ''
-      if (data.status === 'done') {
-        result.value = normalizeResultPayload(data.result)
-        selectInitialRegime()
-        running.value = false
-        progress.value = ''
-        return
-      }
-      if (data.status === 'error') {
-        error.value = data.error
-        running.value = false
-        progress.value = ''
-        return
-      }
+      if (done) return
     } catch (e) {
       consecutiveErrors++
       if (consecutiveErrors >= 10) {
         error.value = e.message
         running.value = false
+        progressPct.value = 0
         return
       }
       progress.value = `Polling... (retry ${consecutiveErrors})`
     }
   }
+}
+async function syncResearchJob(jobId) {
+  if (!jobId) return true
+  const { data } = await researchApi.getJob(jobId)
+  runningJobId.value = jobId
+  progress.value = data.progress || ''
+  progressPct.value = Number.isFinite(Number(data.progress_pct)) ? Number(data.progress_pct) : progressPct.value
+  if (data.status === 'done') {
+    result.value = normalizeResultPayload(data.result)
+    selectInitialRegime()
+    running.value = false
+    progress.value = ''
+    progressPct.value = 1
+    clearActiveResearchJob()
+    return true
+  }
+  if (data.status === 'error') {
+    error.value = data.error || 'Research job failed.'
+    running.value = false
+    progress.value = ''
+    progressPct.value = 0
+    clearActiveResearchJob()
+    return true
+  }
+  running.value = data.status === 'running' || data.status === 'pending'
+  return false
+}
+function setActiveResearchJob(jobId) {
+  runningJobId.value = jobId || ''
+  if (!jobId) return
+  try { localStorage.setItem(RESEARCH_ACTIVE_JOB_KEY, jobId) } catch { /* ignore */ }
+}
+function clearActiveResearchJob() {
+  runningJobId.value = ''
+  try { localStorage.removeItem(RESEARCH_ACTIVE_JOB_KEY) } catch { /* ignore */ }
+}
+function storedResearchJobId() {
+  try { return localStorage.getItem(RESEARCH_ACTIVE_JOB_KEY) || '' } catch { return '' }
+}
+function resumeStoredResearchJob() {
+  const jobId = storedResearchJobId()
+  if (!jobId) return
+  running.value = true
+  runningJobId.value = jobId
+  progress.value = 'Restoring research job status...'
+  progressPct.value = 0.01
+  pollJob(jobId, { immediate: true }).catch(e => {
+    error.value = e.message
+    running.value = false
+    progressPct.value = 0
+  })
+}
+function handleResearchVisibility() {
+  if (document.visibilityState !== 'visible' || !runningJobId.value) return
+  syncResearchJob(runningJobId.value).catch(() => { /* next poll will retry */ })
 }
 function exportJson() {
   const blob = new Blob([JSON.stringify(result.value, null, 2)], { type: 'application/json' })
@@ -1065,11 +1139,20 @@ onMounted(async () => {
     if (!availableIntervals.value.includes(form.value.interval) && availableIntervals.value.length) {
       form.value.interval = availableIntervals.value[0]
     }
+    resumeStoredResearchJob()
   } catch { /* ignore */ }
   finally {
     restoringSettings = false
     settingsReady.value = true
   }
+  document.addEventListener('visibilitychange', handleResearchVisibility)
+  window.addEventListener('focus', handleResearchVisibility)
+})
+
+onUnmounted(() => {
+  pollGeneration++
+  document.removeEventListener('visibilitychange', handleResearchVisibility)
+  window.removeEventListener('focus', handleResearchVisibility)
 })
 </script>
 
@@ -1141,6 +1224,25 @@ onMounted(async () => {
 .grid-heatmap b.col-train { color: #5a6272; background: #182132; }
 .grid-heatmap span.cell-test { outline: 1px solid #1e3a5044; }
 .grid-heatmap span.cell-train { opacity: 0.80; }
+.research-progress-popup {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  width: min(360px, calc(100vw - 36px));
+  z-index: 40;
+  background: #151c2af2;
+  border: 1px solid #334058;
+  border-radius: 6px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.38);
+  padding: 12px;
+  color: #dce3ee;
+}
+.progress-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
+.progress-head strong { color: #8fe7d8; font-size: 13px; }
+.progress-bar { height: 7px; margin: 10px 0 8px; overflow: hidden; background: #0f1420; border: 1px solid #263245; border-radius: 4px; }
+.progress-bar span { display: block; height: 100%; background: linear-gradient(90deg, #26a69a, #42a5f5); transition: width 180ms ease; }
+.progress-message { color: #dce3ee; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.progress-job { margin-top: 5px; color: #8f96a8; font-size: 10px; }
 @media (max-width: 980px) {
   .research-root { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .research-sidebar { max-height: 45vh; border-right: 0; border-bottom: 1px solid #263245; }

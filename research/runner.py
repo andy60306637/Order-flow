@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -15,6 +15,8 @@ from research.base import (
 )
 from research.registry import ensure_builtin_factors, get_factor
 from strategies.base import TickBarMap
+
+ProgressCallback = Callable[[str, float | None], None]
 
 
 @dataclass
@@ -71,19 +73,22 @@ def run_research(
     config: ResearchConfig,
     klines: list[Kline] | None = None,
     tick_map: TickBarMap | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> ResearchResult:
     ensure_builtin_factors()
     if klines is None:
-        klines, tick_map = load_research_data(config)
+        klines, tick_map = load_research_data(config, progress_callback=progress_callback)
     tick_map_f = tick_map if config.use_tick_features else None
 
     regime_mask: np.ndarray | None = None
     rf = config.regime_filter
     if rf is not None and rf.is_active() and rf.mode == "filter":
         from research.regime_filter import combine_for_filter, compute_regime_masks
+        _emit_progress(progress_callback, "Computing regime masks...", 0.45)
         raw_masks = compute_regime_masks(klines, rf, tick_map_f)
         regime_mask = combine_for_filter(len(klines), raw_masks, rf)
 
+    _emit_progress(progress_callback, "Computing IC analysis...", 0.55)
     return _analyze_with_config(config, klines, tick_map_f, regime_mask)
 
 
@@ -91,6 +96,7 @@ def run_research_with_regimes(
     config: ResearchConfig,
     klines: list[Kline] | None = None,
     tick_map: TickBarMap | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, ResearchResult]:
     """
     Matrix 模式：每個 regime label 獨立跑一次 IC 分析。
@@ -104,12 +110,13 @@ def run_research_with_regimes(
     """
     ensure_builtin_factors()
     if klines is None:
-        klines, tick_map = load_research_data(config)
+        klines, tick_map = load_research_data(config, progress_callback=progress_callback)
     tick_map_f = tick_map if config.use_tick_features else None
 
     ctx = _precompute_research_context(
         klines, tick_map_f, config.factor_names, config.horizons,
         config.use_tick_features, config.entry_lag, config.ic_period_granularity,
+        progress_callback=progress_callback, progress_start=0.22, progress_end=0.58,
     )
 
     def _run(mask: np.ndarray | None) -> ResearchResult:
@@ -119,19 +126,25 @@ def run_research_with_regimes(
 
     rf = config.regime_filter
     if rf is None or not rf.is_active():
+        _emit_progress(progress_callback, "Computing IC analysis for all bars...", 0.72)
         return {"(all)": _run(None)}
 
     from research.regime_filter import combine_for_filter, compute_regime_masks
+    _emit_progress(progress_callback, "Computing regime masks...", 0.60)
     raw_masks = compute_regime_masks(klines, rf, tick_map_f)
 
     if rf.mode == "filter":
+        _emit_progress(progress_callback, "Computing filtered IC analysis...", 0.76)
         combined = combine_for_filter(len(klines), raw_masks, rf)
         return {"filtered": _run(combined)}
 
     if rf.mode == "cross_matrix":
         from research.regime_filter import cross_combination_key
         results: dict[str, ResearchResult] = {}
-        for combo in rf.get_cross_combinations():
+        combos = rf.get_cross_combinations()
+        total = max(1, len(combos))
+        done = 0
+        for combo in combos:
             combined_mask: np.ndarray | None = None
             valid = True
             for dim, lbl in combo:
@@ -141,12 +154,30 @@ def run_research_with_regimes(
                     break
                 combined_mask = mask if combined_mask is None else (combined_mask & mask)
             if not valid or combined_mask is None or combined_mask.sum() == 0:
+                done += 1
                 continue
-            results[cross_combination_key(combo)] = _run(combined_mask)
+            key = cross_combination_key(combo)
+            _emit_progress(
+                progress_callback,
+                f"Computing cross-regime IC {done + 1}/{total}: {key}",
+                0.62 + 0.33 * (done / total),
+            )
+            results[key] = _run(combined_mask)
+            done += 1
         return results
 
     # Matrix: one run per label
-    return {label: _run(mask) for label, mask in raw_masks.items()}
+    results: dict[str, ResearchResult] = {}
+    items = list(raw_masks.items())
+    total = max(1, len(items))
+    for idx, (label, mask) in enumerate(items, start=1):
+        _emit_progress(
+            progress_callback,
+            f"Computing regime IC {idx}/{total}: {label}",
+            0.62 + 0.33 * ((idx - 1) / total),
+        )
+        results[label] = _run(mask)
+    return results
 
 
 def _analyze_with_config(
@@ -170,7 +201,10 @@ def _analyze_with_config(
     )
 
 
-def load_research_data(config: ResearchConfig) -> tuple[list[Kline], TickBarMap | None]:
+def load_research_data(
+    config: ResearchConfig,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[list[Kline], TickBarMap | None]:
     from core.kline_cache import load_range_as_klines
     from core.tick_cache import build_bar_map, build_bar_map_streaming, load_range_sharded
 
@@ -178,6 +212,9 @@ def load_research_data(config: ResearchConfig) -> tuple[list[Kline], TickBarMap 
     # Each entry: (tick_symbol, start_ms, end_ms, kline_times_for_segment)
     segments_info: list[tuple[str, int, int, list[tuple[int, int]]]] = []
 
+    total_segments = max(1, sum(len(sl.segments) for sl in config.slices))
+    loaded_segments = 0
+    _emit_progress(progress_callback, "Loading kline data...", 0.03)
     for sl in config.slices:
         segment_symbols = getattr(sl, "segment_symbols", []) or []
         for idx, (start_ms, end_ms) in enumerate(sl.segments):
@@ -187,6 +224,12 @@ def load_research_data(config: ResearchConfig) -> tuple[list[Kline], TickBarMap 
             if config.use_tick_features:
                 kline_times = [(k.open_time, k.close_time) for k in seg_klines]
                 segments_info.append((tick_symbol, start_ms, end_ms, kline_times))
+            loaded_segments += 1
+            _emit_progress(
+                progress_callback,
+                f"Loaded kline segment {loaded_segments}/{total_segments}",
+                0.03 + 0.09 * (loaded_segments / total_segments),
+            )
 
     seen: dict[int, Kline] = {}
     for k in all_klines:
@@ -195,13 +238,20 @@ def load_research_data(config: ResearchConfig) -> tuple[list[Kline], TickBarMap 
 
     tick_map = None
     if not config.use_tick_features or not segments_info or not klines:
+        _emit_progress(progress_callback, f"Loaded {len(klines):,} kline rows", 0.20)
         return klines, tick_map
 
     # Try streaming path first: processes one monthly shard at a time via mmap,
     # never allocating a contiguous array for the full range (avoids OOM).
     streaming_ok = True
     merged: dict[int, list[np.ndarray]] = {}
-    for tick_symbol, start_ms, end_ms, kline_times in segments_info:
+    total_tick_segments = max(1, len(segments_info))
+    for idx, (tick_symbol, start_ms, end_ms, kline_times) in enumerate(segments_info, start=1):
+        _emit_progress(
+            progress_callback,
+            f"Loading tick bars {idx}/{total_tick_segments}: {tick_symbol}",
+            0.12 + 0.08 * ((idx - 1) / total_tick_segments),
+        )
         seg_map = build_bar_map_streaming(tick_symbol, start_ms, end_ms, kline_times)
         if seg_map is None:
             streaming_ok = False
@@ -215,11 +265,17 @@ def load_research_data(config: ResearchConfig) -> tuple[list[Kline], TickBarMap 
                 ot: vs[0] if len(vs) == 1 else np.concatenate(vs, axis=0)
                 for ot, vs in merged.items()
             }
+        _emit_progress(progress_callback, f"Loaded {len(klines):,} kline rows with tick bars", 0.20)
         return klines, tick_map
 
     # Legacy fallback: concatenates all ticks into one array — may OOM for large ranges.
     tick_parts: list[np.ndarray] = []
-    for tick_symbol, start_ms, end_ms, _ in segments_info:
+    for idx, (tick_symbol, start_ms, end_ms, _) in enumerate(segments_info, start=1):
+        _emit_progress(
+            progress_callback,
+            f"Loading tick fallback {idx}/{total_tick_segments}: {tick_symbol}",
+            0.12 + 0.08 * ((idx - 1) / total_tick_segments),
+        )
         ticks = load_range_sharded(tick_symbol, start_ms, end_ms)
         if ticks is not None and len(ticks) > 0:
             tick_parts.append(ticks)
@@ -227,6 +283,7 @@ def load_research_data(config: ResearchConfig) -> tuple[list[Kline], TickBarMap 
         ticks = np.concatenate(tick_parts, axis=0) if len(tick_parts) > 1 else tick_parts[0]
         ticks = ticks[ticks[:, 0].argsort()]
         tick_map = build_bar_map(ticks, [(k.open_time, k.close_time) for k in klines])
+    _emit_progress(progress_callback, f"Loaded {len(klines):,} kline rows with tick bars", 0.20)
     return klines, tick_map
 
 
@@ -260,6 +317,9 @@ def _precompute_research_context(
     use_tick_features: bool,
     entry_lag: int,
     ic_period_granularity: str,
+    progress_callback: ProgressCallback | None = None,
+    progress_start: float = 0.0,
+    progress_end: float = 1.0,
 ) -> dict[str, Any]:
     """Compute everything that does NOT depend on the regime mask, so it can be
     reused across multiple regime runs (matrix / cross_matrix modes).
@@ -268,6 +328,7 @@ def _precompute_research_context(
     per-bar period ids for monthly / yearly stability.
     """
     ensure_builtin_factors()
+    _emit_progress(progress_callback, "Preparing forward returns...", progress_start)
     arr = klines_to_arrays(klines) if klines else {}
     close = arr.get("close", np.array([], dtype=np.float64))
     open_times = arr.get("open_time", np.array([], dtype=np.int64))
@@ -282,7 +343,14 @@ def _precompute_research_context(
     factor_meta: dict[str, dict[str, Any]] = {}
     unavailable: list[dict[str, str]] = []
 
-    for name in factor_names:
+    total_factors = max(1, len(factor_names))
+    span = max(0.0, progress_end - progress_start)
+    for idx, name in enumerate(factor_names, start=1):
+        _emit_progress(
+            progress_callback,
+            f"Computing factor {idx}/{total_factors}: {name}",
+            progress_start + span * (0.15 + 0.75 * ((idx - 1) / total_factors)),
+        )
         factor = get_factor(name)
         if factor is None:
             unavailable.append({"factor": name, "reason": "not_registered"})
@@ -299,6 +367,7 @@ def _precompute_research_context(
             "group": factor.group,
         }
 
+    _emit_progress(progress_callback, "Preparing period splits...", progress_start + span * 0.92)
     month_ids, month_labels = _period_ids(open_times, "month")
     year_ids, year_labels = _period_ids(open_times, "year")
     if ic_period_granularity == "year":
@@ -321,6 +390,18 @@ def _precompute_research_context(
         "year_ids": year_ids,
         "year_labels": year_labels,
     }
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    message: str,
+    pct: float | None = None,
+) -> None:
+    if progress_callback is None:
+        return
+    if pct is not None:
+        pct = max(0.0, min(1.0, float(pct)))
+    progress_callback(message, pct)
 
 
 def _analyze_with_precomputed(

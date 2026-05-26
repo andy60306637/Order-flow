@@ -8,7 +8,7 @@ from io import BytesIO
 import logging
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
@@ -22,6 +22,7 @@ from strategies import STRATEGY_REGISTRY
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
+ProgressCallback = Callable[[str, float | None], None]
 
 
 # ── Data availability ─────────────────────────────────────────────────────────
@@ -216,15 +217,37 @@ def _request_slices(req: BacktestRequest) -> list[TimeSlice] | list[tuple[TimeSl
     return [TimeSlice(label="api_range", segments=[(req.start_ms, req.end_ms)])]
 
 
-def _load_segments(req: BacktestRequest, slices: list[TimeSlice]) -> tuple[list, dict]:
+def _emit_progress(progress_callback: ProgressCallback | None, message: str, pct: float | None = None) -> None:
+    if progress_callback is None:
+        return
+    if pct is not None:
+        pct = max(0.0, min(1.0, float(pct)))
+    progress_callback(message, pct)
+
+
+def _load_segments(
+    req: BacktestRequest,
+    slices: list[TimeSlice],
+    progress_callback: ProgressCallback | None = None,
+    progress_start: float = 0.0,
+    progress_end: float = 1.0,
+) -> tuple[list, dict]:
     from core.kline_cache import load_range_as_klines
     from core.tick_cache import build_bar_map_streaming, load_range_sharded, build_bar_map
 
     all_klines = []
     tick_segments: list[tuple[str, int, int]] = []
+    total_segments = max(1, sum(len(sl.segments) for sl in slices))
+    loaded_segments = 0
+    span = max(0.0, progress_end - progress_start)
     for sl in slices:
         segment_symbols = getattr(sl, "segment_symbols", []) or []
         for idx, (start_ms, end_ms) in enumerate(sl.segments):
+            _emit_progress(
+                progress_callback,
+                f"Loading kline segment {loaded_segments + 1}/{total_segments}",
+                progress_start + span * (0.10 + 0.35 * (loaded_segments / total_segments)),
+            )
             all_klines.extend(load_range_as_klines(req.symbol, req.interval, start_ms, end_ms))
             if req.use_tick_mode:
                 tick_segments.append((
@@ -232,6 +255,7 @@ def _load_segments(req: BacktestRequest, slices: list[TimeSlice]) -> tuple[list,
                     start_ms,
                     end_ms,
                 ))
+            loaded_segments += 1
 
     if not all_klines:
         raise ValueError("No klines found for the requested range.")
@@ -244,7 +268,13 @@ def _load_segments(req: BacktestRequest, slices: list[TimeSlice]) -> tuple[list,
     tick_map: dict = {}
     if req.use_tick_mode and tick_segments:
         kline_times = [(k.open_time, k.close_time) for k in klines]
-        for tick_sym, start_ms, end_ms in tick_segments:
+        total_tick_segments = max(1, len(tick_segments))
+        for idx, (tick_sym, start_ms, end_ms) in enumerate(tick_segments, start=1):
+            _emit_progress(
+                progress_callback,
+                f"Loading tick bars {idx}/{total_tick_segments}: {tick_sym}",
+                progress_start + span * (0.45 + 0.35 * ((idx - 1) / total_tick_segments)),
+            )
             streaming = build_bar_map_streaming(tick_sym, start_ms, end_ms, kline_times)
             if streaming is not None:
                 tick_map.update(streaming)
@@ -252,12 +282,24 @@ def _load_segments(req: BacktestRequest, slices: list[TimeSlice]) -> tuple[list,
                 ticks = load_range_sharded(tick_sym, start_ms, end_ms)
                 if ticks is not None and len(ticks) > 0:
                     tick_map.update(build_bar_map(ticks, kline_times))
+    _emit_progress(progress_callback, f"Loaded {len(klines):,} kline rows", progress_start + span * 0.85)
     return klines, tick_map
 
 
-def _run_single_slices(req: BacktestRequest, strategy: Any, bt_cfg: BacktestConfig, slices: list[TimeSlice]) -> dict:
-    klines, tick_map = _load_segments(req, slices)
+def _run_single_slices(
+    req: BacktestRequest,
+    strategy: Any,
+    bt_cfg: BacktestConfig,
+    slices: list[TimeSlice],
+    progress_callback: ProgressCallback | None = None,
+    progress_start: float = 0.0,
+    progress_end: float = 1.0,
+) -> dict:
+    klines, tick_map = _load_segments(req, slices, progress_callback, progress_start, progress_end)
+    span = max(0.0, progress_end - progress_start)
+    _emit_progress(progress_callback, "Generating strategy signals...", progress_start + span * 0.88)
     signals = strategy.on_history(klines, tick_map or None)
+    _emit_progress(progress_callback, "Simulating trades...", progress_start + span * 0.94)
     result = simulate_trades(signals, bt_cfg)
     result["mode"] = "single" if req.slice_mode != "multi_select" else "multi_select"
     result["strategy_name"] = getattr(strategy, "name", strategy.__class__.__name__)
@@ -297,13 +339,15 @@ def _attach_analysis(result: dict, initial_capital: float) -> None:
     ]
 
 
-def _run_backtest_sync(req: BacktestRequest) -> dict:
+def _run_backtest_sync(req: BacktestRequest, progress_callback: ProgressCallback | None = None) -> dict:
+    _emit_progress(progress_callback, "Preparing backtest...", 0.03)
     strategy_cls = STRATEGY_REGISTRY.get(req.strategy_name)
     if strategy_cls is None:
         raise ValueError(f"Unknown strategy: {req.strategy_name!r}")
 
     strategy = strategy_cls()
     bt_cfg = _bt_config(req)
+    _emit_progress(progress_callback, "Building time slices...", 0.08)
     slices = _request_slices(req)
 
     if slices and isinstance(slices[0], tuple):
@@ -313,8 +357,15 @@ def _run_backtest_sync(req: BacktestRequest) -> dict:
         snapshot_klines = []
         snapshot_tick_map: dict = {}
         equity = bt_cfg.initial_capital
-        for is_sl, oos_sl in slices:
-            is_result = _run_single_slices(req, strategy, bt_cfg, [is_sl])
+        total = max(1, len(slices))
+        for idx, (is_sl, oos_sl) in enumerate(slices, start=1):
+            start = 0.12 + 0.76 * ((idx - 1) / total)
+            end = 0.12 + 0.76 * (idx / total)
+            _emit_progress(progress_callback, f"Walk-forward segment {idx}/{total}: in-sample", start)
+            is_result = _run_single_slices(
+                req, strategy, bt_cfg, [is_sl],
+                progress_callback, start, start + (end - start) * 0.45,
+            )
             oos_cfg = BacktestConfig(
                 initial_capital=equity,
                 max_loss_pct=bt_cfg.max_loss_pct,
@@ -324,7 +375,11 @@ def _run_backtest_sync(req: BacktestRequest) -> dict:
                 slippage_bps=bt_cfg.slippage_bps,
                 compound=bt_cfg.compound,
             )
-            oos_result = _run_single_slices(req, strategy, oos_cfg, [oos_sl])
+            _emit_progress(progress_callback, f"Walk-forward segment {idx}/{total}: out-of-sample", start + (end - start) * 0.48)
+            oos_result = _run_single_slices(
+                req, strategy, oos_cfg, [oos_sl],
+                progress_callback, start + (end - start) * 0.48, end,
+            )
             equity = oos_result.get("final_equity", equity)
             combined_trades.extend(oos_result.get("trade_list", []))
             segment_results.append({
@@ -345,8 +400,9 @@ def _run_backtest_sync(req: BacktestRequest) -> dict:
         result["_snapshot_tick_map"] = snapshot_tick_map
         result["_snapshot_signals"] = []
     else:
-        result = _run_single_slices(req, strategy, bt_cfg, slices)  # type: ignore[arg-type]
+        result = _run_single_slices(req, strategy, bt_cfg, slices, progress_callback, 0.12, 0.88)  # type: ignore[arg-type]
 
+    _emit_progress(progress_callback, "Building analysis artifacts...", 0.92)
     _attach_analysis(result, bt_cfg.initial_capital)
 
     return result
@@ -357,10 +413,17 @@ async def _backtest_worker(job_id: str, req: BacktestRequest) -> None:
     if job is None:
         return
     job.status = JobStatus.RUNNING
-    job.progress = "Running backtest…"
+    job.progress = "Preparing backtest..."
+    job.progress_pct = 0.01
+
+    def set_progress(message: str, pct: float | None = None) -> None:
+        job.progress = message
+        if pct is not None:
+            job.progress_pct = max(0.0, min(0.99, float(pct)))
+
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(None, _run_backtest_sync, req)
+        result = await loop.run_in_executor(None, _run_backtest_sync, req, set_progress)
         job.artifacts = {
             "snapshot_klines": result.pop("_snapshot_klines", None),
             "snapshot_tick_map": result.pop("_snapshot_tick_map", None),
@@ -369,10 +432,12 @@ async def _backtest_worker(job_id: str, req: BacktestRequest) -> None:
         job.result = result
         job.status = JobStatus.DONE
         job.progress = "Done"
+        job.progress_pct = 1.0
     except Exception as exc:
         logger.exception("Backtest job %s failed", job_id)
         job.status = JobStatus.ERROR
         job.error  = str(exc)
+        job.progress_pct = 1.0
 
 
 def _expand_tick_import_paths(req: TickImportRequest) -> list[Path]:

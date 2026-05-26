@@ -31,7 +31,7 @@ class ResearchRequest(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _run_research_sync(req: ResearchRequest) -> dict:
+def _run_research_sync(req: ResearchRequest, progress_callback=None) -> dict:
     from backtest.time_slice import TimeSlice, _month_start_ms, _next_month_start_ms
     from research.runner import ResearchConfig, run_research_with_regimes
     from research.registry import ensure_builtin_factors
@@ -70,7 +70,7 @@ def _run_research_sync(req: ResearchRequest) -> dict:
         regime_filter=regime_filter,
     )
 
-    results_by_regime = run_research_with_regimes(cfg)
+    results_by_regime = run_research_with_regimes(cfg, progress_callback=progress_callback)
     return {
         regime_key: res.to_dict()
         for regime_key, res in results_by_regime.items()
@@ -82,17 +82,26 @@ async def _research_worker(job_id: str, req: ResearchRequest) -> None:
     if job is None:
         return
     job.status = JobStatus.RUNNING
-    job.progress = "Running factor analysis…"
+    job.progress = "Preparing research job..."
+    job.progress_pct = 0.01
+
+    def set_progress(message: str, pct: float | None = None) -> None:
+        job.progress = message
+        if pct is not None:
+            job.progress_pct = max(0.0, min(0.99, float(pct)))
+
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(None, _run_research_sync, req)
+        result = await loop.run_in_executor(None, _run_research_sync, req, set_progress)
         job.result = result
         job.status = JobStatus.DONE
         job.progress = "Done"
+        job.progress_pct = 1.0
     except Exception as exc:
         logger.exception("Research job %s failed", job_id)
         job.status = JobStatus.ERROR
         job.error  = str(exc)
+        job.progress_pct = 1.0
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
