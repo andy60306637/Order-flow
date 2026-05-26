@@ -463,11 +463,18 @@ class QuantileReturnsChart(QWidget):
 
 # ── Monthly IC Heatmap ─────────────────────────────────────────────────────────
 
-class MonthlyICHeatmap(QWidget):
-    """Factor × Month Rank IC heat table."""
+class PeriodICHeatmap(QWidget):
+    """Factor × Period Rank IC heat table (monthly or yearly)."""
 
-    def __init__(self, parent=None) -> None:
+    # Header colours: train periods dimmed, test periods normal
+    _TRAIN_HEADER_BG = "#182132"
+    _TEST_HEADER_BG  = "#1e3a50"
+    _TRAIN_HEADER_FG = "#5a6272"
+    _TEST_HEADER_FG  = "#8fb8d4"
+
+    def __init__(self, granularity: str = "month", parent=None) -> None:
         super().__init__(parent)
+        self._granularity = granularity
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
@@ -476,7 +483,7 @@ class MonthlyICHeatmap(QWidget):
         ctrl.setSpacing(8)
         self._horizon_combo = QComboBox()
         self._metric_combo  = QComboBox()
-        self._metric_combo.addItems(["rank_ic", "ic"])
+        self._metric_combo.addItems(["oriented_rank_ic", "rank_ic", "ic", "spread_qhigh_qlow"])
         ctrl.addWidget(QLabel("Horizon:")); ctrl.addWidget(self._horizon_combo)
         ctrl.addWidget(QLabel("Metric:"));  ctrl.addWidget(self._metric_combo)
         ctrl.addStretch()
@@ -491,13 +498,21 @@ class MonthlyICHeatmap(QWidget):
         layout.addWidget(self._table)
 
         self._raw: list[dict] = []
+        # period → split mapping populated on set_data
+        self._period_split: dict[str, str] = {}
         self._horizon_combo.currentTextChanged.connect(self._refresh)
         self._metric_combo.currentTextChanged.connect(self._refresh)
 
-    def set_data(self, stability_monthly: list[dict]) -> None:
-        self._raw = stability_monthly
+    def set_data(self, stability_rows: list[dict]) -> None:
+        self._raw = stability_rows
+        # build period→split map from first factor that has the period
+        self._period_split = {}
+        for row in stability_rows:
+            p = str(row.get("period", ""))
+            if p and p not in self._period_split:
+                self._period_split[p] = str(row.get("split", ""))
         horizons: list[str] = []
-        for row in stability_monthly:
+        for row in stability_rows:
             h = str(row["horizon"])
             if h not in horizons:
                 horizons.append(h)
@@ -541,8 +556,17 @@ class MonthlyICHeatmap(QWidget):
 
         self._table.setRowCount(len(factors))
         self._table.setColumnCount(len(periods))
-        self._table.setHorizontalHeaderLabels(periods)
         self._table.setVerticalHeaderLabels(factors)
+
+        # Column headers with IS/OOS colour coding
+        for ci, p in enumerate(periods):
+            split = self._period_split.get(p, "")
+            is_test = split == "test"
+            header_item = QTableWidgetItem(p)
+            header_item.setBackground(QColor(self._TEST_HEADER_BG if is_test else self._TRAIN_HEADER_BG))
+            header_item.setForeground(QColor(self._TEST_HEADER_FG if is_test else self._TRAIN_HEADER_FG))
+            header_item.setToolTip("OOS (test)" if is_test else "IS (train)" if split == "train" else split)
+            self._table.setHorizontalHeaderItem(ci, header_item)
 
         for ri, f in enumerate(factors):
             for ci, p in enumerate(periods):
@@ -563,14 +587,20 @@ class MonthlyICHeatmap(QWidget):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 item.setBackground(QColor(_monthly_ic_bg(val)))
                 item.setForeground(QColor(_monthly_ic_fg(val)))
+                split = r.get("split", "")
                 item.setToolTip(
                     f"Factor: {f}\nPeriod: {p}\n{metric}: {text}\n"
-                    f"split: {r.get('split', '')}\nn: {r.get('sample_count', 0)}"
+                    f"split: {split}\nn: {r.get('sample_count', 0)}"
                 )
                 self._table.setItem(ri, ci, item)
 
         self._table.resizeColumnsToContents()
-        self._info_lbl.setText(f"{len(factors)} factors × {len(periods)} months")
+        period_word = "years" if self._granularity == "year" else "months"
+        self._info_lbl.setText(f"{len(factors)} factors × {len(periods)} {period_word}")
+
+
+# Backwards-compatible alias (used by ICVisualizationPanel below)
+MonthlyICHeatmap = PeriodICHeatmap
 
 
 # ── Correlation Heatmap ────────────────────────────────────────────────────────
@@ -672,17 +702,20 @@ class ICVisualizationPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         inner = QTabWidget()
-        self._quantile_chart  = QuantileReturnsChart()
-        self._monthly_heatmap = MonthlyICHeatmap()
-        self._corr_heatmap    = CorrelationHeatmap()
+        self._quantile_chart   = QuantileReturnsChart()
+        self._monthly_heatmap  = PeriodICHeatmap(granularity="month")
+        self._yearly_heatmap   = PeriodICHeatmap(granularity="year")
+        self._corr_heatmap     = CorrelationHeatmap()
         inner.addTab(self._quantile_chart,  "Quantile Returns")
         inner.addTab(self._monthly_heatmap, "Monthly IC Heatmap")
+        inner.addTab(self._yearly_heatmap,  "Yearly IC Heatmap")
         inner.addTab(self._corr_heatmap,    "Correlation Matrix")
         layout.addWidget(inner)
 
     def set_data(self, result: dict) -> None:
         self._quantile_chart.set_data(result.get("quantiles", []))
         self._monthly_heatmap.set_data(result.get("stability_monthly", []))
+        self._yearly_heatmap.set_data(result.get("stability_yearly", []))
         self._corr_heatmap.set_data(result.get("factor_correlations", []))
 
 

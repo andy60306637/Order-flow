@@ -394,12 +394,12 @@ def _analyze_with_precomputed(
             monthly.extend(_stability_rows(
                 name, horizon, values, returns, open_times,
                 month_ids, month_labels, quantiles, min_period_samples, cut_time,
-                regime_mask=full_regime_mask,
+                regime_mask=full_regime_mask, orientation=orientation,
             ))
             yearly.extend(_stability_rows(
                 name, horizon, values, returns, open_times,
                 year_ids, year_labels, quantiles, min_period_samples, cut_time,
-                regime_mask=full_regime_mask,
+                regime_mask=full_regime_mask, orientation=orientation,
             ))
 
         summary.append(_summary_row(
@@ -940,6 +940,7 @@ def _stability_rows(
     min_samples: int,
     cut_time: int,
     regime_mask: np.ndarray | None = None,
+    orientation: int = 0,
 ) -> list[dict[str, Any]]:
     if len(period_ids) == 0:
         return []
@@ -967,12 +968,14 @@ def _stability_rows(
                 vals = y[bucket]
                 means.append(float(np.mean(vals)) if len(vals) else float("nan"))
         spread = (means[-1] - means[0]) if len(means) >= 2 else float("nan")
+        rank_ic = _corr(_rank(x), _rank(y))
         rows.append({
             "factor": factor,
             "horizon": horizon,
             "period": period_labels.get(int(period_id), str(int(period_id))),
             "ic": _corr(x, y),
-            "rank_ic": _corr(_rank(x), _rank(y)),
+            "rank_ic": rank_ic,
+            "oriented_rank_ic": _orient(rank_ic, orientation),
             "spread_qhigh_qlow": spread,
             "sample_count": int(len(x)),
             "split": split,
