@@ -230,6 +230,7 @@
               </select>
               <label>Quantile</label>
               <input v-model.number="signalQuantile" type="number" min="0.01" max="0.5" step="0.05" class="input-field signal-quantile" />
+              <span class="signal-quantile-desc text-dim">{{ signalQuantileDescription }}</span>
               <button class="btn-primary compact-action inline" :disabled="signalLoading || !selectedFactorName" @click="loadSignalDataset">
                 {{ signalLoading ? 'Loading' : 'Load Signals' }}
               </button>
@@ -289,7 +290,16 @@
                 <button class="btn-ghost compact-action inline" @click="resetSignalFilters">Reset</button>
               </section>
 
-              <section class="signal-summary-grid">
+              <div class="signal-view-mode-bar">
+                <span class="text-dim" style="font-size:11px">View:</span>
+                <button v-for="mode in ['all', 'winners', 'losers', 'diff']" :key="mode"
+                  :class="['btn-ghost', 'compact-action', 'inline', { 'mode-active': signalViewMode === mode }]"
+                  @click="signalViewMode = mode">
+                  {{ { all: 'All Signals', winners: 'Winners', losers: 'Losers', diff: 'W vs L Diff' }[mode] }}
+                </button>
+              </div>
+
+              <section v-if="signalViewMode !== 'diff'" class="signal-summary-grid">
                 <div v-for="group in signalBreakdownGroups" :key="group.dimension" class="signal-summary-panel">
                   <div class="panel-header">
                     <h2 class="panel-title">{{ signalDimensionLabel(group.dimension) }}</h2>
@@ -302,17 +312,89 @@
                         <th>n</th>
                         <th>Win%</th>
                         <th>Avg Ret</th>
+                        <th>Med Ret</th>
+                        <th>P.Factor</th>
+                        <th>IC</th>
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="row in group.rows" :key="row.label">
-                        <td>{{ row.label }}</td>
+                      <tr v-for="row in group.rows" :key="row.label" :class="signalConfClass(row.count)">
+                        <td>
+                          {{ row.label }}
+                          <span v-if="signalConfBadge(row.count)" class="conf-badge">{{ signalConfBadge(row.count) }}</span>
+                        </td>
                         <td>{{ fmtCount(row.count) }}</td>
                         <td :class="icColor(row.win_rate - 0.5)">{{ fmtPercent(row.win_rate) }}</td>
                         <td :class="icColor(row.avg_outcome_return)">{{ fmtSigned(row.avg_outcome_return, 4) }}</td>
+                        <td :class="icColor(row.median_return)">{{ fmtSigned(row.median_return, 4) }}</td>
+                        <td :class="icColor(row.profit_factor - 1)">{{ Number.isFinite(row.profit_factor) ? row.profit_factor.toFixed(2) : '∞' }}</td>
+                        <td :class="icColor(row.ic)">{{ fmtIC(row.ic) }}</td>
                       </tr>
                     </tbody>
                   </table>
+                </div>
+              </section>
+
+              <section v-else class="signal-summary-grid signal-diff-section">
+                <div v-for="group in signalDiffGroups" :key="group.dimension" class="signal-summary-panel">
+                  <div class="panel-header">
+                    <h2 class="panel-title">{{ signalDimensionLabel(group.dimension) }}</h2>
+                    <span class="text-dim">Winner vs Loser regime share</span>
+                  </div>
+                  <table class="dense-table signal-summary-table">
+                    <thead>
+                      <tr>
+                        <th>Label</th>
+                        <th>n</th>
+                        <th>W share%</th>
+                        <th>L share%</th>
+                        <th>Diff pp</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="row in group.rows" :key="row.label" :class="signalConfClass(row.count)">
+                        <td>
+                          {{ row.label }}
+                          <span v-if="signalConfBadge(row.count)" class="conf-badge">{{ signalConfBadge(row.count) }}</span>
+                        </td>
+                        <td>{{ fmtCount(row.count) }}</td>
+                        <td>{{ fmtPercent(row.wShare) }}</td>
+                        <td>{{ fmtPercent(row.lShare) }}</td>
+                        <td :class="icColor(row.diff * 5)">{{ (row.diff * 100).toFixed(1) }}pp</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section v-if="signalRows.length && signalViewMode !== 'diff'" class="signal-hints-panel">
+                <div class="panel-header">
+                  <h2 class="panel-title">Regime Candidate Hints</h2>
+                  <span class="text-dim">n ≥ 30 only · win%≥52% favorable · win%≤49% weak</span>
+                </div>
+                <div class="signal-hints-grid">
+                  <div class="hints-col">
+                    <div class="hints-col-title text-up">Favorable contexts</div>
+                    <div v-for="h in signalCandidateHints.favorable" :key="`${h.dim}-${h.label}`" class="hint-row">
+                      <span class="hint-dim">{{ signalDimensionLabel(h.dim) }}</span>
+                      <span class="hint-label">{{ h.label }}</span>
+                      <span class="hint-stat text-up">{{ fmtPercent(h.win_rate) }}</span>
+                      <span class="text-dim hint-ic" v-if="Number.isFinite(h.ic)">IC={{ fmtIC(h.ic) }}</span>
+                      <span class="text-dim">n={{ fmtCount(h.count) }}</span>
+                    </div>
+                    <div v-if="!signalCandidateHints.favorable.length" class="text-dim" style="font-size:10px;padding:4px 0">No favorable context (win%≥52%, n≥30)</div>
+                  </div>
+                  <div class="hints-col">
+                    <div class="hints-col-title text-down">Weak contexts</div>
+                    <div v-for="h in signalCandidateHints.weak" :key="`${h.dim}-${h.label}`" class="hint-row">
+                      <span class="hint-dim">{{ signalDimensionLabel(h.dim) }}</span>
+                      <span class="hint-label">{{ h.label }}</span>
+                      <span class="hint-stat text-down">{{ fmtPercent(h.win_rate) }}</span>
+                      <span class="text-dim hint-ic" v-if="Number.isFinite(h.ic)">IC={{ fmtIC(h.ic) }}</span>
+                      <span class="text-dim">n={{ fmtCount(h.count) }}</span>
+                    </div>
+                    <div v-if="!signalCandidateHints.weak.length" class="text-dim" style="font-size:10px;padding:4px 0">No weak context (win%≤49%, n≥30)</div>
+                  </div>
                 </div>
               </section>
 
@@ -326,6 +408,9 @@
                 <div class="signal-table-wrap">
                   <table class="dense-table signal-table">
                     <thead>
+                      <tr class="signal-col-group-row">
+                        <th v-for="grp in signalColumnGroups" :key="grp.group" :colspan="grp.cols.length" class="signal-col-group">{{ grp.group }}</th>
+                      </tr>
                       <tr>
                         <th v-for="col in signalTableColumns" :key="col.key" @click="sortSignalRows(col.key)">
                           {{ col.label }}<span v-if="signalSort.key === col.key">{{ signalSort.dir === 'asc' ? ' ▲' : ' ▼' }}</span>
@@ -954,6 +1039,7 @@ const signalFilters = ref({
   month: 'all',
   split: 'all',
 })
+const signalViewMode = ref('all')
 const factorLabThresholds = ref({
   min_oos_ic: 0.03,
   min_ir: 0.5,
@@ -1182,24 +1268,31 @@ const factorHorizonDecayOption = computed(() => {
     yName: 'Oriented Rank IC',
   })
 })
-const signalTableColumns = computed(() => {
+const signalColumnGroups = computed(() => {
   const horizonCols = parsedHorizons().map(h => ({ key: `future_return_${h}_bar`, label: `ret_${h}` }))
   return [
-    { key: 'timestamp', label: 'timestamp' },
-    { key: 'factor_value', label: 'factor_value' },
-    { key: 'signal_score', label: 'score' },
-    { key: 'direction', label: 'dir' },
-    ...horizonCols,
-    { key: 'outcome', label: 'outcome' },
-    { key: 'outcome_return', label: 'out_ret' },
-    { key: 'session', label: 'session' },
-    { key: 'market_vol', label: 'vol_regime' },
-    { key: 'vwap_zone', label: 'vwap' },
-    { key: 'vol_profile', label: 'vol_profile' },
-    { key: 'month', label: 'month' },
-    { key: 'split', label: 'split' },
+    { group: 'Signal Info', cols: [
+      { key: 'timestamp', label: 'timestamp' },
+      { key: 'factor_value', label: 'factor_value' },
+      { key: 'signal_score', label: 'score' },
+      { key: 'direction', label: 'dir' },
+    ]},
+    { group: 'Future Outcome', cols: [
+      ...horizonCols,
+      { key: 'outcome', label: 'outcome' },
+      { key: 'outcome_return', label: 'out_ret' },
+    ]},
+    { group: 'Market Context', cols: [
+      { key: 'session', label: 'session' },
+      { key: 'market_vol', label: 'vol_regime' },
+      { key: 'vwap_zone', label: 'vwap' },
+      { key: 'vol_profile', label: 'vol_profile' },
+      { key: 'month', label: 'month' },
+      { key: 'split', label: 'split' },
+    ]},
   ]
 })
+const signalTableColumns = computed(() => signalColumnGroups.value.flatMap(g => g.cols))
 const signalFilterOptions = computed(() => {
   const opts = {
     session: [],
@@ -1246,10 +1339,55 @@ const signalSortedRows = computed(() => {
 })
 const signalBreakdownGroups = computed(() => {
   const dims = ['session', 'market_vol', 'vwap_zone', 'vol_profile']
+  const mode = signalViewMode.value
+  const sourceRows = mode === 'winners'
+    ? signalFilteredRows.value.filter(r => r.outcome === 'win')
+    : mode === 'losers'
+    ? signalFilteredRows.value.filter(r => r.outcome === 'loss')
+    : signalFilteredRows.value
   return dims.map(dimension => ({
     dimension,
-    rows: signalBreakdown(signalFilteredRows.value, dimension).slice(0, 12),
+    rows: signalBreakdown(sourceRows, dimension).slice(0, 12),
   }))
+})
+const signalDiffGroups = computed(() => {
+  const dims = ['session', 'market_vol', 'vwap_zone', 'vol_profile']
+  const allRows = signalFilteredRows.value
+  const winRows = allRows.filter(r => r.outcome === 'win')
+  const lossRows = allRows.filter(r => r.outcome === 'loss')
+  const totalW = winRows.length || 1
+  const totalL = lossRows.length || 1
+  return dims.map(dimension => {
+    const labels = [...new Set(allRows.map(r => r[dimension]).filter(Boolean))]
+    const rows = labels.map(label => {
+      const wShare = winRows.filter(r => r[dimension] === label).length / totalW
+      const lShare = lossRows.filter(r => r[dimension] === label).length / totalL
+      const allCount = allRows.filter(r => r[dimension] === label).length
+      return { label, wShare, lShare, diff: wShare - lShare, count: allCount }
+    }).sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff)).slice(0, 12)
+    return { dimension, rows }
+  })
+})
+const signalCandidateHints = computed(() => {
+  const favorable = [], weak = []
+  for (const group of signalBreakdownGroups.value) {
+    for (const row of group.rows) {
+      if (row.count < 30) continue
+      if (row.win_rate >= 0.52) favorable.push({ dim: group.dimension, label: row.label, win_rate: row.win_rate, count: row.count, ic: row.ic })
+      else if (row.win_rate <= 0.49) weak.push({ dim: group.dimension, label: row.label, win_rate: row.win_rate, count: row.count, ic: row.ic })
+    }
+  }
+  favorable.sort((a, b) => b.win_rate - a.win_rate)
+  weak.sort((a, b) => a.win_rate - b.win_rate)
+  return { favorable: favorable.slice(0, 6), weak: weak.slice(0, 6) }
+})
+const signalQuantileDescription = computed(() => {
+  const dir = signalMeta.value.direction
+  const pct = Math.round(signalQuantile.value * 100)
+  if (!dir || !signalRows.value.length) return `top ${pct}%`
+  if (dir === 'Long') return `Long favorable: top ${pct}%`
+  if (dir === 'Short') return `Short favorable: bottom ${pct}%`
+  return `abs top ${pct}%`
 })
 const tabRows = computed(() => {
   const res = selectedResult.value
@@ -1454,7 +1592,7 @@ function restoreResearchSettings(saved) {
     signalFilters.value = { ...signalFilters.value, ...saved.signal_filters }
   }
 }
-function fmtIC(v) { return typeof v === 'number' ? v.toFixed(4) : '—' }
+function fmtIC(v) { return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(4) : '—' }
 function fmtSigned(v, digits = 4) {
   const n = Number(v)
   if (!Number.isFinite(n)) return '—'
@@ -1614,6 +1752,66 @@ function signalMatchesVolProfile(row, filter) {
   if (row.vol_profile === filter) return true
   return Array.isArray(row.vol_profile_flags) && row.vol_profile_flags.includes(filter)
 }
+function rankArray(arr) {
+  const idx = arr.map((v, i) => [v, i]).sort((a, b) => a[0] - b[0])
+  const ranks = new Array(arr.length)
+  let i = 0
+  while (i < idx.length) {
+    let j = i
+    while (j < idx.length - 1 && idx[j + 1][0] === idx[j][0]) j++
+    const avg = (i + j) / 2
+    for (let k = i; k <= j; k++) ranks[idx[k][1]] = avg
+    i = j + 1
+  }
+  return ranks
+}
+function pearsonCorr(x, y) {
+  const n = x.length
+  if (n < 2) return NaN
+  const mx = x.reduce((s, v) => s + v, 0) / n
+  const my = y.reduce((s, v) => s + v, 0) / n
+  let num = 0, dx2 = 0, dy2 = 0
+  for (let i = 0; i < n; i++) {
+    const dx = x[i] - mx, dy = y[i] - my
+    num += dx * dy; dx2 += dx * dx; dy2 += dy * dy
+  }
+  const denom = Math.sqrt(dx2 * dy2)
+  return denom === 0 ? 0 : num / denom
+}
+function spearmanIC(items) {
+  const pairs = items
+    .map(r => [Number(r.signal_score), Number(r.outcome_return)])
+    .filter(([s, ret]) => Number.isFinite(s) && Number.isFinite(ret))
+  if (pairs.length < 3) return NaN
+  return pearsonCorr(rankArray(pairs.map(p => p[0])), rankArray(pairs.map(p => p[1])))
+}
+function medianVal(arr) {
+  if (!arr.length) return NaN
+  const sorted = [...arr].sort((a, b) => a - b)
+  const m = sorted.length >> 1
+  return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2
+}
+function profitFactor(items) {
+  let winSum = 0, lossSum = 0
+  for (const row of items) {
+    const r = Number(row.outcome_return)
+    if (!Number.isFinite(r)) continue
+    if (r > 0) winSum += r
+    else lossSum += Math.abs(r)
+  }
+  return lossSum === 0 ? (winSum > 0 ? Infinity : NaN) : winSum / lossSum
+}
+function signalConfClass(n) {
+  if (n < 30) return 'conf-low'
+  if (n < 100) return 'conf-observe'
+  if (n < 300) return 'conf-medium'
+  return ''
+}
+function signalConfBadge(n) {
+  if (n < 30) return 'LOW N'
+  if (n < 100) return 'OBS'
+  return ''
+}
 function signalBreakdown(rows, dimension) {
   const groups = new Map()
   for (const row of rows || []) {
@@ -1633,6 +1831,9 @@ function signalBreakdown(rows, dimension) {
       losses,
       win_rate: items.length ? wins / items.length : NaN,
       avg_outcome_return: mean(vals),
+      median_return: medianVal(vals),
+      profit_factor: profitFactor(items),
+      ic: spearmanIC(items),
     }
   }).sort((a, b) => b.count - a.count)
 }
@@ -2065,6 +2266,27 @@ onUnmounted(() => {
 .signal-outcome.outcome-win { color: #26a69a; }
 .signal-outcome.outcome-loss { color: #ef5350; }
 .signal-outcome.outcome-flat { color: #ffca28; }
+.signal-quantile-desc { font-size: 10px; color: #5a8abe; white-space: nowrap; }
+.signal-view-mode-bar { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
+.signal-view-mode-bar .mode-active { color: #8fe7d8; border-color: #26a69a; background: #0e2420; }
+.signal-diff-section { }
+.conf-low td { color: #6b7280 !important; }
+.conf-low .conf-badge { background: #374151; color: #9ca3af; }
+.conf-observe td { color: #b0892a !important; }
+.conf-observe .conf-badge { background: #3a2a0a; color: #ffca28; }
+.conf-badge { display: inline-block; font-size: 8px; font-weight: 700; padding: 1px 4px; border-radius: 3px; margin-left: 4px; vertical-align: middle; letter-spacing: 0.03em; }
+.signal-col-group-row { background: #0f1824; }
+.signal-col-group { text-align: center; color: #5a7898; font-size: 9px; font-weight: 600; letter-spacing: 0.06em; padding: 3px 6px; border-right: 1px solid #263245; text-transform: uppercase; }
+.signal-col-group:last-child { border-right: none; }
+.signal-hints-panel { background: #151c2a; border: 1px solid #263245; border-radius: 6px; padding: 10px; }
+.signal-hints-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 6px; }
+.hints-col { display: flex; flex-direction: column; gap: 4px; }
+.hints-col-title { font-size: 10px; font-weight: 700; margin-bottom: 4px; }
+.hint-row { display: flex; align-items: center; gap: 6px; font-size: 10px; }
+.hint-dim { color: #5a7898; min-width: 70px; }
+.hint-label { color: #d1d4dc; flex: 1; }
+.hint-stat { font-weight: 700; min-width: 36px; text-align: right; }
+.hint-ic { color: #7a8698; }
 .viz-scroll { height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .viz-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-height: 260px; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
