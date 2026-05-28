@@ -58,6 +58,8 @@ class ExitModule(BaseModule):
             "tp_price":    tp_price,
             "trail_price": None,
             "open_time":   open_time,
+            "mfe":         0.0,
+            "mae":         0.0,
         }
 
     def check_exit(
@@ -78,26 +80,43 @@ class ExitModule(BaseModule):
         trail      = position.get("trail_price")
         cfg        = self.cfg
         sig_type   = "long_exit" if direction == "long" else "short_exit"
+        risk       = abs(entry - stop)
+
+        # ── 更新 MFE / MAE ──────────────────────────────────────────────────
+        if "mfe" not in position:
+            position["mfe"] = 0.0
+            position["mae"] = 0.0
+
+        if direction == "long":
+            position["mfe"] = max(position["mfe"], k.high - entry)
+            position["mae"] = max(position["mae"], entry - k.low)
+        else:
+            position["mfe"] = max(position["mfe"], entry - k.low)
+            position["mae"] = max(position["mae"], k.high - entry)
+
+        def _build_sig(label: str, price: float, fill: float) -> StrategySignal:
+            return StrategySignal(
+                open_time=k.open_time, price=price,
+                signal_type=sig_type, label=label,
+                fill_price=fill,
+                meta={
+                    "mfe": position["mfe"],
+                    "mae": position["mae"],
+                    "mfe_r": position["mfe"] / risk if risk > 0 else 0.0,
+                    "mae_r": position["mae"] / risk if risk > 0 else 0.0,
+                }
+            )
 
         # ── 時間衰減 ─────────────────────────────────────────────────────────
         if cfg.time_decay_bars > 0 and bars_held >= cfg.time_decay_bars:
-            return StrategySignal(
-                open_time=k.open_time, price=k.close,
-                signal_type=sig_type, label="TD",
-                fill_price=k.open,
-            )
+            return _build_sig("TD", k.close, k.open)
 
         if direction == "long":
             # ── 止損 ────────────────────────────────────────────────────────
             if k.low <= stop:
-                return StrategySignal(
-                    open_time=k.open_time, price=stop,
-                    signal_type=sig_type, label="SL",
-                    fill_price=min(k.open, stop),
-                )
+                return _build_sig("SL", stop, min(k.open, stop))
 
             # ── 追蹤止損更新 ────────────────────────────────────────────────
-            risk = abs(entry - stop)
             if cfg.use_trailing_stop and risk > 0:
                 profit_r = (k.high - entry) / risk
                 if profit_r >= cfg.trailing_trigger_r:
@@ -110,29 +129,16 @@ class ExitModule(BaseModule):
                         trail = new_trail
 
             if trail is not None and k.low <= trail:
-                return StrategySignal(
-                    open_time=k.open_time, price=trail,
-                    signal_type=sig_type, label="TS",
-                    fill_price=min(k.open, trail),
-                )
+                return _build_sig("TS", trail, min(k.open, trail))
 
             # ── 止盈 ────────────────────────────────────────────────────────
             if k.high >= tp:
-                return StrategySignal(
-                    open_time=k.open_time, price=tp,
-                    signal_type=sig_type, label="TP",
-                    fill_price=max(k.open, tp),
-                )
+                return _build_sig("TP", tp, max(k.open, tp))
 
         else:  # short
             if k.high >= stop:
-                return StrategySignal(
-                    open_time=k.open_time, price=stop,
-                    signal_type=sig_type, label="SL",
-                    fill_price=max(k.open, stop),
-                )
+                return _build_sig("SL", stop, max(k.open, stop))
 
-            risk = abs(entry - stop)
             if cfg.use_trailing_stop and risk > 0:
                 profit_r = (entry - k.low) / risk
                 if profit_r >= cfg.trailing_trigger_r:
@@ -145,17 +151,9 @@ class ExitModule(BaseModule):
                         trail = new_trail
 
             if trail is not None and k.high >= trail:
-                return StrategySignal(
-                    open_time=k.open_time, price=trail,
-                    signal_type=sig_type, label="TS",
-                    fill_price=max(k.open, trail),
-                )
+                return _build_sig("TS", trail, max(k.open, trail))
 
             if k.low <= tp:
-                return StrategySignal(
-                    open_time=k.open_time, price=tp,
-                    signal_type=sig_type, label="TP",
-                    fill_price=min(k.open, tp),
-                )
+                return _build_sig("TP", tp, min(k.open, tp))
 
         return None

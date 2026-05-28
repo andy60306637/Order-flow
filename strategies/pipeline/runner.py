@@ -129,22 +129,27 @@ class MultiPipelineRunner:
         fill_time = source_signal.fill_time if source_signal is not None else None
         _mv  = ctx.regime_meta.get("market_vol_regime") or {}
         _vd  = ctx.regime_meta.get("vwap_dev") or {}
+        _vp  = ctx.regime_meta.get("vol_profile") or {}
+        exit_plan = ctx.alpha_meta.get("exit_plan", {})
         meta = {
             **source_meta,
-            "pipeline":         ctx.pipeline_name,
-            "regime":           ctx.regime,
-            "session":          ctx.regime_meta.get("session"),
+            "pipeline":          ctx.pipeline_name,
+            "regime":            ctx.regime,
+            "session":           ctx.regime_meta.get("session"),
             "market_vol_regime": _mv.get("label"),
-            "vwap_dev_zone":    _vd.get("label"),
-            "vwap_z_score":     _vd.get("z_score"),
-            "vwap_price":       _vd.get("vwap"),
-            "vwap_sigma":       _vd.get("sigma"),
-            "alpha_score":      ctx.alpha_score,
-            "expected_rr":      ctx.expected_rr,
-            "qty":              ctx.qty,
-            "tp_price":         ctx.tp_price,
-            "expected_fee":     ctx.expected_fee,
-            "net_reward":       ctx.net_reward,
+            "vwap_dev_zone":     _vd.get("label"),
+            "vwap_z_score":      _vd.get("z_score"),
+            "vwap_price":        _vd.get("vwap"),
+            "vwap_sigma":        _vd.get("sigma"),
+            "vol_profile":       _vp.get("label"),
+            "k0_range_atr":      exit_plan.get("k0_range_atr"),
+            "risk_pct":          exit_plan.get("risk_pct"),
+            "alpha_score":       ctx.alpha_score,
+            "expected_rr":       ctx.expected_rr,
+            "qty":               ctx.qty,
+            "tp_price":          ctx.tp_price,
+            "expected_fee":      ctx.expected_fee,
+            "net_reward":        ctx.net_reward,
         }
         return StrategySignal(
             open_time   = ctx.klines[ctx.idx].open_time,

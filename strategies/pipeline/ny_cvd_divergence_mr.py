@@ -220,6 +220,251 @@ class NYCVDDivergenceLongSignal(SignalModule):
         )
 
 
+# ── NYCVDDivergenceTickEntrySignal ────────────────────────────────────────────
+
+class NYCVDDivergenceTickEntrySignal(SignalModule):
+    """
+    NY CVD 背離多單訊號 v2：加入 Tick-level Entry State Machine。
+
+    支援：
+    1. entry_boundary_mode: body_high / high
+    2. guardian_mode: body_low / low / None
+    3. entry_delta_eff_threshold: (2*buy - vol) / vol
+    4. zoom_bars: 可選 1 或 2
+    """
+
+    name = "NYCVDDivergenceTickEntry"
+
+    def __init__(
+        self,
+        window:                    int   = 20,
+        sl_offset:                 float = 0.0,
+        entry_boundary_mode:       str   = "high",       # "body_high" | "high"
+        guardian_mode:             str   = "body_low",   # "body_low" | "low" | None
+        entry_delta_eff_threshold: float = 0.4,
+        zoom_bars:                 int   = 1,
+        allow_bar_fallback:        bool  = False,
+        max_fill_slippage:         float = 1e9,          # 最大允許滑點 (USDT)
+        max_fill_slippage_R:       float = 0.0,          # 最大允許滑點 (R 倍數, 0=停用)
+        min_k0_range_atr:          float = 0.0,          # 最小 K0 振幅 (ATR 倍數)
+        max_wait_ticks:            int   = 999999,       # 最大等待 tick 數
+    ) -> None:
+        self.window                    = window
+        self.sl_offset                 = sl_offset
+        self.entry_boundary_mode       = entry_boundary_mode
+        self.guardian_mode             = guardian_mode
+        self.entry_delta_eff_threshold = entry_delta_eff_threshold
+        self.zoom_bars                 = zoom_bars
+        self.allow_bar_fallback        = allow_bar_fallback
+        self.max_fill_slippage         = max_fill_slippage
+        self.max_fill_slippage_R       = max_fill_slippage_R
+        self.min_k0_range_atr          = min_k0_range_atr
+        self.max_wait_ticks            = max_wait_ticks
+        from strategies.pipeline.component import ATRComponent
+        self._atr_comp                 = ATRComponent(period=14)
+
+    def can_trade(self, klines: list[Kline], idx: int) -> bool:
+        # 需要 2*window 棒歷史 + zoom_bars 緩衝 + ATR 緩衝(14)
+        return idx >= max(2 * self.window + self.zoom_bars, 14 + self.zoom_bars)
+
+    def detect_k0(self, klines: list[Kline], idx: int) -> Optional[dict]:
+        """
+        支援 zoom_bars 窗口內的 k0 偵測。
+        idx 是當前準備進場嘗試的 Bar 索引。
+        """
+        n = self.window
+
+        # 如果有 min_k0_range_atr，先計算 ATR
+        atr = 0.0
+        if self.min_k0_range_atr > 0:
+            atr_res = self._atr_comp.compute(klines, idx - 1)
+            atr = atr_res.get("atr", 0.0)
+
+        for offset in range(1, self.zoom_bars + 1):
+            k0_idx = idx - offset
+            if k0_idx < 2 * n:
+                continue
+
+            k0 = klines[k0_idx]
+
+            # 檢查 k0 振幅
+            if self.min_k0_range_atr > 0 and atr > 0:
+                if (k0.high - k0.low) < atr * self.min_k0_range_atr:
+                    continue
+
+            # rolling_delta at k0
+            win_k0 = klines[k0_idx - n + 1 : k0_idx + 1]
+            rolling_delta_k0 = sum(
+                k.taker_buy_volume - (k.volume - k.taker_buy_volume) for k in win_k0
+            ) / n
+
+            # prev_delta at k0
+            win_prev = klines[k0_idx - 2 * n + 1 : k0_idx - n + 1]
+            rolling_delta_prev = sum(
+                k.taker_buy_volume - (k.volume - k.taker_buy_volume) for k in win_prev
+            ) / n
+
+            price_n_ago = klines[k0_idx - n].close
+            price_fell  = k0.close < price_n_ago
+            cvd_rose    = rolling_delta_k0 > rolling_delta_prev
+
+            if price_fell and cvd_rose:
+                # 檢查中間棒是否破了 guardian (如果 zoom_bars > 1)
+                guardian_val = None
+                if self.guardian_mode == "body_low":
+                    guardian_val = min(k0.open, k0.close)
+                elif self.guardian_mode == "low":
+                    guardian_val = k0.low
+
+                valid = True
+                if offset > 1 and guardian_val is not None:
+                    for m_idx in range(k0_idx + 1, idx):
+                        if klines[m_idx].low < guardian_val:
+                            valid = False
+                            break
+
+                if valid:
+                    return {
+                        "direction":      "long",
+                        "k0_idx":         k0_idx,
+                        "k0_low":         k0.low,
+                        "rolling_delta":  rolling_delta_k0,
+                        "prev_delta":     rolling_delta_prev,
+                        "cvd_divergence": rolling_delta_k0 - rolling_delta_prev,
+                        "zoom_offset":    offset,
+                        "atr14":          atr,
+                    }
+        return None
+
+    def entry_conditions(
+        self,
+        klines:   list[Kline],
+        idx:      int,
+        k0_meta:  dict,
+        tick_map: Optional[TickBarMap] = None,
+        diag:     Optional[dict]       = None,
+    ) -> Optional[StrategySignal]:
+        k0_idx = k0_meta["k0_idx"]
+        k0     = klines[k0_idx]
+        entry_bar = klines[idx]
+
+        # Entry Boundary
+        if self.entry_boundary_mode == "body_high":
+            boundary = max(k0.open, k0.close)
+        else:
+            boundary = k0.high
+
+        # Guardian
+        guardian = None
+        if self.guardian_mode == "body_low":
+            guardian = min(k0.open, k0.close)
+        elif self.guardian_mode == "low":
+            guardian = k0.low
+
+        # 計算有效滑點門檻：R 模式優先，否則用固定 USDT
+        if self.max_fill_slippage_R > 0 and guardian is not None and boundary > guardian:
+            _eff_max_slippage = self.max_fill_slippage_R * (boundary - guardian)
+        else:
+            _eff_max_slippage = self.max_fill_slippage
+
+        meta = {
+            "k0_idx":           k0_idx,
+            "boundary":         boundary,
+            "guardian":         guardian,
+            "boundary_touched": False,
+            "guardian_killed":  False,
+            "delta_not_enough": False,
+            "wait_ticks":       0,
+            "fill_slippage":    0.0,
+            "zoom_offset":      k0_meta.get("zoom_offset", 1),
+            "cvd_divergence":   k0_meta.get("cvd_divergence"),
+            "cvd_ratio":        k0_meta.get("cvd_divergence") / k0.volume if k0.volume > 0 else 0.0,
+        }
+
+        def _update_diag(m):
+            if diag is not None:
+                diag.update(m)
+
+        ticks = None
+        if tick_map is not None:
+            ticks = tick_map.get(entry_bar.open_time)
+
+        if ticks is not None and len(ticks) > 0:
+            cum_buy_vol = 0.0
+            cum_vol     = 0.0
+            for i, tick in enumerate(ticks):
+                price = float(tick[1])
+                qty   = float(tick[2])
+                is_bm = tick[3] > 0.5
+
+                # 檢查最大等待 tick 數
+                if (i + 1) > self.max_wait_ticks:
+                    break
+
+                cum_vol += qty
+                if not is_bm:
+                    cum_buy_vol += qty
+
+                if guardian is not None and price < guardian:
+                    meta["guardian_killed"] = True
+                    _update_diag(meta)
+                    return None
+
+                if cum_vol > 0:
+                    cum_delta_eff = (2.0 * cum_buy_vol - cum_vol) / cum_vol
+                else:
+                    cum_delta_eff = -1.0
+
+                if price > boundary:
+                    meta["boundary_touched"] = True
+                    if cum_delta_eff >= self.entry_delta_eff_threshold:
+                        slippage = price - boundary
+
+                        # 檢查滑點限制（USDT 固定 or R 標準化，由 _eff_max_slippage 決定）
+                        if slippage > _eff_max_slippage:
+                            return None
+
+                        meta["wait_ticks"]      = i + 1
+                        meta["fill_slippage"]   = slippage
+                        meta["entry_delta_eff"] = cum_delta_eff
+                        _update_diag(meta)
+                        return StrategySignal(
+                            open_time   = entry_bar.open_time,
+                            price       = boundary,
+                            fill_price  = price,
+                            stop_price  = k0.low - self.sl_offset,
+                            signal_type = "long_entry",
+                            label       = "L_CVD_TICK",
+                            meta        = meta,
+                        )
+                    else:
+                        meta["delta_not_enough"] = True
+
+            _update_diag(meta)
+            return None
+
+        if self.allow_bar_fallback:
+            if entry_bar.low < (guardian or -1e9):
+                meta["guardian_killed"] = True
+                _update_diag(meta)
+                return None
+            if entry_bar.high > boundary:
+                # Bar 模式無法確認精確 tick delta_eff，僅作為保底
+                _update_diag(meta)
+                return StrategySignal(
+                    open_time   = entry_bar.open_time,
+                    price       = boundary,
+                    direction   = "long",
+                    stop_price  = k0.low - self.sl_offset,
+                    signal_type = "long_entry",
+                    label       = "L_CVD_BAR",
+                    meta        = meta,
+                )
+
+        _update_diag(meta)
+        return None
+
+
 # ── Enhancer Modules ──────────────────────────────────────────────────────────
 
 class ReversalBarUpEnhancer(EnhancerModule):
@@ -392,10 +637,20 @@ def build_ny_cvd_divergence_mr_pipeline(
     mv_er_period:  int = 30,
     mv_adx_period: int = 14,
     mv_lookback:   int = 100,
-    # ── Stage 2: Alpha（NYCVDDivergenceLong）────────────────────────────────
+    # ── Stage 2: Alpha（NYCVDDivergenceTickEntry）───────────────────────────
     cvd_window:    int   = 20,
     sl_offset:     float = 0.0,
     min_micro_cvd: float = 0.0,
+    # V2 Entry State Machine 參數
+    entry_boundary_mode:       str   = "high",
+    guardian_mode:             str   = "body_low",
+    entry_delta_eff_threshold: float = 0.4,
+    zoom_bars:                 int   = 1,
+    allow_bar_fallback:        bool  = False,
+    max_fill_slippage:         float = 1e9,
+    max_fill_slippage_R:       float = 0.0,
+    min_k0_range_atr:          float = 0.0,
+    max_wait_ticks:            int   = 999999,
     # ── Stage 2.5: Enhancer ──────────────────────────────────────────────────
     # 直接傳入 enhancer_modules 可覆蓋所有 flag（向後相容）
     enhancer_modules: list | None = None,
@@ -475,10 +730,18 @@ def build_ny_cvd_divergence_mr_pipeline(
     )
     session_comp = SessionComponent()
 
-    signal = NYCVDDivergenceLongSignal(
-        window        = cvd_window,
-        sl_offset     = sl_offset,
-        min_micro_cvd = min_micro_cvd,
+    signal = NYCVDDivergenceTickEntrySignal(
+        window                    = cvd_window,
+        sl_offset                 = sl_offset,
+        entry_boundary_mode       = entry_boundary_mode,
+        guardian_mode             = guardian_mode,
+        entry_delta_eff_threshold = entry_delta_eff_threshold,
+        zoom_bars                 = zoom_bars,
+        allow_bar_fallback        = allow_bar_fallback,
+        max_fill_slippage         = max_fill_slippage,
+        max_fill_slippage_R       = max_fill_slippage_R,
+        min_k0_range_atr          = min_k0_range_atr,
+        max_wait_ticks            = max_wait_ticks,
     )
 
     # flag → modules 組裝（直接傳入 enhancer_modules 時略過 flags）

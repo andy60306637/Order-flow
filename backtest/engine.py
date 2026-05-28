@@ -75,6 +75,13 @@ TRADE_RESEARCH_FIELDS = [
     "entry_risk",
     "final_trade_delta",
     "trailing_stop_mode",
+    "wait_ticks",
+    "fill_slippage",
+    "vol_profile",
+    "k0_range_atr",
+    "risk_pct",
+    "cvd_ratio",
+    "entry_delta_eff",
 ]
 
 

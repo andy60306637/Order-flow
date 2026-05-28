@@ -572,16 +572,21 @@ class EntryManagementStage(PipelineStage):
         ctx.stop_price = stop
 
         # ── 出場骨架（metadata）────────────────────────────────────────────────
+        k0_range = k0.high - k0.low
+        k0_range_atr = k0_range / atr if atr > 0 else 0.0
+
         ctx.alpha_meta["exit_plan"] = {
-            "tp":       "2RR_baseline",       # RRStage 計算
-            "sl":       stop,
-            "sl_basis": "ATR",
-            "atr":      atr,
-            "atr_k":    self.atr_k,
-            "stop_pct": (entry - stop) / entry, # 供診斷用
-            "time":     None,                 # TODO: 因子衰退週期設置後填入
-            "info":     None,                 # TODO: 事件驅動出場規則
-            "regime":   None,                 # TODO: Regime 變化出場
+            "tp":           "2RR_baseline",       # RRStage 計算
+            "sl":           stop,
+            "sl_basis":     "ATR",
+            "atr":          atr,
+            "atr_k":        self.atr_k,
+            "stop_pct":     (entry - stop) / entry, # 供診斷用
+            "risk_pct":     (entry - stop) / entry, # 別名
+            "k0_range_atr": k0_range_atr,
+            "time":         None,                 # TODO: 因子衰退週期設置後填入
+            "info":         None,                 # TODO: 事件驅動出場規則
+            "regime":       None,                 # TODO: Regime 變化出場
         }
         return ctx
 
