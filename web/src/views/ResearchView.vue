@@ -221,6 +221,132 @@
           </div>
         </template>
 
+        <template v-else-if="activeTab === 'Signal Dataset Explorer'">
+          <div class="signal-explorer">
+            <div class="signal-toolbar">
+              <label>Factor</label>
+              <select v-model="selectedFactorName" class="select-field signal-factor-select">
+                <option v-for="name in factorLabFactorNames" :key="name" :value="name">{{ name }}</option>
+              </select>
+              <label>Quantile</label>
+              <input v-model.number="signalQuantile" type="number" min="0.01" max="0.5" step="0.05" class="input-field signal-quantile" />
+              <button class="btn-primary compact-action inline" :disabled="signalLoading || !selectedFactorName" @click="loadSignalDataset">
+                {{ signalLoading ? 'Loading' : 'Load Signals' }}
+              </button>
+              <span class="text-dim">
+                {{ signalRows.length ? `${signalFilteredRows.length.toLocaleString()} / ${signalRows.length.toLocaleString()} rows` : 'No signal rows loaded' }}
+              </span>
+            </div>
+
+            <div v-if="signalError" class="hint text-down">{{ signalError }}</div>
+            <div v-if="signalMeta.reason === 'non_directional_factor'" class="empty-state compact">
+              Mixed-direction factor 不產生單向 signal outcome；請選 Long 或 Short factor。
+            </div>
+
+            <div v-else class="signal-content">
+              <section class="signal-filters">
+                <label>Outcome</label>
+                <select v-model="signalFilters.outcome" class="select-field">
+                  <option value="all">All</option>
+                  <option value="win">Win</option>
+                  <option value="loss">Loss</option>
+                  <option value="flat">Flat</option>
+                </select>
+                <label>Session</label>
+                <select v-model="signalFilters.session" class="select-field">
+                  <option value="all">All</option>
+                  <option v-for="v in signalFilterOptions.session" :key="v" :value="v">{{ v }}</option>
+                </select>
+                <label>Market Vol</label>
+                <select v-model="signalFilters.market_vol" class="select-field">
+                  <option value="all">All</option>
+                  <option v-for="v in signalFilterOptions.market_vol" :key="v" :value="v">{{ v }}</option>
+                </select>
+                <label>VWAP</label>
+                <select v-model="signalFilters.vwap_zone" class="select-field">
+                  <option value="all">All</option>
+                  <option value="extended">extended *</option>
+                  <option value="overextended">overextended *</option>
+                  <option value="extreme">extreme *</option>
+                  <option v-for="v in signalFilterOptions.vwap_zone" :key="v" :value="v">{{ v }}</option>
+                </select>
+                <label>Vol Profile</label>
+                <select v-model="signalFilters.vol_profile" class="select-field">
+                  <option value="all">All</option>
+                  <option v-for="v in signalFilterOptions.vol_profile" :key="v" :value="v">{{ v }}</option>
+                </select>
+                <label>Month</label>
+                <select v-model="signalFilters.month" class="select-field">
+                  <option value="all">All</option>
+                  <option v-for="v in signalFilterOptions.month" :key="v" :value="v">{{ v }}</option>
+                </select>
+                <label>Split</label>
+                <select v-model="signalFilters.split" class="select-field">
+                  <option value="all">All</option>
+                  <option value="train">Train</option>
+                  <option value="test">Test</option>
+                </select>
+                <button class="btn-ghost compact-action inline" @click="resetSignalFilters">Reset</button>
+              </section>
+
+              <section class="signal-summary-grid">
+                <div v-for="group in signalBreakdownGroups" :key="group.dimension" class="signal-summary-panel">
+                  <div class="panel-header">
+                    <h2 class="panel-title">{{ signalDimensionLabel(group.dimension) }}</h2>
+                    <span class="text-dim">{{ group.rows.length }} labels</span>
+                  </div>
+                  <table class="dense-table signal-summary-table">
+                    <thead>
+                      <tr>
+                        <th>Label</th>
+                        <th>n</th>
+                        <th>Win%</th>
+                        <th>Avg Ret</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="row in group.rows" :key="row.label">
+                        <td>{{ row.label }}</td>
+                        <td>{{ fmtCount(row.count) }}</td>
+                        <td :class="icColor(row.win_rate - 0.5)">{{ fmtPercent(row.win_rate) }}</td>
+                        <td :class="icColor(row.avg_outcome_return)">{{ fmtSigned(row.avg_outcome_return, 4) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section class="signal-table-panel">
+                <div class="panel-header">
+                  <h2 class="panel-title">Signal Table</h2>
+                  <span class="text-dim">
+                    outcome=H{{ signalMeta.outcome_horizon || '—' }} · {{ signalMeta.direction || '—' }} · threshold {{ fmtNumber(signalMeta.threshold, 4) }}
+                  </span>
+                </div>
+                <div class="signal-table-wrap">
+                  <table class="dense-table signal-table">
+                    <thead>
+                      <tr>
+                        <th v-for="col in signalTableColumns" :key="col.key" @click="sortSignalRows(col.key)">
+                          {{ col.label }}<span v-if="signalSort.key === col.key">{{ signalSort.dir === 'asc' ? ' ▲' : ' ▼' }}</span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="row in signalSortedRows" :key="`${row.timestamp_ms}-${row.factor_value}`" :class="`outcome-${row.outcome}`">
+                        <td v-for="col in signalTableColumns" :key="col.key" :class="signalCellClass(col.key, row[col.key])">
+                          {{ signalCellValue(row, col.key) }}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <div v-if="!signalSortedRows.length" class="empty-state compact">No signal rows match current filters.</div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </template>
+
         <template v-else-if="activeTab === 'Regime Matrix'">
           <div class="matrix-toolbar">
             <label>Metric</label>
@@ -656,7 +782,7 @@ const YearlyICBar = {
 }
 
 const tabs = [
-  'Factor Lab', 'Regime Matrix', 'Factor Ranking', 'Orthogonal Ranking', 'IC Time Series',
+  'Factor Lab', 'Signal Dataset Explorer', 'Regime Matrix', 'Factor Ranking', 'Orthogonal Ranking', 'IC Time Series',
   'Visualization', 'IC by Horizon', 'Quantiles', 'Monthly Stability',
   'Yearly Stability', 'Factor Correlations', 'Unavailable'
 ]
@@ -812,6 +938,22 @@ const activeRegime = ref('(all)')
 const matrixMetric = ref('oos_oriented_rank_ic')
 const selectedFactorName = ref('')
 const factorLabMetric = ref('oriented_rank_ic')
+const signalRows = ref([])
+const signalMeta = ref({})
+const signalLoading = ref(false)
+const signalError = ref('')
+const signalQuantile = ref(0.20)
+const signalLoadedKey = ref('')
+const signalSort = ref({ key: 'timestamp', dir: 'desc' })
+const signalFilters = ref({
+  outcome: 'all',
+  session: 'all',
+  market_vol: 'all',
+  vwap_zone: 'all',
+  vol_profile: 'all',
+  month: 'all',
+  split: 'all',
+})
 const factorLabThresholds = ref({
   min_oos_ic: 0.03,
   min_ir: 0.5,
@@ -1040,6 +1182,75 @@ const factorHorizonDecayOption = computed(() => {
     yName: 'Oriented Rank IC',
   })
 })
+const signalTableColumns = computed(() => {
+  const horizonCols = parsedHorizons().map(h => ({ key: `future_return_${h}_bar`, label: `ret_${h}` }))
+  return [
+    { key: 'timestamp', label: 'timestamp' },
+    { key: 'factor_value', label: 'factor_value' },
+    { key: 'signal_score', label: 'score' },
+    { key: 'direction', label: 'dir' },
+    ...horizonCols,
+    { key: 'outcome', label: 'outcome' },
+    { key: 'outcome_return', label: 'out_ret' },
+    { key: 'session', label: 'session' },
+    { key: 'market_vol', label: 'vol_regime' },
+    { key: 'vwap_zone', label: 'vwap' },
+    { key: 'vol_profile', label: 'vol_profile' },
+    { key: 'month', label: 'month' },
+    { key: 'split', label: 'split' },
+  ]
+})
+const signalFilterOptions = computed(() => {
+  const opts = {
+    session: [],
+    market_vol: [],
+    vwap_zone: [],
+    vol_profile: [],
+    month: [],
+  }
+  for (const key of Object.keys(opts)) {
+    if (key === 'vol_profile') {
+      opts[key] = [...new Set(signalRows.value.flatMap(row => [
+        row.vol_profile,
+        ...(Array.isArray(row.vol_profile_flags) ? row.vol_profile_flags : []),
+      ]).filter(Boolean))].sort()
+    } else {
+      opts[key] = [...new Set(signalRows.value.map(row => row[key]).filter(Boolean))].sort()
+    }
+  }
+  return opts
+})
+const signalFilteredRows = computed(() => signalRows.value.filter(row => {
+  const f = signalFilters.value
+  if (f.outcome !== 'all' && row.outcome !== f.outcome) return false
+  if (f.session !== 'all' && row.session !== f.session) return false
+  if (f.market_vol !== 'all' && row.market_vol !== f.market_vol) return false
+  if (f.month !== 'all' && row.month !== f.month) return false
+  if (f.split !== 'all' && row.split !== f.split) return false
+  if (f.vwap_zone !== 'all' && !signalMatchesVwap(row.vwap_zone, f.vwap_zone)) return false
+  if (f.vol_profile !== 'all' && !signalMatchesVolProfile(row, f.vol_profile)) return false
+  return true
+}))
+const signalSortedRows = computed(() => {
+  const rows = [...signalFilteredRows.value]
+  const { key, dir } = signalSort.value
+  const sign = dir === 'asc' ? 1 : -1
+  rows.sort((a, b) => {
+    const av = signalSortValue(a?.[key])
+    const bv = signalSortValue(b?.[key])
+    if (av < bv) return -1 * sign
+    if (av > bv) return 1 * sign
+    return 0
+  })
+  return rows
+})
+const signalBreakdownGroups = computed(() => {
+  const dims = ['session', 'market_vol', 'vwap_zone', 'vol_profile']
+  return dims.map(dimension => ({
+    dimension,
+    rows: signalBreakdown(signalFilteredRows.value, dimension).slice(0, 12),
+  }))
+})
 const tabRows = computed(() => {
   const res = selectedResult.value
   if (!res) return []
@@ -1115,6 +1326,29 @@ watch(factorLabFactorNames, selectInitialFactor)
 watch(selectedFactorName, scheduleSaveSettings)
 watch(factorLabMetric, scheduleSaveSettings)
 watch(factorLabThresholds, scheduleSaveSettings, { deep: true })
+watch(signalQuantile, scheduleSaveSettings)
+watch(signalFilters, scheduleSaveSettings, { deep: true })
+watch([
+  activeTab,
+  selectedFactorName,
+  activeRegime,
+  signalQuantile,
+  horizonsInput,
+  () => form.value.symbol,
+  () => form.value.interval,
+  () => form.value.selected_months.join('|'),
+  () => form.value.entry_lag,
+  () => form.value.train_ratio,
+], () => {
+  if (activeTab.value !== 'Signal Dataset Explorer') return
+  if (!selectedFactorName.value || !selectedResult.value) return
+  const key = currentSignalRequestKey()
+  if (key !== signalLoadedKey.value) {
+    signalRows.value = []
+    signalMeta.value = {}
+    signalError.value = ''
+  }
+})
 
 function toggleMonth(m) {
   const i = form.value.selected_months.indexOf(m)
@@ -1181,6 +1415,8 @@ function researchSettingsPayload() {
     selected_factor: selectedFactorName.value,
     factor_lab_metric: factorLabMetric.value,
     factor_lab_thresholds: factorLabThresholds.value,
+    signal_quantile: signalQuantile.value,
+    signal_filters: signalFilters.value,
   }
 }
 function scheduleSaveSettings() {
@@ -1212,6 +1448,10 @@ function restoreResearchSettings(saved) {
   factorLabMetric.value = saved.factor_lab_metric ?? factorLabMetric.value
   if (saved.factor_lab_thresholds && typeof saved.factor_lab_thresholds === 'object') {
     factorLabThresholds.value = { ...factorLabThresholds.value, ...saved.factor_lab_thresholds }
+  }
+  signalQuantile.value = saved.signal_quantile ?? signalQuantile.value
+  if (saved.signal_filters && typeof saved.signal_filters === 'object') {
+    signalFilters.value = { ...signalFilters.value, ...saved.signal_filters }
   }
 }
 function fmtIC(v) { return typeof v === 'number' ? v.toFixed(4) : '—' }
@@ -1336,6 +1576,130 @@ function displayRegimeKey(key) {
     return label ? `${short}: ${label}` : part
   }).join(' × ')
 }
+function parsedHorizons() {
+  return horizonsInput.value.split(',').map(Number).filter(Number.isFinite).filter(Boolean)
+}
+function currentSignalRequestKey() {
+  return [
+    form.value.symbol,
+    form.value.interval,
+    [...form.value.selected_months].sort().join('|'),
+    selectedFactorName.value,
+    activeRegime.value,
+    parsedHorizons().join('|'),
+    form.value.entry_lag,
+    form.value.train_ratio,
+    signalQuantile.value,
+  ].join('::')
+}
+function resetSignalFilters() {
+  signalFilters.value = {
+    outcome: 'all',
+    session: 'all',
+    market_vol: 'all',
+    vwap_zone: 'all',
+    vol_profile: 'all',
+    month: 'all',
+    split: 'all',
+  }
+}
+function signalMatchesVwap(value, filter) {
+  if (filter === 'all') return true
+  const v = String(value || '')
+  if (['extended', 'overextended', 'extreme'].includes(filter)) return v.startsWith(filter)
+  return v === filter
+}
+function signalMatchesVolProfile(row, filter) {
+  if (filter === 'all') return true
+  if (row.vol_profile === filter) return true
+  return Array.isArray(row.vol_profile_flags) && row.vol_profile_flags.includes(filter)
+}
+function signalBreakdown(rows, dimension) {
+  const groups = new Map()
+  for (const row of rows || []) {
+    const label = row?.[dimension]
+    if (!label) continue
+    if (!groups.has(label)) groups.set(label, [])
+    groups.get(label).push(row)
+  }
+  return [...groups.entries()].map(([label, items]) => {
+    const vals = items.map(row => Number(row.outcome_return)).filter(Number.isFinite)
+    const wins = items.filter(row => row.outcome === 'win').length
+    const losses = items.filter(row => row.outcome === 'loss').length
+    return {
+      label,
+      count: items.length,
+      wins,
+      losses,
+      win_rate: items.length ? wins / items.length : NaN,
+      avg_outcome_return: mean(vals),
+    }
+  }).sort((a, b) => b.count - a.count)
+}
+function signalDimensionLabel(dimension) {
+  return {
+    session: 'Session',
+    market_vol: 'Market Vol',
+    vwap_zone: 'VWAP Zone',
+    vol_profile: 'Vol Profile',
+  }[dimension] || dimension
+}
+function signalSortValue(value) {
+  if (value == null) return ''
+  const n = Number(value)
+  if (Number.isFinite(n) && value !== '') return n
+  return String(value)
+}
+function sortSignalRows(key) {
+  signalSort.value = {
+    key,
+    dir: signalSort.value.key === key && signalSort.value.dir === 'desc' ? 'asc' : 'desc',
+  }
+}
+function signalCellClass(key, value) {
+  if (key.startsWith('future_return_') || key === 'outcome_return') return icColor(Number(value))
+  if (key === 'outcome') return `signal-outcome outcome-${value || 'unknown'}`
+  return ''
+}
+function signalCellValue(row, key) {
+  const value = row?.[key]
+  if (key === 'timestamp') return String(value || '').replace('T', ' ').replace('Z', '')
+  if (key.startsWith('future_return_') || key === 'outcome_return') return fmtSigned(value, 4)
+  if (key === 'factor_value' || key === 'signal_score') return fmtNumber(value, 4)
+  return value ?? '—'
+}
+async function loadSignalDataset() {
+  if (!selectedFactorName.value) return
+  if (!form.value.selected_months.length) {
+    signalError.value = '請先選擇月份'
+    return
+  }
+  const key = currentSignalRequestKey()
+  signalLoading.value = true
+  signalError.value = ''
+  try {
+    const { data } = await researchApi.signals({
+      ...form.value,
+      factor_names: [selectedFactorName.value],
+      factor_name: selectedFactorName.value,
+      horizons: parsedHorizons(),
+      regime_filter: normalizedRegimeFilter(),
+      regime_key: activeRegime.value,
+      signal_quantile: signalQuantile.value,
+      max_rows: 20000,
+    })
+    signalRows.value = Array.isArray(data.rows) ? data.rows : []
+    signalMeta.value = data.meta || {}
+    signalLoadedKey.value = key
+  } catch (e) {
+    signalRows.value = []
+    signalMeta.value = {}
+    signalLoadedKey.value = ''
+    signalError.value = e.response?.data?.detail || e.message || 'Signal dataset failed.'
+  } finally {
+    signalLoading.value = false
+  }
+}
 
 async function runResearch() {
   if (running.value) return
@@ -1350,6 +1714,9 @@ async function runResearch() {
   progressPct.value = 0.01
   progress.value = 'Submitting research job...'
   result.value = null
+  signalRows.value = []
+  signalMeta.value = {}
+  signalLoadedKey.value = ''
   try {
     const horizons = horizonsInput.value.split(',').map(Number).filter(Boolean)
     const { data } = await researchApi.run({
@@ -1374,6 +1741,10 @@ async function pollJob(jobId, { immediate = false } = {}) {
       const done = await syncResearchJob(jobId)
       if (done || token !== pollGeneration) return
     } catch (e) {
+      if (isMissingResearchJobError(e)) {
+        clearStaleResearchJob()
+        return
+      }
       consecutiveErrors++
       progress.value = `Polling... (retry ${consecutiveErrors})`
     }
@@ -1386,6 +1757,10 @@ async function pollJob(jobId, { immediate = false } = {}) {
       consecutiveErrors = 0
       if (done) return
     } catch (e) {
+      if (isMissingResearchJobError(e)) {
+        clearStaleResearchJob()
+        return
+      }
       consecutiveErrors++
       if (consecutiveErrors >= 10) {
         error.value = e.message
@@ -1433,6 +1808,16 @@ function clearActiveResearchJob() {
   runningJobId.value = ''
   try { localStorage.removeItem(RESEARCH_ACTIVE_JOB_KEY) } catch { /* ignore */ }
 }
+function clearStaleResearchJob() {
+  running.value = false
+  progress.value = ''
+  progressPct.value = 0
+  error.value = ''
+  clearActiveResearchJob()
+}
+function isMissingResearchJobError(e) {
+  return Number(e?.response?.status) === 404
+}
 function storedResearchJobId() {
   try { return localStorage.getItem(RESEARCH_ACTIVE_JOB_KEY) || '' } catch { return '' }
 }
@@ -1451,7 +1836,9 @@ function resumeStoredResearchJob() {
 }
 function handleResearchVisibility() {
   if (document.visibilityState !== 'visible' || !runningJobId.value) return
-  syncResearchJob(runningJobId.value).catch(() => { /* next poll will retry */ })
+  syncResearchJob(runningJobId.value).catch(e => {
+    if (isMissingResearchJobError(e)) clearStaleResearchJob()
+  })
 }
 function exportJson() {
   const blob = new Blob([JSON.stringify(result.value, null, 2)], { type: 'application/json' })
@@ -1485,6 +1872,8 @@ function exportSelectedCsv() {
   if (!selectedResult.value) return
   const rows = activeTab.value === 'Factor Lab'
     ? factorLabExportRows()
+    : activeTab.value === 'Signal Dataset Explorer'
+    ? signalSortedRows.value
     : activeTab.value === 'Regime Matrix'
     ? regimeMatrixRows.value.map(row => {
         const out = { factor: row.factor }
@@ -1653,6 +2042,29 @@ onUnmounted(() => {
 .lab-panel .text-dim { font-size: 10px; }
 .lab-chart { width: 100%; min-height: 250px; flex: 1; }
 .lab-chart.tall { min-height: 290px; }
+.signal-explorer { height: 100%; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.signal-toolbar { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 6px 8px; background: #101621; border: 1px solid #263245; border-radius: 6px; color: #8f96a8; font-size: 11px; }
+.signal-factor-select { width: min(360px, 34vw); height: 26px; padding: 2px 7px; font-size: 11px; }
+.signal-quantile { width: 76px; height: 26px; padding: 2px 7px; font-size: 11px; }
+.compact-action.inline { margin-left: 0; height: 26px; white-space: nowrap; }
+.signal-content { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.signal-filters { display: grid; grid-template-columns: repeat(4, auto minmax(120px, 1fr)); gap: 6px; align-items: center; padding: 8px; background: #151c2a; border: 1px solid #263245; border-radius: 6px; color: #8f96a8; font-size: 11px; }
+.signal-filters .select-field { height: 26px; padding: 2px 7px; font-size: 11px; min-width: 0; }
+.signal-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.signal-summary-panel, .signal-table-panel { min-width: 0; background: #151c2a; border: 1px solid #263245; border-radius: 6px; padding: 10px; overflow: hidden; }
+.signal-summary-table { font-size: 10px; }
+.signal-summary-table th, .signal-summary-table td { padding: 4px 5px; }
+.signal-table-wrap { max-height: 560px; overflow: auto; border: 1px solid #263245; background: #101621; }
+.signal-table { font-size: 10px; }
+.signal-table th { cursor: pointer; top: 0; }
+.signal-table th, .signal-table td { padding: 4px 6px; }
+.signal-table tr.outcome-win td { background: #10231f; }
+.signal-table tr.outcome-loss td { background: #26191c; }
+.signal-table tr.outcome-flat td { background: #181f2b; }
+.signal-outcome { font-weight: 700; text-transform: uppercase; }
+.signal-outcome.outcome-win { color: #26a69a; }
+.signal-outcome.outcome-loss { color: #ef5350; }
+.signal-outcome.outcome-flat { color: #ffca28; }
 .viz-scroll { height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .viz-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-height: 260px; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
@@ -1699,5 +2111,8 @@ onUnmounted(() => {
   .ic-summary-card { grid-template-columns: 1fr; }
   .summary-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .heatmap-grid, .chart-grid { grid-template-columns: 1fr; }
+  .signal-toolbar { flex-wrap: wrap; }
+  .signal-filters { grid-template-columns: auto minmax(0, 1fr); }
+  .signal-summary-grid { grid-template-columns: 1fr; }
 }
 </style>

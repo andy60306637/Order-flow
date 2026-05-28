@@ -25,6 +25,7 @@ export const researchApi = {
   regimeOptions: ()        => api.get('/api/research/regime-options'),
   run:        (payload)    => api.post('/api/research/run', payload),
   getJob:     (jobId)      => api.get(`/api/research/jobs/${jobId}`, { timeout: 0 }),
+  signals:    (payload)    => api.post('/api/research/signals', payload, { timeout: 0 }),
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────

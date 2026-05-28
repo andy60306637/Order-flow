@@ -226,6 +226,7 @@ class ResearchRunnerTests(unittest.TestCase):
             orientation=-1,
             is_period_ic=[-0.04, -0.02, -0.03, -0.01],
             oos_period_ic=[-0.03, -0.02, -0.04, -0.01],
+            is_mask=np.ones(10, dtype=bool),
             oos_mask=np.ones(10, dtype=bool),
         )
 
@@ -313,6 +314,50 @@ class ResearchRunnerTests(unittest.TestCase):
         self.assertEqual(result.summary, [])
         self.assertEqual(result.unavailable[0]["factor"], "lower_wick_delta_eff")
         self.assertEqual(result.unavailable[0]["reason"], "tick_data_unavailable")
+
+    def test_signal_dataset_uses_top_factor_values_and_oriented_outcome(self) -> None:
+        from research.runner import ResearchConfig, run_signal_dataset
+
+        n = 90
+        upper_wicks = np.linspace(0.1, 5.0, n)
+        rets = -0.0008 * upper_wicks
+        closes = [100.0]
+        for r in rets[:-1]:
+            closes.append(closes[-1] * (1.0 + float(r)))
+        klines = [
+            _k(i, float(closes[i]), upper_wick=float(upper_wicks[i]))
+            for i in range(n)
+        ]
+        config = ResearchConfig(
+            symbol="BTCUSDT",
+            interval="1m",
+            slices=[],
+            factor_names=["upper_wick_to_body_ratio"],
+            horizons=[1],
+            quantiles=4,
+            use_tick_features=False,
+            entry_lag=0,
+            min_period_samples=10,
+            train_ratio=0.5,
+        )
+
+        result = run_signal_dataset(
+            config,
+            factor_name="upper_wick_to_body_ratio",
+            signal_quantile=0.20,
+            klines=klines,
+        )
+
+        self.assertGreater(len(result["rows"]), 0)
+        first = result["rows"][0]
+        self.assertEqual(first["direction"], "Short")
+        self.assertIn("future_return_1_bar", first)
+        self.assertIn("session", first)
+        self.assertIn("market_vol", first)
+        self.assertIn("vwap_zone", first)
+        self.assertIn("vol_profile", first)
+        self.assertTrue(all(row["factor_value"] >= result["meta"]["threshold"] for row in result["rows"]))
+        self.assertTrue(any(row["outcome"] == "win" for row in result["rows"]))
 
 
 if __name__ == "__main__":

@@ -29,35 +29,42 @@ class ResearchRequest(BaseModel):
     regime_filter:     Any | None = None
 
 
+class SignalDatasetRequest(ResearchRequest):
+    factor_name:      str   = ""
+    regime_key:       str   = "(all)"
+    signal_quantile:  float = 0.20
+    max_rows:         int   = 20_000
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _run_research_sync(req: ResearchRequest, progress_callback=None) -> dict:
+def _slices_from_months(selected_months: list[str]) -> list:
     from backtest.time_slice import TimeSlice, _month_start_ms, _next_month_start_ms
-    from research.runner import ResearchConfig, run_research_with_regimes
-    from research.registry import ensure_builtin_factors
-    from research.regime_filter import RegimeFilterConfig
-
-    ensure_builtin_factors()
 
     slices: list[TimeSlice] = []
-    for mk in sorted(req.selected_months):
+    for mk in sorted(selected_months):
         try:
             s_ms = _month_start_ms(mk)
             e_ms = _next_month_start_ms(mk) - 1
             slices.append(TimeSlice(label=mk, segments=[(s_ms, e_ms)]))
         except Exception:
             continue
-
     if not slices:
         raise ValueError("No valid months provided.")
+    return slices
 
+
+def _build_research_config(req: ResearchRequest):
+    from research.runner import ResearchConfig
+    from research.regime_filter import RegimeFilterConfig
+
+    slices = _slices_from_months(req.selected_months)
     regime_filter = (
         RegimeFilterConfig.from_dict(req.regime_filter)
         if isinstance(req.regime_filter, dict)
         else req.regime_filter
     )
-
-    cfg = ResearchConfig(
+    return ResearchConfig(
         symbol=req.symbol,
         interval=req.interval,
         slices=slices,
@@ -70,11 +77,36 @@ def _run_research_sync(req: ResearchRequest, progress_callback=None) -> dict:
         regime_filter=regime_filter,
     )
 
+
+def _run_research_sync(req: ResearchRequest, progress_callback=None) -> dict:
+    from research.runner import run_research_with_regimes
+    from research.registry import ensure_builtin_factors
+
+    ensure_builtin_factors()
+
+    cfg = _build_research_config(req)
     results_by_regime = run_research_with_regimes(cfg, progress_callback=progress_callback)
     return {
         regime_key: res.to_dict()
         for regime_key, res in results_by_regime.items()
     }
+
+
+def _run_signal_dataset_sync(req: SignalDatasetRequest) -> dict:
+    from research.runner import run_signal_dataset
+    from research.registry import ensure_builtin_factors
+
+    ensure_builtin_factors()
+    factor_names = [req.factor_name] if req.factor_name else req.factor_names[:1]
+    cfg_req = req.copy(update={"factor_names": factor_names})
+    cfg = _build_research_config(cfg_req)
+    return run_signal_dataset(
+        cfg,
+        factor_name=req.factor_name or (factor_names[0] if factor_names else ""),
+        regime_key=req.regime_key,
+        signal_quantile=req.signal_quantile,
+        max_rows=req.max_rows,
+    )
 
 
 async def _research_worker(job_id: str, req: ResearchRequest) -> None:
@@ -143,6 +175,16 @@ async def run_research(req: ResearchRequest, bg: BackgroundTasks) -> dict:
     job = create_job()
     bg.add_task(_research_worker, job.job_id, req)
     return {"job_id": job.job_id, "status": job.status}
+
+
+@router.post("/signals")
+async def signal_dataset(req: SignalDatasetRequest) -> dict:
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(None, _run_signal_dataset_sync, req)
+    except Exception as exc:
+        logger.exception("Signal dataset request failed")
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/jobs")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -67,6 +68,158 @@ class ResearchResult:
             "timeseries_ic": self.timeseries_ic,
             "orthogonal_summary": self.orthogonal_summary,
         }
+
+
+def run_signal_dataset(
+    config: ResearchConfig,
+    factor_name: str,
+    regime_key: str = "(all)",
+    signal_quantile: float = 0.20,
+    max_rows: int = 20_000,
+    klines: list[Kline] | None = None,
+    tick_map: TickBarMap | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    """Build per-signal rows for one directional factor.
+
+    A signal is the strongest `signal_quantile` share of raw factor values
+    within the selected regime. Outcome is judged on the factor's best OOS
+    horizon, using the factor orientation so Long and Short outcomes are
+    comparable.
+    """
+    ensure_builtin_factors()
+    if not factor_name:
+        return {"rows": [], "summary": [], "meta": {"reason": "missing_factor"}}
+    if klines is None:
+        klines, tick_map = load_research_data(config, progress_callback=progress_callback)
+    tick_map_f = tick_map if config.use_tick_features else None
+
+    _emit_progress(progress_callback, "Preparing signal dataset...", 0.18)
+    ctx = _precompute_research_context(
+        klines, tick_map_f, [factor_name], config.horizons,
+        config.use_tick_features, config.entry_lag, config.ic_period_granularity,
+        progress_callback=progress_callback, progress_start=0.20, progress_end=0.58,
+    )
+    values = ctx["factor_values"].get(factor_name)
+    if values is None:
+        reason = next((r["reason"] for r in ctx["unavailable"] if r.get("factor") == factor_name), "unavailable")
+        return {"rows": [], "summary": [], "meta": {"factor": factor_name, "reason": reason}}
+
+    orientation = int(ctx["factor_orientations"].get(factor_name, 0))
+    meta = ctx["factor_meta"].get(factor_name, {})
+    if orientation == 0:
+        return {
+            "rows": [],
+            "summary": [],
+            "meta": {
+                "factor": factor_name,
+                "reason": "non_directional_factor",
+                "orientation": orientation,
+                "direction": "Mixed",
+            },
+        }
+
+    selected_mask = _mask_for_regime_key(len(klines), config.regime_filter, regime_key, klines, tick_map_f)
+    result_for_regime = _analyze_with_precomputed(
+        ctx,
+        selected_mask,
+        config.quantiles,
+        config.min_period_samples,
+        config.train_ratio,
+    )
+    summary_row = next((r for r in result_for_regime.summary if r.get("factor") == factor_name), {})
+    outcome_horizon = _choose_signal_outcome_horizon(summary_row, ctx["fwd"])
+    outcome_returns = ctx["fwd"].get(outcome_horizon)
+    if outcome_returns is None:
+        return {"rows": [], "summary": [], "meta": {"factor": factor_name, "reason": "missing_outcome_horizon"}}
+
+    open_times: np.ndarray = ctx["open_times"]
+    month_ids: np.ndarray = ctx["month_ids"]
+    month_labels: dict[int, str] = ctx["month_labels"]
+    n_times = len(open_times)
+    train_ratio_c = max(0.1, min(0.9, float(config.train_ratio)))
+    time_cut_idx = int(n_times * train_ratio_c)
+    cut_time = int(open_times[time_cut_idx]) if time_cut_idx < n_times else 0
+
+    base = _valid_mask(values, outcome_returns)
+    if selected_mask is not None and len(selected_mask) == len(base):
+        base = base & selected_mask
+    signal_scores = values
+    valid_scores = signal_scores[base]
+    if valid_scores.size == 0:
+        return {
+            "rows": [],
+            "summary": [],
+            "meta": {
+                "factor": factor_name,
+                "reason": "no_valid_signals",
+                "orientation": orientation,
+                "outcome_horizon": outcome_horizon,
+            },
+        }
+
+    q = max(0.01, min(0.50, float(signal_quantile)))
+    threshold = float(np.quantile(valid_scores, 1.0 - q))
+    signal_mask = base & (signal_scores >= threshold)
+
+    regime_labels = _regime_labels_for_bars(klines, config.regime_filter, tick_map_f)
+    indices = np.flatnonzero(signal_mask)
+    if max_rows > 0 and indices.size > max_rows:
+        order = np.argsort(signal_scores[indices])[::-1][:max_rows]
+        indices = indices[order]
+        indices = indices[np.argsort(open_times[indices])]
+
+    _emit_progress(progress_callback, "Formatting signal rows...", 0.86)
+    rows: list[dict[str, Any]] = []
+    direction = "Long" if orientation > 0 else "Short"
+    fwd_returns: dict[int, np.ndarray] = ctx["fwd"]
+    horizons_sorted = sorted(fwd_returns)
+    for idx in indices:
+        ts = int(open_times[idx])
+        outcome_return = float(outcome_returns[idx] * orientation)
+        row: dict[str, Any] = {
+            "timestamp": _iso_ts(ts),
+            "timestamp_ms": ts,
+            "factor": factor_name,
+            "factor_value": _json_float(values[idx]),
+            "signal_score": _json_float(signal_scores[idx]),
+            "direction": direction,
+            "split": "train" if ts < cut_time else "test",
+            "month": month_labels.get(int(month_ids[idx]), ""),
+            "walk_forward_period": "train" if ts < cut_time else "test",
+            "outcome_horizon": outcome_horizon,
+            "outcome_return": _json_float(outcome_return),
+            "outcome": _outcome_label(outcome_return),
+        }
+        for horizon in horizons_sorted:
+            row[f"future_return_{horizon}_bar"] = _json_float(fwd_returns[horizon][idx])
+        for dim, labels in regime_labels.items():
+            value = labels["primary"][idx] if idx < len(labels["primary"]) else ""
+            row[dim] = value
+            if dim == "vol_profile":
+                flags = labels.get("flags", [])
+                row["vol_profile_flags"] = flags[idx] if idx < len(flags) else []
+        rows.append(row)
+
+    summary = _signal_breakdown(rows)
+    return {
+        "rows": rows,
+        "summary": summary,
+        "meta": {
+            "factor": factor_name,
+            "regime_key": regime_key,
+            "signal_quantile": q,
+            "threshold": threshold,
+            "orientation": orientation,
+            "direction": direction,
+            "outcome_horizon": outcome_horizon,
+            "rows": len(rows),
+            "capped": max_rows > 0 and int(signal_mask.sum()) > len(rows),
+            "available_signals": int(signal_mask.sum()),
+            "group": meta.get("group", ""),
+            "requires_ticks": bool(meta.get("requires_ticks", False)),
+        },
+    }
 
 
 def run_research(
@@ -511,6 +664,172 @@ def _analyze_with_precomputed(
         timeseries_ic=ts_ic,
         orthogonal_summary=ortho_summary,
     )
+
+
+# ---------------------------------------------------------------------------
+# Signal dataset
+# ---------------------------------------------------------------------------
+
+def _choose_signal_outcome_horizon(summary_row: dict[str, Any], fwd_returns: dict[int, np.ndarray]) -> int:
+    for key in ("oos_best_horizon", "best_horizon"):
+        try:
+            h = int(summary_row.get(key) or 0)
+        except (TypeError, ValueError):
+            h = 0
+        if h in fwd_returns:
+            return h
+    return min(fwd_returns.keys()) if fwd_returns else 0
+
+
+def _mask_for_regime_key(
+    n: int,
+    regime_filter: Any | None,
+    regime_key: str,
+    klines: list[Kline],
+    tick_map: TickBarMap | None,
+) -> np.ndarray | None:
+    if not regime_key or regime_key == "(all)":
+        return None
+    rf = _coerce_regime_filter(regime_filter)
+    if rf is None or not rf.is_active():
+        return None
+    from research.regime_filter import combine_for_filter, compute_regime_masks
+
+    raw_masks = compute_regime_masks(klines, rf, tick_map)
+    if regime_key == "filtered":
+        return combine_for_filter(n, raw_masks, rf)
+
+    combined: np.ndarray | None = None
+    for part in regime_key.split("+"):
+        mask = raw_masks.get(part)
+        if mask is None:
+            return np.zeros(n, dtype=bool)
+        combined = mask if combined is None else (combined & mask)
+    return combined
+
+
+def _coerce_regime_filter(value: Any | None) -> Any | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        from research.regime_filter import RegimeFilterConfig
+        return RegimeFilterConfig.from_dict(value)
+    return value
+
+
+def _regime_labels_for_bars(
+    klines: list[Kline],
+    existing_filter: Any | None,
+    tick_map: TickBarMap | None,
+) -> dict[str, dict[str, Any]]:
+    if not klines:
+        return {}
+    from research.regime_filter import (
+        ALL_DIMENSIONS,
+        DIM_VOL_PROFILE,
+        DIMENSION_LABELS,
+        RegimeDimConfig,
+        RegimeFilterConfig,
+        compute_regime_masks,
+    )
+
+    existing = _coerce_regime_filter(existing_filter)
+    existing_params = {
+        d.dimension: dict(getattr(d, "params", {}) or {})
+        for d in getattr(existing, "dimensions", []) or []
+    }
+    cfg = RegimeFilterConfig(
+        mode="matrix",
+        dimensions=[
+            RegimeDimConfig(
+                dimension=dim,
+                enabled=True,
+                selected_labels=list(DIMENSION_LABELS.get(dim, [])),
+                params=existing_params.get(dim, {}),
+            )
+            for dim in ALL_DIMENSIONS
+        ],
+    )
+    masks = compute_regime_masks(klines, cfg, tick_map)
+    n = len(klines)
+    out: dict[str, dict[str, Any]] = {}
+    for dim in ALL_DIMENSIONS:
+        labels = list(DIMENSION_LABELS.get(dim, []))
+        priority = _label_priority(dim, labels)
+        primary = np.full(n, "", dtype=object)
+        flags: list[list[str]] | None = [[] for _ in range(n)] if dim == DIM_VOL_PROFILE else None
+        for label in priority:
+            mask = masks.get(f"{dim}={label}")
+            if mask is None:
+                continue
+            if flags is not None:
+                for idx in np.flatnonzero(mask):
+                    flags[idx].append(label)
+            empty = primary == ""
+            primary[empty & mask] = label
+        out[dim] = {"primary": primary, "flags": flags or []}
+    return out
+
+
+def _label_priority(dim: str, labels: list[str]) -> list[str]:
+    if dim != "vol_profile":
+        return labels
+    priority = [
+        "below_VAL_reclaim",
+        "below_VAL",
+        "price_in_val_band",
+        "price_in_poc_band",
+        "price_in_vah_band",
+        "below_POC",
+        "outside_value_area",
+        "above_poc",
+        "in_value_area",
+    ]
+    remaining = [label for label in labels if label not in priority]
+    return [label for label in priority if label in labels] + remaining
+
+
+def _outcome_label(value: float) -> str:
+    if not np.isfinite(value):
+        return "unknown"
+    if value > 0:
+        return "win"
+    if value < 0:
+        return "loss"
+    return "flat"
+
+
+def _signal_breakdown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for dim in ("session", "market_vol", "vwap_zone", "vol_profile"):
+        labels = sorted({str(row.get(dim) or "") for row in rows if row.get(dim)})
+        for label in labels:
+            subset = [row for row in rows if row.get(dim) == label]
+            returns = [float(row.get("outcome_return")) for row in subset if row.get("outcome_return") is not None]
+            wins = sum(1 for row in subset if row.get("outcome") == "win")
+            losses = sum(1 for row in subset if row.get("outcome") == "loss")
+            out.append({
+                "dimension": dim,
+                "label": label,
+                "count": len(subset),
+                "wins": wins,
+                "losses": losses,
+                "win_rate": wins / len(subset) if subset else 0.0,
+                "avg_outcome_return": float(np.mean(returns)) if returns else 0.0,
+            })
+    return out
+
+
+def _json_float(value: Any) -> float | None:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) else None
+
+
+def _iso_ts(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
