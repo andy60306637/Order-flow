@@ -291,21 +291,31 @@
               </section>
 
               <div class="signal-view-mode-bar">
-                <span class="text-dim" style="font-size:11px">View:</span>
-                <button v-for="mode in ['all', 'winners', 'losers', 'diff']" :key="mode"
-                  :class="['btn-ghost', 'compact-action', 'inline', { 'mode-active': signalViewMode === mode }]"
-                  @click="signalViewMode = mode">
-                  {{ { all: 'All Signals', winners: 'Winners', losers: 'Losers', diff: 'W vs L Diff' }[mode] }}
-                </button>
+                <span class="text-dim" style="font-size:11px">Filter Mode:</span>
+                <div class="btn-group">
+                  <button v-for="mode in ['all', 'winners', 'losers', 'diff']" :key="mode"
+                    :class="['btn-ghost', 'compact-action', { 'mode-active': signalViewMode === mode }]"
+                    @click="signalViewMode = mode">
+                    {{ { all: 'All', winners: 'Winners', losers: 'Losers', diff: 'W vs L Diff' }[mode] }}
+                  </button>
+                </div>
+                <div v-if="activeSignalFilters.length" class="active-filters-hint">
+                  <span class="text-dim">Filters:</span>
+                  <div v-for="af in activeSignalFilters" :key="af.key" class="filter-tag" @click="signalFilters[af.key] = 'all'">
+                    {{ af.label }} <span class="tag-close">×</span>
+                  </div>
+                  <button class="btn-ghost btn-tiny" @click="resetSignalFilters">Clear All</button>
+                </div>
               </div>
 
               <section v-if="signalViewMode !== 'diff'" class="signal-summary-grid">
-                <div v-for="group in signalBreakdownGroups" :key="group.dimension" class="signal-summary-panel">
+                <div v-for="group in signalBreakdownGroups" :key="group.dimension" class="signal-summary-panel" :class="{ 'panel-filtering': signalFilters[group.dimension] !== 'all' }">
                   <div class="panel-header">
                     <h2 class="panel-title">{{ signalDimensionLabel(group.dimension) }}</h2>
-                    <span class="text-dim">{{ group.rows.length }} labels</span>
+                    <button v-if="signalFilters[group.dimension] !== 'all'" class="btn-ghost btn-tiny" @click="signalFilters[group.dimension] = 'all'">Reset</button>
+                    <span v-else class="text-dim">{{ group.rows.length }} labels</span>
                   </div>
-                  <table class="dense-table signal-summary-table">
+                  <table class="dense-table signal-summary-table interactive-table">
                     <thead>
                       <tr>
                         <th>Label</th>
@@ -318,7 +328,9 @@
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="row in group.rows" :key="row.label" :class="signalConfClass(row.count)">
+                      <tr v-for="row in group.rows" :key="row.label"
+                        :class="[signalConfClass(row.count), { 'row-active': signalFilters[group.dimension] === row.label }]"
+                        @click="toggleSignalFilter(group.dimension, row.label)">
                         <td>
                           {{ row.label }}
                           <span v-if="signalConfBadge(row.count)" class="conf-badge">{{ signalConfBadge(row.count) }}</span>
@@ -341,7 +353,7 @@
                     <h2 class="panel-title">{{ signalDimensionLabel(group.dimension) }}</h2>
                     <span class="text-dim">Winner vs Loser regime share</span>
                   </div>
-                  <table class="dense-table signal-summary-table">
+                  <table class="dense-table signal-summary-table interactive-table">
                     <thead>
                       <tr>
                         <th>Label</th>
@@ -352,7 +364,9 @@
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="row in group.rows" :key="row.label" :class="signalConfClass(row.count)">
+                      <tr v-for="row in group.rows" :key="row.label"
+                        :class="[signalConfClass(row.count), { 'row-active': signalFilters[group.dimension] === row.label }]"
+                        @click="toggleSignalFilter(group.dimension, row.label)">
                         <td>
                           {{ row.label }}
                           <span v-if="signalConfBadge(row.count)" class="conf-badge">{{ signalConfBadge(row.count) }}</span>
@@ -370,12 +384,15 @@
               <section v-if="signalRows.length && signalViewMode !== 'diff'" class="signal-hints-panel">
                 <div class="panel-header">
                   <h2 class="panel-title">Regime Candidate Hints</h2>
-                  <span class="text-dim">n ≥ 30 only · win%≥52% favorable · win%≤49% weak</span>
+                  <span class="text-dim">n ≥ 30 only · win%≥52% favorable · win%≤49% weak · Click to filter</span>
                 </div>
                 <div class="signal-hints-grid">
                   <div class="hints-col">
                     <div class="hints-col-title text-up">Favorable contexts</div>
-                    <div v-for="h in signalCandidateHints.favorable" :key="`${h.dim}-${h.label}`" class="hint-row">
+                    <div v-for="h in signalCandidateHints.favorable" :key="`${h.dim}-${h.label}`"
+                      class="hint-row clickable-hint"
+                      :class="{ 'hint-active': signalFilters[h.dim] === h.label }"
+                      @click="toggleSignalFilter(h.dim, h.label)">
                       <span class="hint-dim">{{ signalDimensionLabel(h.dim) }}</span>
                       <span class="hint-label">{{ h.label }}</span>
                       <span class="hint-stat text-up">{{ fmtPercent(h.win_rate) }}</span>
@@ -386,7 +403,10 @@
                   </div>
                   <div class="hints-col">
                     <div class="hints-col-title text-down">Weak contexts</div>
-                    <div v-for="h in signalCandidateHints.weak" :key="`${h.dim}-${h.label}`" class="hint-row">
+                    <div v-for="h in signalCandidateHints.weak" :key="`${h.dim}-${h.label}`"
+                      class="hint-row clickable-hint"
+                      :class="{ 'hint-active': signalFilters[h.dim] === h.label }"
+                      @click="toggleSignalFilter(h.dim, h.label)">
                       <span class="hint-dim">{{ signalDimensionLabel(h.dim) }}</span>
                       <span class="hint-label">{{ h.label }}</span>
                       <span class="hint-stat text-down">{{ fmtPercent(h.win_rate) }}</span>
@@ -398,7 +418,7 @@
                 </div>
               </section>
 
-              <section class="signal-table-panel">
+              <section v-if="false" class="signal-table-panel">
                 <div class="panel-header">
                   <h2 class="panel-title">Signal Table</h2>
                   <span class="text-dim">
@@ -1381,6 +1401,18 @@ const signalCandidateHints = computed(() => {
   weak.sort((a, b) => a.win_rate - b.win_rate)
   return { favorable: favorable.slice(0, 6), weak: weak.slice(0, 6) }
 })
+const activeSignalFilters = computed(() => {
+  const f = signalFilters.value
+  const active = []
+  if (f.outcome !== 'all') active.push({ key: 'outcome', label: `Outcome: ${f.outcome}` })
+  if (f.session !== 'all') active.push({ key: 'session', label: `Session: ${f.session}` })
+  if (f.market_vol !== 'all') active.push({ key: 'market_vol', label: `Vol: ${f.market_vol}` })
+  if (f.vwap_zone !== 'all') active.push({ key: 'vwap_zone', label: `VWAP: ${f.vwap_zone}` })
+  if (f.vol_profile !== 'all') active.push({ key: 'vol_profile', label: `Profile: ${f.vol_profile}` })
+  if (f.month !== 'all') active.push({ key: 'month', label: `Month: ${f.month}` })
+  if (f.split !== 'all') active.push({ key: 'split', label: `Split: ${f.split}` })
+  return active
+})
 const signalQuantileDescription = computed(() => {
   const dir = signalMeta.value.direction
   const pct = Math.round(signalQuantile.value * 100)
@@ -1535,6 +1567,13 @@ function toggleRegimeLabel(dimKey, label) {
   const i = dim.selected_labels.indexOf(label)
   if (i >= 0) dim.selected_labels.splice(i, 1)
   else dim.selected_labels.push(label)
+}
+function toggleSignalFilter(dimension, label) {
+  if (signalFilters.value[dimension] === label) {
+    signalFilters.value[dimension] = 'all'
+  } else {
+    signalFilters.value[dimension] = label
+  }
 }
 function researchSettingsPayload() {
   return {
@@ -2204,26 +2243,27 @@ onUnmounted(() => {
 .matrix-toolbar .select-field { width: 150px; height: 26px; padding: 2px 6px; font-size: 11px; }
 .dense-table { width: 100%; border-collapse: collapse; font-size: 11px; }
 .dense-table th { color: #aab3c2; background: #182132; position: sticky; top: 0; z-index: 1; }
-.dense-table th, .dense-table td { padding: 5px 7px; border: 1px solid #263245; text-align: right; white-space: nowrap; }
+.dense-table th, .dense-table td { padding: 5px 7px; border: 1px solid #263245; text-align: right; white-space: nowrap; transition: background 0.15s; }
 .dense-table th:first-child, .dense-table td:first-child { text-align: left; }
+.dense-table tbody tr:hover td { background: rgba(255,255,255,0.03) !important; }
 .dense-table tr.selected { background: #23423f; }
-.dense-table td.selected { background: #23423f; }
+.dense-table td.selected { background: #23423f !important; }
 .cell-sample { display: block; margin-top: 2px; color: #6f7888; font-size: 10px; }
-.chart-svg { width: 100%; height: 100%; min-height: 360px; background: #131722; border: 1px solid #263245; }
-.factor-lab { height: 100%; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
-.lab-toolbar { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 6px 8px; background: #101621; border: 1px solid #263245; border-radius: 6px; color: #8f96a8; font-size: 11px; }
+.chart-svg { width: 100%; height: 100%; min-height: 360px; background: #131722; border: 1px solid #263245; border-radius: 6px; }
+.factor-lab { height: 100%; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.lab-toolbar { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 6px 12px; background: #151c2a; border: 1px solid #263245; border-radius: 6px; color: #8f96a8; font-size: 11px; }
 .lab-select { width: min(360px, 34vw); height: 26px; padding: 2px 7px; font-size: 11px; }
 .metric-select { width: 170px; height: 26px; padding: 2px 7px; font-size: 11px; }
 .threshold-settings { margin-left: auto; position: relative; }
-.threshold-settings summary { cursor: pointer; color: #dce3ee; border: 1px solid #334058; border-radius: 4px; padding: 4px 8px; list-style: none; }
+.threshold-settings summary { cursor: pointer; color: #dce3ee; border: 1px solid #334058; border-radius: 4px; padding: 4px 10px; list-style: none; font-size: 11px; }
 .threshold-settings summary::-webkit-details-marker { display: none; }
 .threshold-settings[open] summary { border-color: #26a69a; background: #1f6f6644; }
-.threshold-grid { position: absolute; right: 0; top: 30px; z-index: 5; width: 260px; display: grid; grid-template-columns: 88px 1fr; gap: 6px; align-items: center; padding: 10px; background: #151c2a; border: 1px solid #334058; border-radius: 6px; box-shadow: 0 12px 36px rgba(0,0,0,0.35); }
+.threshold-grid { position: absolute; right: 0; top: 32px; z-index: 5; width: 280px; display: grid; grid-template-columns: 100px 1fr; gap: 8px; align-items: center; padding: 12px; background: #1c2636; border: 1px solid #334058; border-radius: 8px; box-shadow: 0 16px 48px rgba(0,0,0,0.45); }
 .threshold-grid label { color: #8f96a8; font-size: 11px; }
-.ic-summary-card { display: grid; grid-template-columns: minmax(190px, 0.9fr) 180px minmax(0, 2.4fr); gap: 12px; align-items: stretch; padding: 14px; border: 1px solid #263245; border-left-width: 4px; border-radius: 6px; background: #151c2a; }
-.ic-summary-card.strong { border-left-color: #26a69a; }
-.ic-summary-card.watch { border-left-color: #ffca28; }
-.ic-summary-card.weak { border-left-color: #ef5350; }
+.ic-summary-card { display: grid; grid-template-columns: minmax(200px, 0.9fr) 200px minmax(0, 2.4fr); gap: 16px; align-items: stretch; padding: 16px; border: 1px solid #263245; border-left-width: 4px; border-radius: 8px; background: #151c2a; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+.ic-summary-card.strong { border-left-color: #26a69a; background: linear-gradient(90deg, #1d3330 0%, #151c2a 100%); }
+.ic-summary-card.watch { border-left-color: #ffca28; background: linear-gradient(90deg, #2b281b 0%, #151c2a 100%); }
+.ic-summary-card.weak { border-left-color: #ef5350; background: linear-gradient(90deg, #2b1d1f 0%, #151c2a 100%); }
 .ic-summary-card.neutral { border-left-color: #6f7888; }
 .summary-kicker { color: #8f96a8; font-size: 11px; margin-bottom: 4px; }
 .ic-summary-card h2 { color: #f2f5f9; font-size: 19px; line-height: 1.15; font-weight: 700; margin: 0 0 9px; overflow-wrap: anywhere; }
@@ -2251,42 +2291,57 @@ onUnmounted(() => {
 .signal-content { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .signal-filters { display: grid; grid-template-columns: repeat(4, auto minmax(120px, 1fr)); gap: 6px; align-items: center; padding: 8px; background: #151c2a; border: 1px solid #263245; border-radius: 6px; color: #8f96a8; font-size: 11px; }
 .signal-filters .select-field { height: 26px; padding: 2px 7px; font-size: 11px; min-width: 0; }
-.signal-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.signal-summary-panel, .signal-table-panel { min-width: 0; background: #151c2a; border: 1px solid #263245; border-radius: 6px; padding: 10px; overflow: hidden; }
+.signal-summary-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 8px; }
+.signal-summary-panel, .signal-table-panel { min-width: 0; background: #151c2a; border: 1px solid #263245; border-radius: 6px; padding: 10px; overflow: hidden; transition: border-color 0.2s; }
+.signal-summary-panel.panel-filtering { border-color: #26a69a; box-shadow: 0 0 10px rgba(38,166,154,0.1); }
 .signal-summary-table { font-size: 10px; }
 .signal-summary-table th, .signal-summary-table td { padding: 4px 5px; }
-.signal-table-wrap { max-height: 560px; overflow: auto; border: 1px solid #263245; background: #101621; }
+.interactive-table tr { cursor: pointer; }
+.interactive-table tr:hover { background: #1b2635 !important; }
+.interactive-table tr.row-active td { background: #1d3a37 !important; color: #8fe7d8; font-weight: 600; }
+.signal-table-wrap { max-height: 600px; overflow: auto; border: 1px solid #263245; background: #101621; }
 .signal-table { font-size: 10px; }
 .signal-table th { cursor: pointer; top: 0; }
-.signal-table th, .signal-table td { padding: 4px 6px; }
-.signal-table tr.outcome-win td { background: #10231f; }
-.signal-table tr.outcome-loss td { background: #26191c; }
-.signal-table tr.outcome-flat td { background: #181f2b; }
-.signal-outcome { font-weight: 700; text-transform: uppercase; }
+.signal-table th, .signal-table td { padding: 4px 6px; border-color: #1e2633; }
+.signal-table tr.outcome-win td { background: #0f1e1b; }
+.signal-table tr.outcome-loss td { background: #201517; }
+.signal-table tr.outcome-flat td { background: #141a24; }
+.signal-outcome { font-weight: 700; text-transform: uppercase; font-size: 9px; }
 .signal-outcome.outcome-win { color: #26a69a; }
 .signal-outcome.outcome-loss { color: #ef5350; }
 .signal-outcome.outcome-flat { color: #ffca28; }
 .signal-quantile-desc { font-size: 10px; color: #5a8abe; white-space: nowrap; }
-.signal-view-mode-bar { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
-.signal-view-mode-bar .mode-active { color: #8fe7d8; border-color: #26a69a; background: #0e2420; }
+.signal-view-mode-bar { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid #263245; margin-bottom: 4px; }
+.btn-group { display: flex; background: #101621; border: 1px solid #263245; border-radius: 4px; padding: 2px; }
+.btn-group button { border: none; border-radius: 3px; padding: 3px 10px; }
+.btn-group .mode-active { color: #8fe7d8; background: #1f6f6644; }
+.active-filters-hint { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.filter-tag { display: flex; align-items: center; gap: 4px; background: #1e2633; border: 1px solid #334058; color: #dce3ee; padding: 2px 8px; border-radius: 12px; font-size: 10px; cursor: pointer; transition: all 0.2s; }
+.filter-tag:hover { background: #263245; border-color: #26a69a; color: #8fe7d8; }
+.tag-close { color: #8f96a8; font-size: 14px; line-height: 1; }
+.filter-tag:hover .tag-close { color: #ef5350; }
+.btn-tiny { padding: 1px 6px; font-size: 9px; min-height: 18px; line-height: 1; border-radius: 3px; }
 .signal-diff-section { }
-.conf-low td { color: #6b7280 !important; }
-.conf-low .conf-badge { background: #374151; color: #9ca3af; }
-.conf-observe td { color: #b0892a !important; }
-.conf-observe .conf-badge { background: #3a2a0a; color: #ffca28; }
-.conf-badge { display: inline-block; font-size: 8px; font-weight: 700; padding: 1px 4px; border-radius: 3px; margin-left: 4px; vertical-align: middle; letter-spacing: 0.03em; }
-.signal-col-group-row { background: #0f1824; }
-.signal-col-group { text-align: center; color: #5a7898; font-size: 9px; font-weight: 600; letter-spacing: 0.06em; padding: 3px 6px; border-right: 1px solid #263245; text-transform: uppercase; }
+.conf-low td { color: #616978 !important; }
+.conf-low .conf-badge { background: #2a2e39; color: #6b7280; border: 1px solid #334058; }
+.conf-observe td { color: #9a8a61 !important; }
+.conf-observe .conf-badge { background: #2a261a; color: #bca828; border: 1px solid #4a3e1a; }
+.conf-badge { display: inline-block; font-size: 8px; font-weight: 700; padding: 0px 4px; border-radius: 3px; margin-left: 4px; vertical-align: middle; letter-spacing: 0.03em; line-height: 1.4; }
+.signal-col-group-row { background: #0c121d; }
+.signal-col-group { text-align: center; color: #5a7898; font-size: 9px; font-weight: 600; letter-spacing: 0.06em; padding: 3px 6px; border-right: 1px solid #263245; text-transform: uppercase; border-bottom: 1px solid #263245; }
 .signal-col-group:last-child { border-right: none; }
 .signal-hints-panel { background: #151c2a; border: 1px solid #263245; border-radius: 6px; padding: 10px; }
-.signal-hints-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 6px; }
-.hints-col { display: flex; flex-direction: column; gap: 4px; }
-.hints-col-title { font-size: 10px; font-weight: 700; margin-bottom: 4px; }
-.hint-row { display: flex; align-items: center; gap: 6px; font-size: 10px; }
-.hint-dim { color: #5a7898; min-width: 70px; }
-.hint-label { color: #d1d4dc; flex: 1; }
-.hint-stat { font-weight: 700; min-width: 36px; text-align: right; }
-.hint-ic { color: #7a8698; }
+.signal-hints-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 8px; }
+.hints-col { display: flex; flex-direction: column; gap: 5px; }
+.hints-col-title { font-size: 10px; font-weight: 700; margin-bottom: 6px; color: #8f96a8; text-transform: uppercase; letter-spacing: 0.04em; }
+.hint-row { display: flex; align-items: center; gap: 8px; font-size: 10px; padding: 4px 8px; border-radius: 4px; background: #101621; border: 1px solid transparent; transition: all 0.2s; }
+.clickable-hint { cursor: pointer; }
+.clickable-hint:hover { background: #182132; border-color: #334058; }
+.hint-active { border-color: #26a69a; background: #0e2420; }
+.hint-dim { color: #5a7898; min-width: 80px; font-size: 9px; }
+.hint-label { color: #d1d4dc; flex: 1; font-weight: 500; }
+.hint-stat { font-weight: 700; min-width: 40px; text-align: right; }
+.hint-ic { color: #7a8698; margin-left: 4px; }
 .viz-scroll { height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .viz-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-height: 260px; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
