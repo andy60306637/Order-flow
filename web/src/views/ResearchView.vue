@@ -1495,6 +1495,8 @@ watch(selectedResult, selectInitialFactor)
 watch(factorLabFactorNames, selectInitialFactor)
 watch(selectedFactorName, scheduleSaveSettings)
 watch(factorLabMetric, scheduleSaveSettings)
+watch(activeTab, scheduleSaveSettings)
+watch(activeRegime, scheduleSaveSettings)
 watch(factorLabThresholds, scheduleSaveSettings, { deep: true })
 watch(signalQuantile, scheduleSaveSettings)
 watch(signalFilters, scheduleSaveSettings, { deep: true })
@@ -1517,6 +1519,8 @@ watch([
     signalRows.value = []
     signalMeta.value = {}
     signalError.value = ''
+    // Auto-load if parameters changed and we are on the explorer tab
+    loadSignalDataset()
   }
 })
 
@@ -1594,6 +1598,8 @@ function researchSettingsPayload() {
     factor_lab_thresholds: factorLabThresholds.value,
     signal_quantile: signalQuantile.value,
     signal_filters: signalFilters.value,
+    active_tab: activeTab.value,
+    active_regime: activeRegime.value,
   }
 }
 function scheduleSaveSettings() {
@@ -1630,6 +1636,8 @@ function restoreResearchSettings(saved) {
   if (saved.signal_filters && typeof saved.signal_filters === 'object') {
     signalFilters.value = { ...signalFilters.value, ...saved.signal_filters }
   }
+  activeTab.value = saved.active_tab ?? activeTab.value
+  activeRegime.value = saved.active_regime ?? activeRegime.value
 }
 function fmtIC(v) { return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(4) : '—' }
 function fmtSigned(v, digits = 4) {
@@ -2025,7 +2033,7 @@ async function syncResearchJob(jobId) {
     running.value = false
     progress.value = ''
     progressPct.value = 1
-    clearActiveResearchJob()
+    // Don't clear active job, so it can be restored on remount
     return true
   }
   if (data.status === 'error') {
@@ -2033,7 +2041,9 @@ async function syncResearchJob(jobId) {
     running.value = false
     progress.value = ''
     progressPct.value = 0
-    clearActiveResearchJob()
+    // Don't clear active job if we want to see the error, 
+    // but maybe we should clear it on error to avoid persistent error states?
+    // Let's keep it for now as a persistent status.
     return true
   }
   running.value = data.status === 'running' || data.status === 'pending'
