@@ -454,50 +454,67 @@
 
         <template v-else-if="activeTab === 'Regime Matrix'">
           <div class="matrix-toolbar">
-            <label>Metric</label>
-            <select v-model="matrixMetric" class="select-field">
-              <option v-for="opt in matrixMetricOptions" :key="opt.key" :value="opt.key">{{ opt.label }}</option>
-            </select>
-            <span class="text-dim">{{ regimeKeys.length }} regimes × {{ regimeMatrixRows.length }} factors</span>
+            <div class="toolbar-group">
+              <label>Metric</label>
+              <select v-model="matrixMetric" class="select-field matrix-select">
+                <option v-for="opt in matrixMetricOptions" :key="opt.key" :value="opt.key">{{ opt.label }}</option>
+              </select>
+            </div>
+            <span class="text-dim">{{ regimeKeys.length }} regimes × {{ regimeMatrixRows.length }} factors · Click cell to focus regime</span>
           </div>
-          <table class="dense-table">
-            <thead>
-              <tr>
-                <th>Factor</th>
-                <th v-for="key in regimeKeys" :key="key" @click="activeRegime = key">{{ displayRegimeKey(key) }}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in regimeMatrixRows" :key="row.factor">
-                <td>{{ row.factor }}</td>
-                <td v-for="key in regimeKeys" :key="key" :class="[icColor(row.values[key]?.value), { selected: activeRegime === key }]" @click="activeRegime = key">
-                  {{ fmtIC(row.values[key]?.value) }}
-                  <span class="cell-sample">n={{ Number(row.values[key]?.n || 0).toLocaleString() }}</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <div class="matrix-scroll-wrap">
+            <table class="dense-table matrix-table interactive-table">
+              <thead>
+                <tr>
+                  <th class="sticky-col">Factor</th>
+                  <th v-for="key in regimeKeys" :key="key" 
+                    :class="{ selected: activeRegime === key }"
+                    @click="activeRegime = key">
+                    {{ displayRegimeKey(key) }}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in regimeMatrixRows" :key="row.factor">
+                  <td class="sticky-col factor-name-col" @click="selectedFactorName = row.factor; activeTab = 'Factor Lab'">
+                    {{ row.factor }}
+                  </td>
+                  <td v-for="key in regimeKeys" :key="key" 
+                    :class="[icColor(row.values[key]?.value), { selected: activeRegime === key }]" 
+                    :style="{ background: heatColor(row.values[key]?.value, regimeMatrixMaxAbs, 'test') }"
+                    @click="activeRegime = key">
+                    <div class="matrix-cell-content">
+                      <span class="matrix-val">{{ fmtIC(row.values[key]?.value) }}</span>
+                      <span class="matrix-n">n={{ Number(row.values[key]?.n || 0).toLocaleString() }}</span>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
           <div v-if="!regimeMatrixRows.length" class="empty-state compact">No matrix rows for this result.</div>
         </template>
 
         <template v-else-if="activeTab === 'Factor Ranking'">
+          <div class="ranking-toolbar">
+            <span class="text-dim">{{ tabRows.length }} factors found · Click factor name to focus</span>
+          </div>
           <ResultTable :rows="tabRows" />
         </template>
 
         <template v-else-if="activeTab === 'Orthogonal Ranking'">
+          <div class="ranking-toolbar">
+            <span class="text-dim">Principal Component / Orthogonalized factors</span>
+          </div>
           <ResultTable :rows="tabRows" />
         </template>
 
         <template v-else-if="activeTab === 'IC Time Series'">
-          <svg viewBox="0 0 900 420" preserveAspectRatio="none" class="chart-svg">
-            <line v-for="g in [60, 140, 220, 300, 380]" :key="g" x1="34" :y1="g" x2="886" :y2="g" stroke="#2a2e3966" />
-            <line v-if="icTrainCutoffX != null" :x1="icTrainCutoffX" y1="20" :x2="icTrainCutoffX" y2="400" stroke="#ffca28" stroke-width="1" stroke-dasharray="5 4" />
-            <path v-for="line in icLines" :key="line.key" :d="line.path" fill="none" :stroke="line.color" stroke-width="2" />
-            <text v-for="(line, i) in icLines" :key="'l' + line.key" :x="42 + (i % 4) * 190" :y="24 + Math.floor(i / 4) * 16" :fill="line.color" font-size="11">
-              {{ line.key }}
-            </text>
-          </svg>
-          <div v-if="!icLines.length" class="empty-state compact">No IC time-series values for this result.</div>
+          <div class="chart-container">
+            <v-chart v-if="Object.keys(selectedResult?.timeseries_ic?.factors || {}).length" 
+              :option="icTimeSeriesOption" autoresize class="lab-chart full-height" />
+            <div v-else class="empty-state compact">No IC time-series values for this result.</div>
+          </div>
         </template>
 
         <template v-else-if="activeTab === 'Visualization'">
@@ -638,74 +655,405 @@ import { researchApi, backtestApi, settingsApi } from '@/api/client.js'
 
 const RESEARCH_ACTIVE_JOB_KEY = 'orderflow.research.activeJobId'
 
+// ── State Refs ─────────────────────────────────────────────────────────────
+const activeTab = ref('Factor Lab')
+const activeConfig = ref('months')
+const selectedFactorName = ref('')
+const activeRegime = ref('(all)')
+const matrixMetric = ref('oos_oriented_rank_ic')
+const factorLabMetric = ref('oriented_rank_ic')
+const signalRows = ref([])
+const signalMeta = ref({})
+const signalLoading = ref(false)
+const signalError = ref('')
+const signalQuantile = ref(0.20)
+const signalLoadedKey = ref('')
+const signalSort = ref({ key: 'timestamp', dir: 'desc' })
+const signalFilters = ref({
+  outcome: 'all',
+  session: 'all',
+  market_vol: 'all',
+  vwap_zone: 'all',
+  vol_profile: 'all',
+  month: 'all',
+  split: 'all',
+})
+const signalViewMode = ref('all')
+const factorLabThresholds = ref({
+  min_oos_ic: 0.03,
+  min_ir: 0.5,
+  min_t_stat: 2.0,
+  min_oos_sample: 300,
+  min_oos_positive_month_ratio: 0.55,
+  min_best_horizon_stability: 0.60,
+  max_monthly_ic_std: 0.06,
+  min_worst_month_ic: -0.05,
+  require_direction_consistency: true,
+})
+const factors = ref([])
+const factorSideFilter = ref('')
+const factorGroupFilter = ref('')
+const regimeOptions = ref({ modes: ['filter', 'matrix', 'cross_matrix'], dimensions: [], defaults: {} })
+const running = ref(false)
+const progress = ref('')
+const progressPct = ref(0)
+const runningJobId = ref('')
+const error = ref('')
+const result = ref(null)
+const horizonsInput = ref('1,3,6,12')
+const klineRecords = ref([])
+const settingsReady = ref(false)
+let saveTimer = null
+let restoringSettings = false
+let pollGeneration = 0
+
+// ── Visualization tab state ────────────────────────────────────────────────
+const vizMonthHorizon = ref('')
+const vizMonthMetric  = ref('oriented_rank_ic')
+const vizYearHorizon  = ref('')
+const vizYearMetric   = ref('oriented_rank_ic')
+const vizBarHorizon   = ref(1)
+const vizBarMetric    = ref('oriented_rank_ic')
+const stabilityOosOnly = ref(false)
+
+const tabs = [
+  'Factor Lab', 'Signal Dataset Explorer', 'Regime Matrix', 'Factor Ranking', 'Orthogonal Ranking', 'IC Time Series',
+  'Visualization', 'IC by Horizon', 'Quantiles', 'Monthly Stability',
+  'Yearly Stability', 'Factor Correlations', 'Unavailable'
+]
+
+function oosStabilityRows(granularity) {
+  const key = granularity === 'yearly' ? 'stability_yearly' : 'stability_monthly'
+  return (selectedResult.value?.[key] || []).filter(r => r.split === 'test')
+}
+const vizMetricOptions = [
+  { key: 'oriented_rank_ic', label: 'Oriented Rank IC' },
+  { key: 'rank_ic',          label: 'Rank IC' },
+  { key: 'ic',               label: 'Pearson IC' },
+  { key: 'spread_qhigh_qlow', label: 'Q-Spread' },
+]
+function vizHorizons(rows) {
+  if (!Array.isArray(rows)) return []
+  return [...new Set(rows.map(r => r.horizon))].sort((a, b) => a - b)
+}
+function vizFilterRows(rows, horizon) {
+  if (!Array.isArray(rows)) return []
+  if (!horizon && rows.length) {
+    const h = Math.min(...rows.map(r => r.horizon))
+    return rows.filter(r => r.horizon === h)
+  }
+  return rows.filter(r => r.horizon === Number(horizon))
+}
+function vizSplitMap(rows) {
+  if (!Array.isArray(rows)) return {}
+  const map = {}
+  for (const r of rows) {
+    if (r.period && !(r.period in map)) map[r.period] = r.split || ''
+  }
+  return map
+}
+function factorStabilityRows(key) {
+  const name = selectedFactorName.value
+  return (selectedResult.value?.[key] || [])
+    .filter(row => row.factor === name)
+    .sort((a, b) => {
+      const pa = String(a.period || '')
+      const pb = String(b.period || '')
+      if (pa === pb) return Number(a.horizon) - Number(b.horizon)
+      return pa.localeCompare(pb)
+    })
+}
+function heatmapOption(rows, columnKey, valueKey) {
+  const safeRows = Array.isArray(rows) ? rows : []
+  const xLabels = [...new Set(safeRows.map(row => row[columnKey]).filter(Boolean))].sort()
+  const yLabels = [...new Set(safeRows.map(row => row.horizon).filter(v => v != null))]
+    .sort((a, b) => Number(a) - Number(b))
+    .map(h => `H${h}`)
+  const values = safeRows.map(row => Number(row[valueKey] ?? 0)).filter(Number.isFinite)
+  const maxAbs = Math.max(0.01, ...values.map(v => Math.abs(v)))
+  const showCellLabels = xLabels.length <= 12 && yLabels.length <= 8
+  const data = safeRows.map(row => {
+    const v = Number(row[valueKey] ?? 0)
+    return {
+      value: [xLabels.indexOf(row[columnKey]), yLabels.indexOf(`H${row.horizon}`), v],
+      itemStyle: { color: heatColor(v, maxAbs, row.split) },
+    }
+  })
+  return {
+    backgroundColor: '#131722',
+    tooltip: {
+      trigger: 'item',
+      formatter: params => {
+        const row = safeRows[params.dataIndex] || {}
+        return `${row.factor}<br/>${row[columnKey]} / H${row.horizon}<br/>${valueKey}: ${fmtSigned(row[valueKey], 4)}<br/>n=${fmtCount(row.sample_count)} · ${row.split || 'split n/a'}`
+      },
+    },
+    grid: { top: 18, right: 12, bottom: 44, left: 48 },
+    xAxis: {
+      type: 'category',
+      data: xLabels,
+      axisLabel: { color: '#8f96a8', fontSize: 10, rotate: xLabels.length > 12 ? 45 : 0 },
+      axisLine: { lineStyle: { color: '#334058' } },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: 'category',
+      data: yLabels,
+      axisLabel: { color: '#8f96a8', fontSize: 10 },
+      axisLine: { lineStyle: { color: '#334058' } },
+      axisTick: { show: false },
+    },
+    series: [{
+      type: 'heatmap',
+      data,
+      label: { show: showCellLabels, color: '#dce3ee', fontSize: 10, formatter: p => fmtSigned(p.value[2], 3) },
+      emphasis: { itemStyle: { borderColor: '#dce3ee', borderWidth: 1 } },
+    }],
+  }
+}
+function lineOption({ x, series, yName, markX }) {
+  const cleanSeries = series.map((s, idx) => ({
+    name: s.name,
+    type: 'line',
+    showSymbol: false,
+    symbolSize: 5,
+    lineStyle: { width: idx === 0 ? 2 : 1.5 },
+    data: s.data,
+    markLine: idx === 0 ? {
+      symbol: 'none',
+      silent: true,
+      lineStyle: { color: '#4a5568', type: 'dashed' },
+      data: [
+        { yAxis: 0, label: { show: false } },
+        ...(markX ? [{ xAxis: markX, lineStyle: { color: '#ffca28', type: 'dashed' }, label: { formatter: 'Train/OOS', color: '#ffca28' } }] : []),
+      ],
+    } : undefined,
+  }))
+  return {
+    backgroundColor: '#131722',
+    color: ['#26a69a', '#42a5f5', '#ffca28', '#ef5350'],
+    tooltip: { trigger: 'axis', valueFormatter: v => fmtSigned(v, 4) },
+    grid: { top: 24, right: 18, bottom: 38, left: 54 },
+    xAxis: {
+      type: 'category',
+      data: x,
+      boundaryGap: false,
+      axisLabel: { color: '#8f96a8', fontSize: 10, hideOverlap: true },
+      axisLine: { lineStyle: { color: '#334058' } },
+    },
+    yAxis: {
+      type: 'value',
+      name: yName,
+      nameTextStyle: { color: '#8f96a8', fontSize: 10 },
+      axisLabel: { color: '#8f96a8', fontSize: 10 },
+      splitLine: { lineStyle: { color: '#263245' } },
+    },
+    series: cleanSeries,
+  }
+}
+function heatColor(value, maxAbs, split) {
+  const alpha = 0.18 + Math.min(0.82, Math.abs(Number(value || 0)) / maxAbs * 0.82)
+  const base = Number(value || 0) >= 0 ? `38,166,154` : `239,83,80`
+  const adjusted = split === 'train' ? Math.max(0.18, alpha * 0.68) : alpha
+  return `rgba(${base},${adjusted})`
+}
+
 const ResultTable = {
   props: { rows: { type: Array, default: () => [] } },
-  computed: {
-    cols() {
+  setup(props) {
+    const sortKey = ref('')
+    const sortDir = ref('desc')
+
+    const cols = computed(() => {
+      if (!props.rows.length) return []
+      // Priority keys to show first
+      const priority = ['factor', 'side', 'group', 'rank_ic', 'ic_ir', 't_stat', 'sample_count', 'oos_rank_ic', 'oos_ic_ir']
       const keys = new Set()
-      for (const row of this.rows) Object.keys(row || {}).forEach(k => keys.add(k))
-      return [...keys]
+      for (const row of props.rows) Object.keys(row || {}).forEach(k => keys.add(k))
+      const allKeys = [...keys]
+      return [
+        ...priority.filter(k => keys.has(k)),
+        ...allKeys.filter(k => !priority.includes(k))
+      ]
+    })
+
+    const sortedRows = computed(() => {
+      const rows = [...props.rows]
+      if (!sortKey.value) return rows
+      const key = sortKey.value
+      const dir = sortDir.value === 'asc' ? 1 : -1
+      rows.sort((a, b) => {
+        const av = a[key], bv = b[key]
+        if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir
+        return String(av || '').localeCompare(String(bv || '')) * dir
+      })
+      return rows
+    })
+
+    const toggleSort = (key) => {
+      if (sortKey.value === key) sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
+      else { sortKey.value = key; sortDir.value = 'desc' }
     }
-  },
-  methods: {
-    fmt(v) {
-      return typeof v === 'number' ? v.toFixed(Math.abs(v) < 10 ? 4 : 2) : (v ?? '—')
-    },
-    cls(v) {
-      return typeof v === 'number' && Math.abs(v) <= 1
-        ? (v > 0.05 ? 'text-up' : v < -0.05 ? 'text-down' : 'text-text')
-        : 'text-text'
+
+    const fmt = (v, key) => {
+      if (typeof v !== 'number') return v ?? '—'
+      if (key.includes('count') || key === 'n') return Math.round(v).toLocaleString()
+      if (key.includes('ratio') || key.includes('rate') || key.includes('pct')) return (v * 100).toFixed(2) + '%'
+      return v.toFixed(Math.abs(v) < 10 ? 4 : 2)
     }
-  },
-  render() {
-    const rows = Array.isArray(this.rows) ? this.rows : []
-    if (!rows.length) return h('div', { class: 'empty-state compact' }, 'No rows for selected regime.')
-    return h('table', { class: 'dense-table' }, [
-      h('thead', [
-        h('tr', this.cols.map(c => h('th', { key: c }, c))),
-      ]),
-      h('tbody', rows.map((row, i) => h('tr', { key: i }, this.cols.map(c => (
-        h('td', { key: c, class: this.cls(row?.[c]) }, this.fmt(row?.[c]))
-      ))))),
-    ])
+
+    const cellStyle = (v, key) => {
+      if (typeof v !== 'number' || Math.abs(v) > 1.1 || key.includes('count')) return {}
+      const alpha = 0.1 + Math.min(0.4, Math.abs(v) * 2)
+      const color = v >= 0 ? `rgba(38,166,154,${alpha})` : `rgba(239,83,80,${alpha})`
+      return { background: color }
+    }
+
+    const icColor = (v) => {
+      if (typeof v !== 'number') return ''
+      if (v > 0.05) return 'text-up'
+      if (v < -0.05) return 'text-down'
+      return ''
+    }
+
+    return () => {
+      const rows = sortedRows.value
+      if (!rows.length) return h('div', { class: 'empty-state compact' }, 'No rows for selected regime.')
+      
+      return h('div', { class: 'table-container' }, [
+        h('table', { class: 'dense-table interactive-table ranking-table' }, [
+          h('thead', [
+            h('tr', cols.value.map(c => h('th', { 
+              key: c, 
+              onClick: () => toggleSort(c),
+              class: { 'sort-active': sortKey.value === c }
+            }, [
+              c,
+              sortKey.value === c ? h('span', { class: 'sort-icon' }, sortDir.value === 'asc' ? ' ▲' : ' ▼') : null
+            ]))),
+          ]),
+          h('tbody', rows.map((row, i) => h('tr', { key: i }, cols.value.map(c => (
+            h('td', { 
+              key: c, 
+              class: icColor(row[c]),
+              style: cellStyle(row[c], c),
+              onClick: c === 'factor' ? () => { selectedFactorName.value = row[c]; activeTab.value = 'Factor Lab' } : null
+            }, [
+              h('span', fmt(row[c], c)),
+              // Data bar for IC/IR
+              (c.includes('ic') || c.includes('ir') || c === 'value') && typeof row[c] === 'number' && Math.abs(row[c]) <= 1 ? 
+                h('div', { class: 'data-bar-bg' }, [
+                  h('div', { 
+                    class: 'data-bar', 
+                    style: { 
+                      width: `${Math.abs(row[c]) * 100}%`,
+                      background: row[c] >= 0 ? '#26a69a' : '#ef5350',
+                      marginLeft: row[c] >= 0 ? '0' : 'auto'
+                    } 
+                  })
+                ]) : null
+            ])
+          ))))),
+        ])
+      ])
+    }
   }
 }
 
 // StabilityTable — same as ResultTable but row background differs by IS/OOS split
 const StabilityTable = {
   props: { rows: { type: Array, default: () => [] } },
-  computed: {
-    cols() {
+  setup(props) {
+    const sortKey = ref('')
+    const sortDir = ref('desc')
+
+    const cols = computed(() => {
+      if (!props.rows.length) return []
+      const priority = ['period', 'split', 'factor', 'horizon', 'rank_ic', 'ic_ir', 'sample_count']
       const keys = new Set()
-      for (const row of this.rows) Object.keys(row || {}).forEach(k => keys.add(k))
-      return [...keys]
+      for (const row of props.rows) Object.keys(row || {}).forEach(k => keys.add(k))
+      const allKeys = [...keys]
+      return [
+        ...priority.filter(k => keys.has(k)),
+        ...allKeys.filter(k => !priority.includes(k))
+      ]
+    })
+
+    const sortedRows = computed(() => {
+      const rows = [...props.rows]
+      if (!sortKey.value) return rows
+      const key = sortKey.value
+      const dir = sortDir.value === 'asc' ? 1 : -1
+      rows.sort((a, b) => {
+        const av = a[key], bv = b[key]
+        if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir
+        return String(av || '').localeCompare(String(bv || '')) * dir
+      })
+      return rows
+    })
+
+    const toggleSort = (key) => {
+      if (sortKey.value === key) sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
+      else { sortKey.value = key; sortDir.value = 'desc' }
     }
-  },
-  methods: {
-    fmt(v) {
-      return typeof v === 'number' ? v.toFixed(Math.abs(v) < 10 ? 4 : 2) : (v ?? '—')
-    },
-    numCls(v) {
-      return typeof v === 'number' && Math.abs(v) <= 1
-        ? (v > 0.05 ? 'text-up' : v < -0.05 ? 'text-down' : 'text-text')
-        : 'text-text'
-    },
-    rowCls(row) {
+
+    const fmt = (v, key) => {
+      if (typeof v !== 'number') return v ?? '—'
+      if (key.includes('count') || key === 'n') return Math.round(v).toLocaleString()
+      return v.toFixed(Math.abs(v) < 10 ? 4 : 2)
+    }
+
+    const cellStyle = (v, key) => {
+      if (typeof v !== 'number' || Math.abs(v) > 1.1 || key.includes('count')) return {}
+      const alpha = 0.1 + Math.min(0.4, Math.abs(v) * 2)
+      const color = v >= 0 ? `rgba(38,166,154,${alpha})` : `rgba(239,83,80,${alpha})`
+      return { background: color }
+    }
+
+    const rowCls = (row) => {
       const sp = row?.split || ''
       return sp === 'test' ? 'row-oos' : sp === 'train' ? 'row-is' : ''
-    },
-  },
-  render() {
-    const rows = Array.isArray(this.rows) ? this.rows : []
-    if (!rows.length) return h('div', { class: 'empty-state compact' }, 'No rows for selected regime.')
-    return h('table', { class: 'dense-table' }, [
-      h('thead', [
-        h('tr', this.cols.map(c => h('th', { key: c }, c))),
-      ]),
-      h('tbody', rows.map((row, i) => h('tr', { key: i, class: this.rowCls(row) }, this.cols.map(c => (
-        h('td', { key: c, class: this.numCls(row?.[c]) }, this.fmt(row?.[c]))
-      ))))),
-    ])
+    }
+
+    return () => {
+      const rows = sortedRows.value
+      if (!rows.length) return h('div', { class: 'empty-state compact' }, 'No rows for selected regime.')
+      
+      return h('div', { class: 'table-container' }, [
+        h('table', { class: 'dense-table interactive-table stability-table' }, [
+          h('thead', [
+            h('tr', cols.value.map(c => h('th', { 
+              key: c, 
+              onClick: () => toggleSort(c),
+              class: { 'sort-active': sortKey.value === c }
+            }, [
+              c,
+              sortKey.value === c ? h('span', { class: 'sort-icon' }, sortDir.value === 'asc' ? ' ▲' : ' ▼') : null
+            ]))),
+          ]),
+          h('tbody', rows.map((row, i) => h('tr', { key: i, class: rowCls(row) }, cols.value.map(c => (
+            h('td', { 
+              key: c, 
+              style: cellStyle(row[c], c),
+              onClick: c === 'factor' ? () => { selectedFactorName.value = row[c]; activeTab.value = 'Factor Lab' } : null
+            }, [
+              h('span', fmt(row[c], c)),
+              (c.includes('ic') || c.includes('ir')) && typeof row[c] === 'number' && Math.abs(row[c]) <= 1 ? 
+                h('div', { class: 'data-bar-bg' }, [
+                  h('div', { 
+                    class: 'data-bar', 
+                    style: { 
+                      width: `${Math.abs(row[c]) * 100}%`,
+                      background: row[c] >= 0 ? '#26a69a' : '#ef5350',
+                      marginLeft: row[c] >= 0 ? '0' : 'auto'
+                    } 
+                  })
+                ]) : null
+            ])
+          ))))),
+        ])
+      ])
+    }
   }
 }
 
@@ -886,162 +1234,8 @@ const YearlyICBar = {
   }
 }
 
-const tabs = [
-  'Factor Lab', 'Signal Dataset Explorer', 'Regime Matrix', 'Factor Ranking', 'Orthogonal Ranking', 'IC Time Series',
-  'Visualization', 'IC by Horizon', 'Quantiles', 'Monthly Stability',
-  'Yearly Stability', 'Factor Correlations', 'Unavailable'
-]
-const activeTab = ref('Factor Lab')
-const activeConfig = ref('months')
-
-// ── Visualization tab state ────────────────────────────────────────────────
-const vizMonthHorizon = ref('')
-const vizMonthMetric  = ref('oriented_rank_ic')
-const vizYearHorizon  = ref('')
-const vizYearMetric   = ref('oriented_rank_ic')
-const vizBarHorizon   = ref(1)
-const vizBarMetric    = ref('oriented_rank_ic')
-
-// ── Stability tab state ────────────────────────────────────────────────────
-const stabilityOosOnly = ref(false)
-function oosStabilityRows(granularity) {
-  const key = granularity === 'yearly' ? 'stability_yearly' : 'stability_monthly'
-  return (selectedResult.value?.[key] || []).filter(r => r.split === 'test')
-}
-const vizMetricOptions = [
-  { key: 'oriented_rank_ic', label: 'Oriented Rank IC' },
-  { key: 'rank_ic',          label: 'Rank IC' },
-  { key: 'ic',               label: 'Pearson IC' },
-  { key: 'spread_qhigh_qlow', label: 'Q-Spread' },
-]
-function vizHorizons(rows) {
-  if (!Array.isArray(rows)) return []
-  return [...new Set(rows.map(r => r.horizon))].sort((a, b) => a - b)
-}
-function vizFilterRows(rows, horizon) {
-  if (!Array.isArray(rows)) return []
-  if (!horizon && rows.length) {
-    const h = Math.min(...rows.map(r => r.horizon))
-    return rows.filter(r => r.horizon === h)
-  }
-  return rows.filter(r => r.horizon === Number(horizon))
-}
-function vizSplitMap(rows) {
-  if (!Array.isArray(rows)) return {}
-  const map = {}
-  for (const r of rows) {
-    if (r.period && !(r.period in map)) map[r.period] = r.split || ''
-  }
-  return map
-}
-function factorStabilityRows(key) {
-  const name = selectedFactorName.value
-  return (selectedResult.value?.[key] || [])
-    .filter(row => row.factor === name)
-    .sort((a, b) => {
-      const pa = String(a.period || '')
-      const pb = String(b.period || '')
-      if (pa === pb) return Number(a.horizon) - Number(b.horizon)
-      return pa.localeCompare(pb)
-    })
-}
-function heatmapOption(rows, columnKey, valueKey) {
-  const safeRows = Array.isArray(rows) ? rows : []
-  const xLabels = [...new Set(safeRows.map(row => row[columnKey]).filter(Boolean))].sort()
-  const yLabels = [...new Set(safeRows.map(row => row.horizon).filter(v => v != null))]
-    .sort((a, b) => Number(a) - Number(b))
-    .map(h => `H${h}`)
-  const values = safeRows.map(row => Number(row[valueKey] ?? 0)).filter(Number.isFinite)
-  const maxAbs = Math.max(0.01, ...values.map(v => Math.abs(v)))
-  const showCellLabels = xLabels.length <= 12 && yLabels.length <= 8
-  const data = safeRows.map(row => {
-    const v = Number(row[valueKey] ?? 0)
-    return {
-      value: [xLabels.indexOf(row[columnKey]), yLabels.indexOf(`H${row.horizon}`), v],
-      itemStyle: { color: heatColor(v, maxAbs, row.split) },
-    }
-  })
-  return {
-    backgroundColor: '#131722',
-    tooltip: {
-      trigger: 'item',
-      formatter: params => {
-        const row = safeRows[params.dataIndex] || {}
-        return `${row.factor}<br/>${row[columnKey]} / H${row.horizon}<br/>${valueKey}: ${fmtSigned(row[valueKey], 4)}<br/>n=${fmtCount(row.sample_count)} · ${row.split || 'split n/a'}`
-      },
-    },
-    grid: { top: 18, right: 12, bottom: 44, left: 48 },
-    xAxis: {
-      type: 'category',
-      data: xLabels,
-      axisLabel: { color: '#8f96a8', fontSize: 10, rotate: xLabels.length > 12 ? 45 : 0 },
-      axisLine: { lineStyle: { color: '#334058' } },
-      axisTick: { show: false },
-    },
-    yAxis: {
-      type: 'category',
-      data: yLabels,
-      axisLabel: { color: '#8f96a8', fontSize: 10 },
-      axisLine: { lineStyle: { color: '#334058' } },
-      axisTick: { show: false },
-    },
-    series: [{
-      type: 'heatmap',
-      data,
-      label: { show: showCellLabels, color: '#dce3ee', fontSize: 10, formatter: p => fmtSigned(p.value[2], 3) },
-      emphasis: { itemStyle: { borderColor: '#dce3ee', borderWidth: 1 } },
-    }],
-  }
-}
-function lineOption({ x, series, yName, markX }) {
-  const cleanSeries = series.map((s, idx) => ({
-    name: s.name,
-    type: 'line',
-    showSymbol: false,
-    symbolSize: 5,
-    lineStyle: { width: idx === 0 ? 2 : 1.5 },
-    data: s.data,
-    markLine: idx === 0 ? {
-      symbol: 'none',
-      silent: true,
-      lineStyle: { color: '#4a5568', type: 'dashed' },
-      data: [
-        { yAxis: 0, label: { show: false } },
-        ...(markX ? [{ xAxis: markX, lineStyle: { color: '#ffca28', type: 'dashed' }, label: { formatter: 'Train/OOS', color: '#ffca28' } }] : []),
-      ],
-    } : undefined,
-  }))
-  return {
-    backgroundColor: '#131722',
-    color: ['#26a69a', '#42a5f5', '#ffca28', '#ef5350'],
-    tooltip: { trigger: 'axis', valueFormatter: v => fmtSigned(v, 4) },
-    grid: { top: 24, right: 18, bottom: 38, left: 54 },
-    xAxis: {
-      type: 'category',
-      data: x,
-      boundaryGap: false,
-      axisLabel: { color: '#8f96a8', fontSize: 10, hideOverlap: true },
-      axisLine: { lineStyle: { color: '#334058' } },
-    },
-    yAxis: {
-      type: 'value',
-      name: yName,
-      nameTextStyle: { color: '#8f96a8', fontSize: 10 },
-      axisLabel: { color: '#8f96a8', fontSize: 10 },
-      splitLine: { lineStyle: { color: '#263245' } },
-    },
-    series: cleanSeries,
-  }
-}
-function heatColor(value, maxAbs, split) {
-  const alpha = 0.18 + Math.min(0.82, Math.abs(Number(value || 0)) / maxAbs * 0.82)
-  const base = Number(value || 0) >= 0 ? `38,166,154` : `239,83,80`
-  const adjusted = split === 'train' ? Math.max(0.18, alpha * 0.68) : alpha
-  return `rgba(${base},${adjusted})`
-}
 const activeRegime = ref('(all)')
 const matrixMetric = ref('oos_oriented_rank_ic')
-const selectedFactorName = ref('')
 const factorLabMetric = ref('oriented_rank_ic')
 const signalRows = ref([])
 const signalMeta = ref({})
@@ -1420,6 +1614,60 @@ const signalQuantileDescription = computed(() => {
   if (dir === 'Long') return `Long favorable: top ${pct}%`
   if (dir === 'Short') return `Short favorable: bottom ${pct}%`
   return `abs top ${pct}%`
+})
+const regimeMatrixMaxAbs = computed(() => {
+  let m = 0.01
+  for (const row of regimeMatrixRows.value) {
+    for (const v of Object.values(row.values)) {
+      if (v.value != null) m = Math.max(m, Math.abs(v.value))
+    }
+  }
+  return m
+})
+const icTimeSeriesOption = computed(() => {
+  const ts = selectedResult.value?.timeseries_ic || {}
+  const timestamps = Array.isArray(ts.timestamps) ? ts.timestamps : []
+  const factorsData = ts.factors || {}
+  const labels = timestamps.map(formatTsLabel)
+  const cutoff = Number(ts.train_cutoff_ts || 0)
+  const cutoffLabel = cutoff ? formatTsLabel(cutoff) : null
+
+  const series = Object.entries(factorsData).map(([name, arr], idx) => {
+    const colors = ['#26a69a', '#ef5350', '#42a5f5', '#ffca28', '#ab47bc', '#66bb6a', '#ff7043', '#8d6e63']
+    return {
+      name,
+      type: 'line',
+      showSymbol: false,
+      data: (Array.isArray(arr) ? arr : []).map(pointValue),
+      lineStyle: { width: 1.5 },
+      itemStyle: { color: colors[idx % colors.length] }
+    }
+  })
+
+  return {
+    backgroundColor: '#131722',
+    tooltip: { trigger: 'axis', backgroundColor: '#1c2636', borderColor: '#334058', textStyle: { color: '#dce3ee' } },
+    legend: { show: true, textStyle: { color: '#8f96a8' }, top: 0, type: 'scroll' },
+    grid: { top: 60, right: 20, bottom: 40, left: 50 },
+    xAxis: {
+      type: 'category',
+      data: labels,
+      axisLabel: { color: '#8f96a8', fontSize: 10, hideOverlap: true },
+      axisLine: { lineStyle: { color: '#334058' } }
+    },
+    yAxis: {
+      type: 'value',
+      axisLabel: { color: '#8f96a8', fontSize: 10 },
+      splitLine: { lineStyle: { color: '#263245' } }
+    },
+    series,
+    markLine: cutoffLabel ? {
+      symbol: 'none',
+      silent: true,
+      lineStyle: { color: '#ffca28', type: 'dashed' },
+      data: [{ xAxis: cutoffLabel, label: { formatter: 'Train/OOS', color: '#ffca28', position: 'end' } }]
+    } : undefined
+  }
 })
 const tabRows = computed(() => {
   const res = selectedResult.value
@@ -2258,6 +2506,27 @@ onUnmounted(() => {
 .dense-table tbody tr:hover td { background: rgba(255,255,255,0.03) !important; }
 .dense-table tr.selected { background: #23423f; }
 .dense-table td.selected { background: #23423f !important; }
+.table-container { width: 100%; overflow: auto; border: 1px solid #263245; border-radius: 6px; }
+.ranking-table th, .stability-table th { cursor: pointer; user-select: none; }
+.ranking-table th:hover, .stability-table th:hover { background: #20283a; }
+.sort-icon { font-size: 10px; color: #26a69a; }
+.data-bar-bg { width: 100%; height: 3px; background: rgba(255,255,255,0.05); margin-top: 4px; border-radius: 2px; overflow: hidden; }
+.data-bar { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
+.factor-name-col { cursor: pointer; color: #8fe7d8 !important; font-weight: 600 !important; }
+.factor-name-col:hover { text-decoration: underline; background: #1f3a37 !important; }
+.matrix-scroll-wrap { width: 100%; overflow: auto; border: 1px solid #263245; border-radius: 6px; max-height: calc(100vh - 160px); }
+.matrix-table { border-collapse: separate; border-spacing: 0; }
+.matrix-table th { white-space: normal; min-width: 100px; max-width: 150px; line-height: 1.2; text-align: center; }
+.matrix-table .sticky-col { position: sticky; left: 0; z-index: 2; background: #182132; border-right: 2px solid #263245; }
+.matrix-table th.sticky-col { top: 0; z-index: 3; }
+.matrix-cell-content { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+.matrix-val { font-weight: 600; }
+.matrix-n { font-size: 9px; opacity: 0.6; }
+.chart-container { height: 600px; background: #151c2a; border: 1px solid #263245; border-radius: 6px; padding: 12px; }
+.full-height { height: 100% !important; }
+.ranking-toolbar { display: flex; align-items: center; padding: 4px 8px; font-size: 11px; color: #8f96a8; }
+.matrix-select { width: 180px !important; }
+.toolbar-group { display: flex; align-items: center; gap: 8px; }
 .cell-sample { display: block; margin-top: 2px; color: #6f7888; font-size: 10px; }
 .chart-svg { width: 100%; height: 100%; min-height: 360px; background: #131722; border: 1px solid #263245; border-radius: 6px; }
 .factor-lab { height: 100%; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
