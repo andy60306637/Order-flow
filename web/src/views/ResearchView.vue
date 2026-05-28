@@ -128,6 +128,99 @@
       <section class="tab-body">
         <div v-if="!selectedResult" class="empty-state">No research result loaded.</div>
 
+        <template v-else-if="activeTab === 'Factor Lab'">
+          <div class="factor-lab">
+            <div class="lab-toolbar">
+              <label>Factor</label>
+              <select v-model="selectedFactorName" class="select-field lab-select">
+                <option v-for="name in factorLabFactorNames" :key="name" :value="name">{{ name }}</option>
+              </select>
+              <label>Heatmap Metric</label>
+              <select v-model="factorLabMetric" class="select-field metric-select">
+                <option v-for="m in vizMetricOptions" :key="m.key" :value="m.key">{{ m.label }}</option>
+              </select>
+              <details class="threshold-settings">
+                <summary>Thresholds</summary>
+                <div class="threshold-grid">
+                  <label>OOS IC</label><input v-model.number="factorLabThresholds.min_oos_ic" type="number" step="0.005" class="input-field" />
+                  <label>IR</label><input v-model.number="factorLabThresholds.min_ir" type="number" step="0.1" class="input-field" />
+                  <label>t-stat</label><input v-model.number="factorLabThresholds.min_t_stat" type="number" step="0.1" class="input-field" />
+                  <label>OOS n</label><input v-model.number="factorLabThresholds.min_oos_sample" type="number" step="50" class="input-field" />
+                  <label>Pos Month</label><input v-model.number="factorLabThresholds.min_oos_positive_month_ratio" type="number" step="0.05" class="input-field" />
+                  <label>H Stability</label><input v-model.number="factorLabThresholds.min_best_horizon_stability" type="number" step="0.05" class="input-field" />
+                  <label>Max IC Std</label><input v-model.number="factorLabThresholds.max_monthly_ic_std" type="number" step="0.005" class="input-field" />
+                  <label>Worst IC</label><input v-model.number="factorLabThresholds.min_worst_month_ic" type="number" step="0.005" class="input-field" />
+                  <label>IS/OOS Dir</label>
+                  <select v-model="factorLabThresholds.require_direction_consistency" class="input-field">
+                    <option :value="true">Required</option>
+                    <option :value="false">Optional</option>
+                  </select>
+                </div>
+              </details>
+            </div>
+
+            <section class="ic-summary-card" :class="factorLabVerdict.level">
+              <div>
+                <div class="summary-kicker">{{ selectedFactorSummary?.group || 'Factor' }}</div>
+                <h2>{{ selectedFactorName || 'No factor selected' }}</h2>
+                <div class="summary-meta">
+                  <span>{{ selectedFactorSummary?.side || '—' }}</span>
+                  <span>Best H {{ selectedFactorSummary?.oos_best_horizon || selectedFactorSummary?.best_horizon || '—' }}</span>
+                  <span>{{ selectedFactorSummary?.requires_ticks ? 'Tick factor' : 'Kline factor' }}</span>
+                </div>
+              </div>
+              <div class="verdict-box">
+                <strong>{{ factorLabVerdict.label }}</strong>
+                <span>{{ factorLabVerdict.reason }}</span>
+              </div>
+              <div class="summary-metrics">
+                <div v-for="m in factorLabSummaryMetrics" :key="m.label" class="metric-tile">
+                  <span>{{ m.label }}</span>
+                  <strong :class="m.isCount ? '' : icColor(m.raw)">{{ m.value }}</strong>
+                </div>
+              </div>
+            </section>
+
+            <section class="lab-grid heatmap-grid">
+              <div class="lab-panel">
+                <div class="panel-header">
+                  <h2 class="panel-title">Yearly IC Heatmap</h2>
+                  <span class="text-dim">rows=horizon · cols=year</span>
+                </div>
+                <v-chart v-if="factorYearlyHeatmapRows.length" :option="factorYearlyHeatmapOption" autoresize class="lab-chart" />
+                <div v-else class="empty-state compact">No yearly stability rows for this factor.</div>
+              </div>
+              <div class="lab-panel">
+                <div class="panel-header">
+                  <h2 class="panel-title">Monthly IC Heatmap</h2>
+                  <span class="text-dim">rows=horizon · cols=month</span>
+                </div>
+                <v-chart v-if="factorMonthlyHeatmapRows.length" :option="factorMonthlyHeatmapOption" autoresize class="lab-chart" />
+                <div v-else class="empty-state compact">No monthly stability rows for this factor.</div>
+              </div>
+            </section>
+
+            <section class="lab-grid chart-grid">
+              <div class="lab-panel">
+                <div class="panel-header">
+                  <h2 class="panel-title">Rolling IC</h2>
+                  <span class="text-dim">time stability · H{{ selectedResult?.timeseries_ic?.horizon || '—' }}</span>
+                </div>
+                <v-chart v-if="factorRollingIcSeries.length" :option="factorRollingIcOption" autoresize class="lab-chart tall" />
+                <div v-else class="empty-state compact">No rolling IC series for this factor.</div>
+              </div>
+              <div class="lab-panel">
+                <div class="panel-header">
+                  <h2 class="panel-title">Horizon Decay</h2>
+                  <span class="text-dim">IS vs OOS by horizon</span>
+                </div>
+                <v-chart v-if="factorHorizonRows.length" :option="factorHorizonDecayOption" autoresize class="lab-chart tall" />
+                <div v-else class="empty-state compact">No horizon rows for this factor.</div>
+              </div>
+            </section>
+          </div>
+        </template>
+
         <template v-else-if="activeTab === 'Regime Matrix'">
           <div class="matrix-toolbar">
             <label>Metric</label>
@@ -563,11 +656,11 @@ const YearlyICBar = {
 }
 
 const tabs = [
-  'Regime Matrix', 'Factor Ranking', 'Orthogonal Ranking', 'IC Time Series',
+  'Factor Lab', 'Regime Matrix', 'Factor Ranking', 'Orthogonal Ranking', 'IC Time Series',
   'Visualization', 'IC by Horizon', 'Quantiles', 'Monthly Stability',
   'Yearly Stability', 'Factor Correlations', 'Unavailable'
 ]
-const activeTab = ref('Regime Matrix')
+const activeTab = ref('Factor Lab')
 const activeConfig = ref('months')
 
 // ── Visualization tab state ────────────────────────────────────────────────
@@ -610,8 +703,126 @@ function vizSplitMap(rows) {
   }
   return map
 }
+function factorStabilityRows(key) {
+  const name = selectedFactorName.value
+  return (selectedResult.value?.[key] || [])
+    .filter(row => row.factor === name)
+    .sort((a, b) => {
+      const pa = String(a.period || '')
+      const pb = String(b.period || '')
+      if (pa === pb) return Number(a.horizon) - Number(b.horizon)
+      return pa.localeCompare(pb)
+    })
+}
+function heatmapOption(rows, columnKey, valueKey) {
+  const safeRows = Array.isArray(rows) ? rows : []
+  const xLabels = [...new Set(safeRows.map(row => row[columnKey]).filter(Boolean))].sort()
+  const yLabels = [...new Set(safeRows.map(row => row.horizon).filter(v => v != null))]
+    .sort((a, b) => Number(a) - Number(b))
+    .map(h => `H${h}`)
+  const values = safeRows.map(row => Number(row[valueKey] ?? 0)).filter(Number.isFinite)
+  const maxAbs = Math.max(0.01, ...values.map(v => Math.abs(v)))
+  const showCellLabels = xLabels.length <= 12 && yLabels.length <= 8
+  const data = safeRows.map(row => {
+    const v = Number(row[valueKey] ?? 0)
+    return {
+      value: [xLabels.indexOf(row[columnKey]), yLabels.indexOf(`H${row.horizon}`), v],
+      itemStyle: { color: heatColor(v, maxAbs, row.split) },
+    }
+  })
+  return {
+    backgroundColor: '#131722',
+    tooltip: {
+      trigger: 'item',
+      formatter: params => {
+        const row = safeRows[params.dataIndex] || {}
+        return `${row.factor}<br/>${row[columnKey]} / H${row.horizon}<br/>${valueKey}: ${fmtSigned(row[valueKey], 4)}<br/>n=${fmtCount(row.sample_count)} · ${row.split || 'split n/a'}`
+      },
+    },
+    grid: { top: 18, right: 12, bottom: 44, left: 48 },
+    xAxis: {
+      type: 'category',
+      data: xLabels,
+      axisLabel: { color: '#8f96a8', fontSize: 10, rotate: xLabels.length > 12 ? 45 : 0 },
+      axisLine: { lineStyle: { color: '#334058' } },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: 'category',
+      data: yLabels,
+      axisLabel: { color: '#8f96a8', fontSize: 10 },
+      axisLine: { lineStyle: { color: '#334058' } },
+      axisTick: { show: false },
+    },
+    series: [{
+      type: 'heatmap',
+      data,
+      label: { show: showCellLabels, color: '#dce3ee', fontSize: 10, formatter: p => fmtSigned(p.value[2], 3) },
+      emphasis: { itemStyle: { borderColor: '#dce3ee', borderWidth: 1 } },
+    }],
+  }
+}
+function lineOption({ x, series, yName, markX }) {
+  const cleanSeries = series.map((s, idx) => ({
+    name: s.name,
+    type: 'line',
+    showSymbol: false,
+    symbolSize: 5,
+    lineStyle: { width: idx === 0 ? 2 : 1.5 },
+    data: s.data,
+    markLine: idx === 0 ? {
+      symbol: 'none',
+      silent: true,
+      lineStyle: { color: '#4a5568', type: 'dashed' },
+      data: [
+        { yAxis: 0, label: { show: false } },
+        ...(markX ? [{ xAxis: markX, lineStyle: { color: '#ffca28', type: 'dashed' }, label: { formatter: 'Train/OOS', color: '#ffca28' } }] : []),
+      ],
+    } : undefined,
+  }))
+  return {
+    backgroundColor: '#131722',
+    color: ['#26a69a', '#42a5f5', '#ffca28', '#ef5350'],
+    tooltip: { trigger: 'axis', valueFormatter: v => fmtSigned(v, 4) },
+    grid: { top: 24, right: 18, bottom: 38, left: 54 },
+    xAxis: {
+      type: 'category',
+      data: x,
+      boundaryGap: false,
+      axisLabel: { color: '#8f96a8', fontSize: 10, hideOverlap: true },
+      axisLine: { lineStyle: { color: '#334058' } },
+    },
+    yAxis: {
+      type: 'value',
+      name: yName,
+      nameTextStyle: { color: '#8f96a8', fontSize: 10 },
+      axisLabel: { color: '#8f96a8', fontSize: 10 },
+      splitLine: { lineStyle: { color: '#263245' } },
+    },
+    series: cleanSeries,
+  }
+}
+function heatColor(value, maxAbs, split) {
+  const alpha = 0.18 + Math.min(0.82, Math.abs(Number(value || 0)) / maxAbs * 0.82)
+  const base = Number(value || 0) >= 0 ? `38,166,154` : `239,83,80`
+  const adjusted = split === 'train' ? Math.max(0.18, alpha * 0.68) : alpha
+  return `rgba(${base},${adjusted})`
+}
 const activeRegime = ref('(all)')
 const matrixMetric = ref('oos_oriented_rank_ic')
+const selectedFactorName = ref('')
+const factorLabMetric = ref('oriented_rank_ic')
+const factorLabThresholds = ref({
+  min_oos_ic: 0.03,
+  min_ir: 0.5,
+  min_t_stat: 2.0,
+  min_oos_sample: 300,
+  min_oos_positive_month_ratio: 0.55,
+  min_best_horizon_stability: 0.60,
+  max_monthly_ic_std: 0.06,
+  min_worst_month_ic: -0.05,
+  require_direction_consistency: true,
+})
 const factors = ref([])
 const factorSideFilter = ref('')
 const factorGroupFilter = ref('')
@@ -712,6 +923,123 @@ const regimeMatrixRows = computed(() => {
     return { factor, values }
   })
 })
+const factorLabFactorNames = computed(() => {
+  const names = (selectedResult.value?.summary || []).map(row => row.factor).filter(Boolean)
+  return names.length ? names : validSelectedFactors()
+})
+const selectedFactorSummary = computed(() => {
+  const name = selectedFactorName.value
+  return (selectedResult.value?.summary || []).find(row => row.factor === name) || null
+})
+const factorHorizonRows = computed(() => {
+  const name = selectedFactorName.value
+  return (selectedResult.value?.metrics || [])
+    .filter(row => row.factor === name)
+    .sort((a, b) => Number(a.horizon) - Number(b.horizon))
+})
+const factorYearlyHeatmapRows = computed(() => factorStabilityRows('stability_yearly'))
+const factorMonthlyHeatmapRows = computed(() => factorStabilityRows('stability_monthly'))
+const factorRollingIcSeries = computed(() => {
+  const values = selectedResult.value?.timeseries_ic?.factors?.[selectedFactorName.value]
+  return Array.isArray(values) ? values.map(pointValue).filter(Number.isFinite) : []
+})
+const factorLabStabilityStats = computed(() => {
+  const row = selectedFactorSummary.value || {}
+  const bestH = Number(row.oos_best_horizon || row.best_horizon || 0)
+  const monthlyBest = factorMonthlyHeatmapRows.value.filter(r => Number(r.horizon) === bestH)
+  const oosMonthly = monthlyBest.filter(r => r.split === 'test')
+  const isMonthly = monthlyBest.filter(r => r.split === 'train')
+  const monthlyEval = oosMonthly.length ? oosMonthly : monthlyBest
+  const monthlyValues = monthlyEval.map(r => Number(r.oriented_rank_ic)).filter(Number.isFinite)
+  const allBestValues = monthlyBest.map(r => Number(r.oriented_rank_ic)).filter(Number.isFinite)
+  const oosMean = mean(monthlyValues)
+  const isMean = mean(isMonthly.map(r => Number(r.oriented_rank_ic)).filter(Number.isFinite))
+  const directionConsistent = Number.isFinite(oosMean) && Number.isFinite(isMean)
+    ? Math.sign(oosMean) === Math.sign(isMean) && Math.sign(oosMean) !== 0
+    : null
+  return {
+    bestH,
+    oosPositiveRatio: ratioPositive(monthlyValues),
+    bestHorizonStability: ratioPositive(allBestValues),
+    monthlyIcStd: std(monthlyValues),
+    worstMonthIc: minValue(monthlyValues),
+    directionConsistent,
+  }
+})
+const factorLabVerdict = computed(() => {
+  const row = selectedFactorSummary.value
+  if (!row) return { label: 'No Data', level: 'neutral', reason: 'Run research or select a factor.' }
+  const thresholds = factorLabThresholds.value
+  const stability = factorLabStabilityStats.value
+  const oosIc = Number(row.oos_oriented_rank_ic ?? 0)
+  const ir = Number(row.oos_ic_ir ?? row.oos_oriented_ic_ir ?? 0)
+  const tStat = Number(row.oos_ic_t_stat ?? row.oos_oriented_ic_t_stat ?? 0)
+  const n = Number(row.oos_sample_count ?? 0)
+  const checks = [
+    { ok: oosIc >= Number(thresholds.min_oos_ic || 0), label: 'OOS IC' },
+    { ok: ir >= Number(thresholds.min_ir || 0), label: 'IR' },
+    { ok: tStat >= Number(thresholds.min_t_stat || 0), label: 't-stat' },
+    { ok: n >= Number(thresholds.min_oos_sample || 0), label: 'OOS n' },
+    { ok: passFiniteMin(stability.oosPositiveRatio, thresholds.min_oos_positive_month_ratio), label: 'positive months' },
+    { ok: passFiniteMin(stability.bestHorizonStability, thresholds.min_best_horizon_stability), label: 'horizon stability' },
+    { ok: passFiniteMax(stability.monthlyIcStd, thresholds.max_monthly_ic_std), label: 'monthly IC std' },
+    { ok: passFiniteMin(stability.worstMonthIc, thresholds.min_worst_month_ic), label: 'worst month' },
+    { ok: !thresholds.require_direction_consistency || stability.directionConsistent === true, label: 'IS/OOS direction' },
+  ]
+  const passes = checks.filter(c => c.ok).length
+  const total = checks.length
+  const failed = checks.filter(c => !c.ok).map(c => c.label).slice(0, 3).join(', ')
+  if (passes === total) return { label: '值得研究', level: 'strong', reason: `全部 ${total} 個門檻通過。` }
+  if (passes >= Math.ceil(total * 0.6)) return { label: '觀察', level: 'watch', reason: `${passes}/${total} 通過；未通過：${failed}。` }
+  return { label: '暫不優先', level: 'weak', reason: `${passes}/${total} 通過；未通過：${failed}。` }
+})
+const factorLabSummaryMetrics = computed(() => {
+  const row = selectedFactorSummary.value || {}
+  const isIc = Number(row.oriented_rank_ic ?? 0)
+  const oosIc = Number(row.oos_oriented_rank_ic ?? 0)
+  const stability = factorLabStabilityStats.value
+  return [
+    { label: 'OOS Rank IC', raw: oosIc, value: fmtSigned(oosIc, 4) },
+    { label: 'OOS IC IR', raw: Number(row.oos_ic_ir ?? row.oos_oriented_ic_ir ?? 0), value: fmtSigned(row.oos_ic_ir ?? row.oos_oriented_ic_ir, 2) },
+    { label: 'OOS t-stat', raw: Number(row.oos_ic_t_stat ?? row.oos_oriented_ic_t_stat ?? 0), value: fmtSigned(row.oos_ic_t_stat ?? row.oos_oriented_ic_t_stat, 2) },
+    { label: 'OOS Sample', raw: Number(row.oos_sample_count ?? 0), value: fmtCount(row.oos_sample_count), isCount: true },
+    { label: 'IS Rank IC', raw: isIc, value: fmtSigned(isIc, 4) },
+    { label: 'Degradation', raw: oosIc - isIc, value: fmtSigned(oosIc - isIc, 4) },
+    { label: 'OOS Positive Month Ratio', raw: stability.oosPositiveRatio, value: fmtPercent(stability.oosPositiveRatio), isCount: true },
+    { label: 'Best Horizon Stability', raw: stability.bestHorizonStability, value: stability.bestH ? `H${stability.bestH} · ${fmtPercent(stability.bestHorizonStability)}` : '—', isCount: true },
+    { label: 'Monthly IC Std', raw: -stability.monthlyIcStd, value: fmtNumber(stability.monthlyIcStd, 4), isCount: true },
+    { label: 'Worst Month IC', raw: stability.worstMonthIc, value: fmtSigned(stability.worstMonthIc, 4) },
+    { label: 'OOS / IS Direction Consistency', raw: stability.directionConsistent ? 1 : -1, value: stability.directionConsistent == null ? '—' : (stability.directionConsistent ? '一致' : '不一致'), isCount: true },
+  ]
+})
+const factorYearlyHeatmapOption = computed(() => heatmapOption(factorYearlyHeatmapRows.value, 'period', factorLabMetric.value))
+const factorMonthlyHeatmapOption = computed(() => heatmapOption(factorMonthlyHeatmapRows.value, 'period', factorLabMetric.value))
+const factorRollingIcOption = computed(() => {
+  const ts = selectedResult.value?.timeseries_ic || {}
+  const timestamps = Array.isArray(ts.timestamps) ? ts.timestamps : []
+  const values = factorRollingIcSeries.value
+  const labels = timestamps.slice(0, values.length).map(formatTsLabel)
+  const cutoff = Number(ts.train_cutoff_ts || 0)
+  const cutoffLabel = cutoff ? formatTsLabel(cutoff) : null
+  return lineOption({
+    x: labels,
+    series: [{ name: selectedFactorName.value, data: values }],
+    yName: 'Rank IC',
+    markX: cutoffLabel,
+  })
+})
+const factorHorizonDecayOption = computed(() => {
+  const rows = factorHorizonRows.value
+  const x = rows.map(row => `H${row.horizon}`)
+  return lineOption({
+    x,
+    series: [
+      { name: 'OOS', data: rows.map(row => Number(row.oos_oriented_rank_ic ?? 0)) },
+      { name: 'IS', data: rows.map(row => Number(row.oriented_rank_ic ?? 0)) },
+    ],
+    yName: 'Oriented Rank IC',
+  })
+})
 const tabRows = computed(() => {
   const res = selectedResult.value
   if (!res) return []
@@ -782,6 +1110,11 @@ watch(horizonsInput, scheduleSaveSettings)
 watch(factorSideFilter, scheduleSaveSettings)
 watch(factorGroupFilter, scheduleSaveSettings)
 watch(regimeKeys, selectInitialRegime)
+watch(selectedResult, selectInitialFactor)
+watch(factorLabFactorNames, selectInitialFactor)
+watch(selectedFactorName, scheduleSaveSettings)
+watch(factorLabMetric, scheduleSaveSettings)
+watch(factorLabThresholds, scheduleSaveSettings, { deep: true })
 
 function toggleMonth(m) {
   const i = form.value.selected_months.indexOf(m)
@@ -845,6 +1178,9 @@ function researchSettingsPayload() {
     factor_group_filter: factorGroupFilter.value,
     selected_months: form.value.selected_months,
     regime_filter: form.value.regime_filter,
+    selected_factor: selectedFactorName.value,
+    factor_lab_metric: factorLabMetric.value,
+    factor_lab_thresholds: factorLabThresholds.value,
   }
 }
 function scheduleSaveSettings() {
@@ -872,8 +1208,36 @@ function restoreResearchSettings(saved) {
   horizonsInput.value = saved.horizons ?? horizonsInput.value
   factorSideFilter.value = saved.factor_side_filter ?? factorSideFilter.value
   factorGroupFilter.value = saved.factor_group_filter ?? factorGroupFilter.value
+  selectedFactorName.value = saved.selected_factor ?? selectedFactorName.value
+  factorLabMetric.value = saved.factor_lab_metric ?? factorLabMetric.value
+  if (saved.factor_lab_thresholds && typeof saved.factor_lab_thresholds === 'object') {
+    factorLabThresholds.value = { ...factorLabThresholds.value, ...saved.factor_lab_thresholds }
+  }
 }
 function fmtIC(v) { return typeof v === 'number' ? v.toFixed(4) : '—' }
+function fmtSigned(v, digits = 4) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  return `${n > 0 ? '+' : ''}${n.toFixed(digits)}`
+}
+function fmtNumber(v, digits = 4) {
+  const n = Number(v)
+  return Number.isFinite(n) ? n.toFixed(digits) : '—'
+}
+function fmtPercent(v) {
+  const n = Number(v)
+  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : '—'
+}
+function fmtCount(v) {
+  const n = Number(v)
+  return Number.isFinite(n) ? Math.round(n).toLocaleString() : '—'
+}
+function formatTsLabel(ts) {
+  const n = Number(ts)
+  if (!Number.isFinite(n)) return String(ts || '')
+  const dt = new Date(n)
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`
+}
 function icColor(v) {
   if (v == null) return 'text-dim'
   if (v > 0.05) return 'text-up'
@@ -884,6 +1248,34 @@ function pointValue(p) {
   if (Array.isArray(p)) return Number(p[1])
   if (p && typeof p === 'object') return Number(p.ic ?? p.IC ?? p.value ?? 0)
   return Number(p)
+}
+function mean(values) {
+  const arr = values.filter(Number.isFinite)
+  return arr.length ? arr.reduce((sum, v) => sum + v, 0) / arr.length : NaN
+}
+function std(values) {
+  const arr = values.filter(Number.isFinite)
+  if (!arr.length) return NaN
+  const m = mean(arr)
+  return Math.sqrt(arr.reduce((sum, v) => sum + (v - m) ** 2, 0) / arr.length)
+}
+function minValue(values) {
+  const arr = values.filter(Number.isFinite)
+  return arr.length ? Math.min(...arr) : NaN
+}
+function ratioPositive(values) {
+  const arr = values.filter(Number.isFinite)
+  return arr.length ? arr.filter(v => v > 0).length / arr.length : NaN
+}
+function passFiniteMin(value, threshold) {
+  const v = Number(value)
+  const t = Number(threshold)
+  return Number.isFinite(v) && (!Number.isFinite(t) || v >= t)
+}
+function passFiniteMax(value, threshold) {
+  const v = Number(value)
+  const t = Number(threshold)
+  return Number.isFinite(v) && (!Number.isFinite(t) || v <= t)
 }
 function seriesPath(vals, w, h) {
   const clean = vals.filter(Number.isFinite)
@@ -928,6 +1320,14 @@ function selectInitialRegime() {
     const res = normalized[key]
     return (res.summary || []).length || (res.metrics || []).length || (res.quantiles || []).length
   }) || keys[0]
+}
+function selectInitialFactor() {
+  const names = factorLabFactorNames.value
+  if (!names.length) {
+    selectedFactorName.value = ''
+    return
+  }
+  if (!names.includes(selectedFactorName.value)) selectedFactorName.value = names[0]
 }
 function displayRegimeKey(key) {
   return key.split('+').map(part => {
@@ -1006,6 +1406,7 @@ async function syncResearchJob(jobId) {
   if (data.status === 'done') {
     result.value = normalizeResultPayload(data.result)
     selectInitialRegime()
+    selectInitialFactor()
     running.value = false
     progress.value = ''
     progressPct.value = 1
@@ -1082,7 +1483,9 @@ function rowsToCsv(rows) {
 }
 function exportSelectedCsv() {
   if (!selectedResult.value) return
-  const rows = activeTab.value === 'Regime Matrix'
+  const rows = activeTab.value === 'Factor Lab'
+    ? factorLabExportRows()
+    : activeTab.value === 'Regime Matrix'
     ? regimeMatrixRows.value.map(row => {
         const out = { factor: row.factor }
         for (const key of regimeKeys.value) {
@@ -1107,11 +1510,21 @@ function exportSelectedCsv() {
   const tab = activeTab.value.replace(/[^a-zA-Z0-9_-]+/g, '_')
   downloadText(`research-${form.value.symbol}-${form.value.interval}-${regime}-${tab}.csv`, csv, 'text/csv')
 }
+function factorLabExportRows() {
+  const factor = selectedFactorName.value
+  const rows = []
+  if (selectedFactorSummary.value) rows.push({ section: 'summary', ...selectedFactorSummary.value })
+  for (const row of factorHorizonRows.value) rows.push({ section: 'horizon', ...row })
+  for (const row of factorYearlyHeatmapRows.value) rows.push({ section: 'yearly_stability', ...row })
+  for (const row of factorMonthlyHeatmapRows.value) rows.push({ section: 'monthly_stability', ...row })
+  return rows.filter(row => !factor || row.factor === factor)
+}
 async function importJson(ev) {
   const file = ev.target.files?.[0]
   if (!file) return
   result.value = normalizeResultPayload(JSON.parse(await file.text()))
   selectInitialRegime()
+  selectInitialFactor()
   ev.target.value = ''
 }
 
@@ -1207,6 +1620,39 @@ onUnmounted(() => {
 .dense-table td.selected { background: #23423f; }
 .cell-sample { display: block; margin-top: 2px; color: #6f7888; font-size: 10px; }
 .chart-svg { width: 100%; height: 100%; min-height: 360px; background: #131722; border: 1px solid #263245; }
+.factor-lab { height: 100%; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.lab-toolbar { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 6px 8px; background: #101621; border: 1px solid #263245; border-radius: 6px; color: #8f96a8; font-size: 11px; }
+.lab-select { width: min(360px, 34vw); height: 26px; padding: 2px 7px; font-size: 11px; }
+.metric-select { width: 170px; height: 26px; padding: 2px 7px; font-size: 11px; }
+.threshold-settings { margin-left: auto; position: relative; }
+.threshold-settings summary { cursor: pointer; color: #dce3ee; border: 1px solid #334058; border-radius: 4px; padding: 4px 8px; list-style: none; }
+.threshold-settings summary::-webkit-details-marker { display: none; }
+.threshold-settings[open] summary { border-color: #26a69a; background: #1f6f6644; }
+.threshold-grid { position: absolute; right: 0; top: 30px; z-index: 5; width: 260px; display: grid; grid-template-columns: 88px 1fr; gap: 6px; align-items: center; padding: 10px; background: #151c2a; border: 1px solid #334058; border-radius: 6px; box-shadow: 0 12px 36px rgba(0,0,0,0.35); }
+.threshold-grid label { color: #8f96a8; font-size: 11px; }
+.ic-summary-card { display: grid; grid-template-columns: minmax(190px, 0.9fr) 180px minmax(0, 2.4fr); gap: 12px; align-items: stretch; padding: 14px; border: 1px solid #263245; border-left-width: 4px; border-radius: 6px; background: #151c2a; }
+.ic-summary-card.strong { border-left-color: #26a69a; }
+.ic-summary-card.watch { border-left-color: #ffca28; }
+.ic-summary-card.weak { border-left-color: #ef5350; }
+.ic-summary-card.neutral { border-left-color: #6f7888; }
+.summary-kicker { color: #8f96a8; font-size: 11px; margin-bottom: 4px; }
+.ic-summary-card h2 { color: #f2f5f9; font-size: 19px; line-height: 1.15; font-weight: 700; margin: 0 0 9px; overflow-wrap: anywhere; }
+.summary-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+.summary-meta span { color: #8f96a8; background: #101621; border: 1px solid #263245; border-radius: 4px; padding: 3px 6px; font-size: 11px; }
+.verdict-box { display: flex; flex-direction: column; justify-content: center; gap: 6px; padding: 10px; border: 1px solid #263245; border-radius: 6px; background: #101621; }
+.verdict-box strong { color: #f2f5f9; font-size: 20px; line-height: 1.1; }
+.verdict-box span { color: #8f96a8; font-size: 11px; line-height: 1.35; }
+.summary-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.metric-tile { min-width: 0; padding: 7px 8px; background: #101621; border: 1px solid #263245; border-radius: 5px; }
+.metric-tile span { display: block; color: #8f96a8; font-size: 9px; line-height: 1.2; min-height: 22px; margin-bottom: 4px; }
+.metric-tile strong { display: block; color: #dce3ee; font-size: 14px; line-height: 1; overflow-wrap: anywhere; }
+.lab-grid { display: grid; gap: 8px; min-height: 300px; }
+.heatmap-grid { grid-template-columns: 0.85fr 1.15fr; }
+.chart-grid { grid-template-columns: 1fr 1fr; min-height: 330px; }
+.lab-panel { min-width: 0; min-height: 0; background: #151c2a; border: 1px solid #263245; border-radius: 6px; padding: 10px; overflow: hidden; display: flex; flex-direction: column; }
+.lab-panel .text-dim { font-size: 10px; }
+.lab-chart { width: 100%; min-height: 250px; flex: 1; }
+.lab-chart.tall { min-height: 290px; }
 .viz-scroll { height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .viz-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-height: 260px; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
@@ -1247,5 +1693,11 @@ onUnmounted(() => {
   .research-root { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .research-sidebar { max-height: 45vh; border-right: 0; border-bottom: 1px solid #263245; }
   .viz-row { grid-template-columns: 1fr; }
+  .lab-toolbar { flex-wrap: wrap; }
+  .threshold-settings { margin-left: 0; }
+  .threshold-grid { left: 0; right: auto; }
+  .ic-summary-card { grid-template-columns: 1fr; }
+  .summary-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .heatmap-grid, .chart-grid { grid-template-columns: 1fr; }
 }
 </style>
