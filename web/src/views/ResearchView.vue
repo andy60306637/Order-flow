@@ -1234,54 +1234,6 @@ const YearlyICBar = {
   }
 }
 
-const activeRegime = ref('(all)')
-const matrixMetric = ref('oos_oriented_rank_ic')
-const factorLabMetric = ref('oriented_rank_ic')
-const signalRows = ref([])
-const signalMeta = ref({})
-const signalLoading = ref(false)
-const signalError = ref('')
-const signalQuantile = ref(0.20)
-const signalLoadedKey = ref('')
-const signalSort = ref({ key: 'timestamp', dir: 'desc' })
-const signalFilters = ref({
-  outcome: 'all',
-  session: 'all',
-  market_vol: 'all',
-  vwap_zone: 'all',
-  vol_profile: 'all',
-  month: 'all',
-  split: 'all',
-})
-const signalViewMode = ref('all')
-const factorLabThresholds = ref({
-  min_oos_ic: 0.03,
-  min_ir: 0.5,
-  min_t_stat: 2.0,
-  min_oos_sample: 300,
-  min_oos_positive_month_ratio: 0.55,
-  min_best_horizon_stability: 0.60,
-  max_monthly_ic_std: 0.06,
-  min_worst_month_ic: -0.05,
-  require_direction_consistency: true,
-})
-const factors = ref([])
-const factorSideFilter = ref('')
-const factorGroupFilter = ref('')
-const regimeOptions = ref({ modes: ['filter', 'matrix', 'cross_matrix'], dimensions: [], defaults: {} })
-const running = ref(false)
-const progress = ref('')
-const progressPct = ref(0)
-const runningJobId = ref('')
-const error = ref('')
-const result = ref(null)
-const horizonsInput = ref('1,3,6,12')
-const klineRecords = ref([])
-const settingsReady = ref(false)
-let saveTimer = null
-let restoringSettings = false
-let pollGeneration = 0
-
 const form = ref({
   symbol: 'BTCUSDT',
   interval: '1m',
