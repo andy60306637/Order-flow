@@ -49,6 +49,7 @@ from strategies import auction_value_sweep as _auction_value_sweep  # noqa: E402
 from strategies import wick_reversal_v6 as _wick_reversal_v6  # noqa: E402, F401
 from strategies import wick_reversal_v4_dyn as _wick_reversal_v4_dyn  # noqa: E402, F401
 from strategies import wick_reversal_v6_1 as _wick_reversal_v6_1  # noqa: E402, F401
+from strategies import btc_weekly_vwap_sigma_cvd as _btc_weekly_vwap_sigma_cvd  # noqa: E402, F401
 
 # ── 登錄 SignalModule 包裝器 ──────────────────────────────────────────────────
 def _register_signal_modules():
@@ -67,6 +68,9 @@ _register_signal_modules()
 from strategies.pipeline.mean_reversion import MeanReversionPipelineStrategy as _MRStrategy  # noqa: E402, F401
 STRATEGY_REGISTRY[_MRStrategy.name] = _MRStrategy
 
+from strategies.pipeline.vwap_regime import MicroVWAPReclaimStrategy as _MicroVWAPStrategy  # noqa: E402, F401
+STRATEGY_REGISTRY[_MicroVWAPStrategy.name] = _MicroVWAPStrategy
+
 from strategies.pipeline.mean_reversion_reclaim import ValReclaimPipelineStrategy as _VRStrategy  # noqa: E402, F401
 STRATEGY_REGISTRY[_VRStrategy.name] = _VRStrategy
 
@@ -84,3 +88,6 @@ STRATEGY_REGISTRY[_VPBelowPOCStrategy.name] = _VPBelowPOCStrategy
 
 from strategies.pipeline.vp_reclaim import VPReclaimPipelineStrategy as _VPReclaimStrategy  # noqa: E402, F401
 STRATEGY_REGISTRY[_VPReclaimStrategy.name] = _VPReclaimStrategy
+
+from strategies.pipeline.vwap_regime import VWAPReclaimPipelineStrategy as _VWAPReclaimStrategy  # noqa: E402, F401
+STRATEGY_REGISTRY[_VWAPReclaimStrategy.name] = _VWAPReclaimStrategy

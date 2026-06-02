@@ -308,6 +308,7 @@ def _run_single_slices(
     result["_snapshot_klines"] = klines
     result["_snapshot_tick_map"] = tick_map
     result["_snapshot_signals"] = signals
+    result["_snapshot_bar_features"] = getattr(strategy, "_last_bar_features", {})
     return result
 
 
@@ -356,6 +357,7 @@ def _run_backtest_sync(req: BacktestRequest, progress_callback: ProgressCallback
         segment_results = []
         snapshot_klines = []
         snapshot_tick_map: dict = {}
+        snapshot_bar_features: dict = {}
         equity = bt_cfg.initial_capital
         total = max(1, len(slices))
         for idx, (is_sl, oos_sl) in enumerate(slices, start=1):
@@ -390,6 +392,8 @@ def _run_backtest_sync(req: BacktestRequest, progress_callback: ProgressCallback
             })
             snapshot_klines.extend(oos_result.get("_snapshot_klines") or [])
             snapshot_tick_map.update(oos_result.get("_snapshot_tick_map") or {})
+            snapshot_bar_features.update(is_result.get("_snapshot_bar_features") or {})
+            snapshot_bar_features.update(oos_result.get("_snapshot_bar_features") or {})
         result = _build_stats(combined_trades, bt_cfg, equity, 0)
         result["mode"] = "walk_forward"
         result["segments"] = segment_results
@@ -399,6 +403,7 @@ def _run_backtest_sync(req: BacktestRequest, progress_callback: ProgressCallback
         result["_snapshot_klines"] = sorted({k.open_time: k for k in snapshot_klines}.values(), key=lambda k: k.open_time)
         result["_snapshot_tick_map"] = snapshot_tick_map
         result["_snapshot_signals"] = []
+        result["_snapshot_bar_features"] = snapshot_bar_features
     else:
         result = _run_single_slices(req, strategy, bt_cfg, slices, progress_callback, 0.12, 0.88)  # type: ignore[arg-type]
 
@@ -428,6 +433,7 @@ async def _backtest_worker(job_id: str, req: BacktestRequest) -> None:
             "snapshot_klines": result.pop("_snapshot_klines", None),
             "snapshot_tick_map": result.pop("_snapshot_tick_map", None),
             "snapshot_signals": result.pop("_snapshot_signals", None),
+            "snapshot_bar_features": result.pop("_snapshot_bar_features", None),
         }
         job.result = result
         job.status = JobStatus.DONE
@@ -725,22 +731,36 @@ def _snapshot_context_for_trade(job, trade_idx: int, context_bars: int = 10) -> 
 
     stop_price = trade.get("entry_stop", trade.get("stop"))
     tp_price = None
-    try:
-        if stop_price is not None and trade.get("entry") is not None:
-            entry_price = float(trade.get("entry"))
-            stop = float(stop_price)
-            risk = entry_price - stop
-            if trade.get("dir") == "short" and risk < 0:
-                tp_price = entry_price + risk
-            elif trade.get("dir") == "long" and risk > 0:
-                tp_price = entry_price + risk
-    except Exception:
-        tp_price = None
+    # Prefer explicit TP from entry signal meta (e.g. POC target set by strategy)
+    entry_sig_obj = ctx.get("entry_signal") if ctx else None
+    if entry_sig_obj is not None:
+        meta_tp = (getattr(entry_sig_obj, "meta", {}) or {}).get("tp")
+        if meta_tp is not None:
+            try:
+                tp_price = float(meta_tp)
+            except Exception:
+                pass
+    if tp_price is None:
+        try:
+            if stop_price is not None and trade.get("entry") is not None:
+                entry_price = float(trade.get("entry"))
+                stop = float(stop_price)
+                risk = entry_price - stop
+                if trade.get("dir") == "short" and risk < 0:
+                    tp_price = entry_price + risk
+                elif trade.get("dir") == "long" and risk > 0:
+                    tp_price = entry_price + risk
+        except Exception:
+            tp_price = None
+
+    bar_features = job.artifacts.get("snapshot_bar_features") or {}
+    window_features = [bar_features.get(k.open_time) for k in window]
 
     return _to_jsonable({
         "trade": trade,
         "trade_idx": trade_idx,
         "window": [_serialise_kline(k) for k in window],
+        "window_features": window_features,
         "entry_index": entry_idx - start,
         "exit_index": (exit_idx - start) if exit_idx is not None else None,
         "k0_index": (k0_idx - start) if k0_idx is not None else None,

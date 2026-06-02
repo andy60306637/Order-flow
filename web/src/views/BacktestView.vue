@@ -184,7 +184,10 @@
       </section>
     </main>
 
-    <TradeSnapshot v-if="snapshot" :snapshot="snapshot" @close="snapshot = null" />
+    <TradeSnapshot v-if="snapshot" :snapshot="snapshot" :total-trades="activeTradeList.length"
+      @close="snapshot = null"
+      @prev="navigateSnapshot(-1)"
+      @next="navigateSnapshot(1)" />
 
     <div v-if="resultDialogOpen" class="modal-backdrop" @click.self="resultDialogOpen = false">
       <section class="result-dialog">
@@ -243,7 +246,7 @@
                 <td>{{ fmtNum(row.trade.funding_cost) }}</td>
                 <td :class="row.trade.net_pnl >= 0 ? 'text-up' : 'text-down'">{{ fmtPnl(row.trade.net_pnl) }}</td>
                 <td>{{ fmtNum(row.trade.equity_after) }}</td>
-                <td>{{ row.trade.regime || row.trade.trend_regime || '—' }}</td>
+                <td>{{ tradeType(row.trade) }}</td>
               </tr>
             </tbody>
           </table>
@@ -264,7 +267,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, onErrorCaptured } from 'vue'
 import { backtestApi, settingsApi } from '@/api/client.js'
 import TradeSnapshot from '@/components/TradeSnapshot.vue'
 
@@ -285,6 +288,13 @@ const progressPct = ref(0)
 const tickImportProgress = ref('')
 const error = ref('')
 const stats = ref(null)
+
+// Catch Vue component rendering errors (e.g. from TradeSnapshot) and show them
+onErrorCaptured((err, instance, info) => {
+  error.value = `UI Error (${info}): ${err?.message || err}`
+  snapshot.value = null
+  return false
+})
 const tickImportFolder = ref('')
 const currentJobId = ref('')
 const snapshot = ref(null)
@@ -596,6 +606,13 @@ function computeSubsetStats(trades) {
     total_net_pnl: net,
   }
 }
+function tradeType(t) {
+  const wt = t.wick_type || ''
+  if (wt.includes('reclaim')) return '均值回歸'
+  if (wt.includes('breakout')) return '趨勢突破'
+  return t.regime || t.trend_regime || '—'
+}
+
 function toggleMonth(m) {
   const i = form.value.selected_months.indexOf(m)
   if (i >= 0) form.value.selected_months.splice(i, 1)
@@ -748,13 +765,29 @@ async function runBacktest() {
 }
 
 async function openSnapshot(idx) {
-  if (!currentJobId.value || !activeTradeList.value.length) return
+  if (!currentJobId.value) {
+    error.value = 'Snapshot: no active job. Please run a backtest first.'
+    return
+  }
+  if (!activeTradeList.value.length) {
+    error.value = 'Snapshot: no trades to display.'
+    return
+  }
+  error.value = ''
   try {
     const { data } = await backtestApi.snapshot(currentJobId.value, Math.max(0, idx || 0))
     snapshot.value = data
+    selectedTradeIndex.value = data.trade_idx ?? idx
   } catch (e) {
-    error.value = e.message
+    error.value = `Snapshot error: ${e.message}`
   }
+}
+
+function navigateSnapshot(delta) {
+  if (!snapshot.value) return
+  const next = (snapshot.value.trade_idx ?? 0) + delta
+  const clamped = Math.max(0, Math.min(activeTradeList.value.length - 1, next))
+  openSnapshot(clamped)
 }
 
 async function pollJob(jobId, { immediate = false } = {}) {
