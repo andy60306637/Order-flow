@@ -182,7 +182,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 
 const props = defineProps({
   snapshot: { type: Object, required: true },
@@ -194,9 +194,13 @@ const hoverIdx = ref(null)
 const mouseY = ref(0)
 const viewStart = ref(0)
 const viewEnd = ref(0)
+const vStart = ref(null)
+const vEnd = ref(null)
 const isPanning = ref(false)
 let panStartX = 0
+let panStartY = 0
 let panStartRange = [0, 0]
+let panStartPriceRange = [0, 0]
 
 // ── Base data (Defined first to avoid initialization errors) ────────────────
 const trade = computed(() => props.snapshot.trade || {})
@@ -247,6 +251,8 @@ function onMouseMove(e) {
 
   if (isPanning.value) {
     const dx = e.clientX - panStartX
+    const dy = e.clientY - panStartY
+
     const n = bars.value.length
     const shift = (dx / chartAreaWidth) * n_visible
     const range = panStartRange[1] - panStartRange[0]
@@ -257,6 +263,13 @@ function onMouseMove(e) {
 
     viewStart.value = nextStart
     viewEnd.value = nextStart + range
+
+    // Vertical pan
+    const rangeY = panStartPriceRange[1] - panStartPriceRange[0]
+    // SVG height is 500, but plot area is roughly y=40 to y=400 (360px height)
+    const shiftY = (dy / rect.height) * (rangeY * (500 / 360))
+    vStart.value = panStartPriceRange[0] + shiftY
+    vEnd.value = panStartPriceRange[1] + shiftY
   }
 }
 
@@ -264,7 +277,12 @@ function onMouseDown(e) {
   if (e.detail === 2) { resetZoom(); return }
   isPanning.value = true
   panStartX = e.clientX
+  panStartY = e.clientY
   panStartRange = [viewStart.value, viewEnd.value]
+
+  const eb = effectiveBounds.value
+  panStartPriceRange = [eb.lo, eb.hi]
+
   window.addEventListener('mouseup', onMouseUp)
 }
 
@@ -276,6 +294,8 @@ function onMouseUp() {
 function onWheel(e) {
   e.preventDefault()
   const factor = e.deltaY > 0 ? 1.15 : 0.85
+
+  // Horizontal Zoom
   const n = bars.value.length
   const currentN = viewEnd.value - viewStart.value
   let newN = currentN * factor
@@ -292,6 +312,18 @@ function onWheel(e) {
 
   viewStart.value = nextStart
   viewEnd.value = nextStart + newN
+
+  // Vertical Zoom
+  const eb = effectiveBounds.value
+  const currentRangeY = eb.hi - eb.lo
+  const newRangeY = currentRangeY * factor
+
+  // Plot area is y=40 to y=400 (height 360). MouseY is relative to SVG 0-500.
+  const mouseFracY = Math.max(0, Math.min(1, (mouseY.value - 40) / 360))
+  const priceAtMouse = eb.hi - mouseFracY * currentRangeY
+
+  vStart.value = priceAtMouse - newRangeY * (1 - mouseFracY)
+  vEnd.value = priceAtMouse + newRangeY * mouseFracY
 }
 
 function onMouseLeave() {
@@ -301,6 +333,8 @@ function onMouseLeave() {
 function resetZoom() {
   viewStart.value = 0
   viewEnd.value = bars.value.length - 1
+  vStart.value = null
+  vEnd.value = null
 }
 
 // ── Sigma band display config ─────────────────────────────────────────────────
@@ -343,7 +377,7 @@ const badgeText = computed(() => {
 })
 
 // ── Price bounds (include sigma bands so they're always visible) ──────────────
-const bounds = computed(() => {
+const naturalBounds = computed(() => {
   const prices = []
   for (const k of bars.value) prices.push(k.high, k.low)
   if (trade.value.entry) prices.push(trade.value.entry)
@@ -351,9 +385,20 @@ const bounds = computed(() => {
   if (stopPrice.value != null) prices.push(stopPrice.value)
   if (tpPrice.value != null) prices.push(tpPrice.value)
   if (pocPrice.value != null) prices.push(pocPrice.value)
+
+  const t = trade.value
+  const m = props.snapshot.entry_signal?.meta || {}
+  const wt = t.wick_type || m.wick_type || ''
+  const hideLower = wt === 'long_breakout' || wt === 'short_reclaim'
+  const hideUpper = wt === 'short_breakout' || wt === 'long_reclaim'
+
+  const activeKeys = ['vwap']
+  if (!hideUpper) activeKeys.push('u1', 'u2')
+  if (!hideLower) activeKeys.push('l1', 'l2')
+
   for (const f of windowFeatures.value) {
     if (!f) continue
-    for (const k of ['u2', 'u1', 'vwap', 'l1', 'l2']) {
+    for (const k of activeKeys) {
       if (f[k] != null) prices.push(f[k])
     }
   }
@@ -363,11 +408,29 @@ const bounds = computed(() => {
   return { lo: lo - pad, hi: hi + pad }
 })
 
+const effectiveBounds = computed(() => ({
+  lo: vStart.value !== null ? vStart.value : naturalBounds.value.lo,
+  hi: vEnd.value !== null ? vEnd.value : naturalBounds.value.hi
+}))
+
 // ── Sigma polylines ───────────────────────────────────────────────────────────
 const sigmaLines = computed(() => {
   if (!hasSigma.value) return []
   const feats = windowFeatures.value
-  return SIGMA_CONFIGS.map(cfg => {
+
+  const t = trade.value
+  const m = props.snapshot.entry_signal?.meta || {}
+  const wt = t.wick_type || m.wick_type || ''
+  const hideLower = wt === 'long_breakout' || wt === 'short_reclaim'
+  const hideUpper = wt === 'short_breakout' || wt === 'long_reclaim'
+
+  const activeConfigs = SIGMA_CONFIGS.filter(cfg => {
+    if (hideLower && (cfg.key === 'l1' || cfg.key === 'l2')) return false
+    if (hideUpper && (cfg.key === 'u1' || cfg.key === 'u2')) return false
+    return true
+  })
+
+  return activeConfigs.map(cfg => {
     let d = '', prevNull = true
     feats.forEach((f, i) => {
       const v = f?.[cfg.key]
@@ -514,7 +577,7 @@ function snapshotIndexX(i) {
   return x(Number.isFinite(Number(i)) ? Number(i) : 0)
 }
 function y(price) {
-  const { lo, hi } = bounds.value
+  const { lo, hi } = effectiveBounds.value
   return 400 - ((Number(price) - lo) / Math.max(hi - lo, 1e-9)) * 360
 }
 function volY(volume) {
