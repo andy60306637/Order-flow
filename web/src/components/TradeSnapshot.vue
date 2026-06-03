@@ -618,10 +618,11 @@ function fmtCvd(v) {
   width: min(1400px, 98vw);
   max-height: 96vh;
   overflow: auto;
-  background: #151c2a;
-  border: 1px solid #334058;
-  border-radius: 6px;
-  padding: 12px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  box-shadow: 0 32px 64px rgba(0,0,0,0.6);
+  padding: 16px;
 }
 .chart-sync-container {
   position: relative;
@@ -631,89 +632,94 @@ function fmtCvd(v) {
 .snap-titlebar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
+  gap: 16px;
+  margin-bottom: 12px;
 }
 .snap-title-center {
   flex: 1;
   min-width: 0;
 }
 .nav-btn {
-  font-size: 24px;
+  font-size: 28px;
   line-height: 1;
-  padding: 4px 12px;
+  padding: 4px 16px;
   flex-shrink: 0;
+  border-radius: 8px;
 }
 .nav-btn:disabled {
-  opacity: 0.3;
+  opacity: 0.2;
   cursor: default;
 }
 .badge-row {
-  color: #80cbc4;
-  font-size: 12px;
+  color: #58a6ff;
+  font-size: 13px;
+  font-weight: 500;
   text-align: center;
-  padding: 4px 0 10px;
+  padding: 4px 0 12px;
   letter-spacing: 0.5px;
 }
 .snap-chart {
   width: 100%;
   height: 520px;
-  background: #131722;
-  border: 1px solid #2a2e39;
-  border-radius: 4px;
-  margin-bottom: 4px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  margin-bottom: 8px;
   display: block;
 }
 .cvd-chart {
   width: 100%;
   height: 96px;
-  background: #0f1620;
-  border: 1px solid #1e2a38;
-  border-radius: 4px;
-  margin-bottom: 6px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  margin-bottom: 8px;
   display: block;
 }
 .sigma-legend {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 14px;
-  padding: 6px 8px 12px;
+  gap: 16px;
+  padding: 8px 12px 16px;
   font-size: 11px;
-  color: #8f96a8;
+  color: #8b949e;
 }
 .legend-item {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 .legend-swatch {
   display: inline-block;
-  width: 20px;
-  height: 3px;
-  border-radius: 1.5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
 }
 .snap-stat {
-  background: #131722;
-  border: 1px solid #263245;
-  border-radius: 6px;
-  padding: 10px 12px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 12px 16px;
   display: flex;
   justify-content: space-between;
-  gap: 10px;
-  transition: background 0.2s;
+  gap: 12px;
+  transition: all 0.2s;
 }
 .snap-stat:hover {
-  background: #1c222d;
+  background: #1c2128;
+  border-color: #444c56;
 }
 .snap-stat span {
-  color: #787b86;
+  color: #8b949e;
   font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
+  font-weight: 600;
+  letter-spacing: 1px;
 }
 .snap-stat b {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  color: #f0f6fc;
 }
 </style>
