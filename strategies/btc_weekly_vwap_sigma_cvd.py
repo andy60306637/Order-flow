@@ -87,37 +87,40 @@ class WeeklyBands:
 
 
 class WeeklyVWAPSigmaCalculator:
-    """每週日 00:00 UTC reset 的 expanding volume-weighted VWAP 與 sigma。
+    """可選週期（每日/每週日 00:00 UTC）reset 的 expanding volume-weighted VWAP 與 sigma。
 
     typical_price = (high + low + close) / 3
-    weekly_vwap   = Σ(tp·v) / Σv
-    weekly_std    = sqrt( Σ(v·(tp-vwap)^2) / Σv )  （= sqrt(E[tp²]-vwap²)）
-    每根 **已收盤** 1m candle 後 update；bands 只用當週截至目前資料。
+    vwap          = Σ(tp·v) / Σv
+    std           = sqrt( Σ(v·(tp-vwap)^2) / Σv )
     """
 
-    def __init__(self, warmup_hours: float = 8.0) -> None:
+    def __init__(self, warmup_hours: float = 8.0, reset_interval: str = "weekly") -> None:
         self.warmup_ms = int(warmup_hours * MS_HOUR)
+        self.reset_interval = reset_interval.lower()
         self._reset_id: int = -1
-        self._week_start_ms: int = 0
+        self._period_start_ms: int = 0
         self._sum_v = 0.0
         self._sum_tpv = 0.0
         self._sum_tp2v = 0.0
 
-    @staticmethod
-    def week_id(open_time_ms: int) -> int:
+    def get_period_id(self, open_time_ms: int) -> int:
         epoch_day = open_time_ms // MS_DAY
+        if self.reset_interval == "daily":
+            return epoch_day
+        # weekly: 1970-01-04 為星期日（epoch day 3）
         return (epoch_day - _SUNDAY_EPOCH_DAY) // 7
 
-    @staticmethod
-    def week_start_ms(week_id: int) -> int:
-        return (_SUNDAY_EPOCH_DAY + week_id * 7) * MS_DAY
+    def get_period_start_ms(self, period_id: int) -> int:
+        if self.reset_interval == "daily":
+            return period_id * MS_DAY
+        return (_SUNDAY_EPOCH_DAY + period_id * 7) * MS_DAY
 
     def update(self, k: Kline) -> WeeklyBands:
-        wid = self.week_id(k.open_time)
-        if wid != self._reset_id:
-            # 新的一週 -> reset 累加器
-            self._reset_id = wid
-            self._week_start_ms = self.week_start_ms(wid)
+        pid = self.get_period_id(k.open_time)
+        if pid != self._reset_id:
+            # 新的週期 -> reset 累加器
+            self._reset_id = pid
+            self._period_start_ms = self.get_period_start_ms(pid)
             self._sum_v = self._sum_tpv = self._sum_tp2v = 0.0
 
         tp = (k.high + k.low + k.close) / 3.0
@@ -134,12 +137,12 @@ class WeeklyVWAPSigmaCalculator:
             vwap = tp
             std = 0.0
 
-        warmup = (k.open_time - self._week_start_ms) < self.warmup_ms
+        warmup = (k.open_time - self._period_start_ms) < self.warmup_ms
         return WeeklyBands(
             weekly_vwap=vwap, weekly_std=std,
             upper_1sigma=vwap + std, upper_2sigma=vwap + 2 * std,
             lower_1sigma=vwap - std, lower_2sigma=vwap - 2 * std,
-            weekly_reset_id=wid, is_weekly_warmup=warmup,
+            weekly_reset_id=pid, is_weekly_warmup=warmup,
         )
 
 
@@ -364,7 +367,8 @@ class BTCWeeklyVWAPSigmaCVDStrategy(StrategyBase):
     name = "BTC Weekly VWAP σ + CVD + 1m Alpha v1"
 
     # ── 參數表（規格固定值，可調以做實驗）─────────────────────────────────
-    warmup_hours: float = 8.0          # weekly reset 後禁止進場時數
+    vwap_reset_interval: str = "weekly"  # "weekly" (Sun UTC+0) or "daily" (UTC+0)
+    warmup_hours: float = 8.0          # reset 後禁止進場時數
     cvd_window: int = 15               # 15m rolling CVD
     obs_window: int = 8                # reclaim / retest 觀察窗（1m bar 數）
     retest_tol_pct: float = 0.0003     # breakout retest 容差 (0.03%)
@@ -372,6 +376,8 @@ class BTCWeeklyVWAPSigmaCVDStrategy(StrategyBase):
     poc_window_bars: int = 240         # 4h = 240 根 1m
     enable_long: bool = True
     enable_short: bool = True
+    enable_mean_reversion: bool = False   # 均值回歸（reclaim）交易
+    enable_breakout: bool = True         # 趨勢突破（breakout）交易
 
     # ── 成本模型（規格值，由 engine 套用）──────────────────────────────────
     fee_rate_per_side: float = 0.00032
@@ -403,7 +409,7 @@ class BTCWeeklyVWAPSigmaCVDStrategy(StrategyBase):
         use_ticks = tick_map is not None and len(tick_map) > 0
 
         # ── Pass 1：逐根計算 expanding / rolling 特徵（只用已收盤資料）──────
-        vwap_calc = WeeklyVWAPSigmaCalculator(self.warmup_hours)
+        vwap_calc = WeeklyVWAPSigmaCalculator(self.warmup_hours, self.vwap_reset_interval)
         cvd_calc = CVDFilter(self.cvd_window)
         poc_calc = Rolling4hPOC(self.poc_bin_size, self.poc_window_bars)
 
@@ -511,19 +517,27 @@ class BTCWeeklyVWAPSigmaCVDStrategy(StrategyBase):
 
         # ── 先推進既有觀察窗（reclaim / breakout）── 收集確認的進場 ──────────
         if self.enable_long:
-            candidates += self._step_reclaim(i, k, b, c, pocs[i], long_reclaim, "long")
-            candidates += self._step_breakout(i, k, b, c, long_breakout, "long")
+            if self.enable_mean_reversion:
+                candidates += self._step_reclaim(i, k, b, c, pocs[i], long_reclaim, "long")
+            if self.enable_breakout:
+                candidates += self._step_breakout(i, k, b, c, long_breakout, "long")
         if self.enable_short:
-            candidates += self._step_reclaim(i, k, b, c, pocs[i], short_reclaim, "short")
-            candidates += self._step_breakout(i, k, b, c, short_breakout, "short")
+            if self.enable_mean_reversion:
+                candidates += self._step_reclaim(i, k, b, c, pocs[i], short_reclaim, "short")
+            if self.enable_breakout:
+                candidates += self._step_breakout(i, k, b, c, short_breakout, "short")
 
         # ── 註冊新的 band 事件（breach / breakout）──────────────────────────
         if self.enable_long:
-            self._register_reclaim_breach(i, k, b, long_reclaim, "long")
-            self._register_breakout(i, k, b, long_breakout, "long")
+            if self.enable_mean_reversion:
+                self._register_reclaim_breach(i, k, b, long_reclaim, "long")
+            if self.enable_breakout:
+                self._register_breakout(i, k, b, long_breakout, "long")
         if self.enable_short:
-            self._register_reclaim_breach(i, k, b, short_reclaim, "short")
-            self._register_breakout(i, k, b, short_breakout, "short")
+            if self.enable_mean_reversion:
+                self._register_reclaim_breach(i, k, b, short_reclaim, "short")
+            if self.enable_breakout:
+                self._register_breakout(i, k, b, short_breakout, "short")
 
         # ── 守門：weekly warmup ─────────────────────────────────────────────
         if b.is_weekly_warmup:
