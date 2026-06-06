@@ -530,7 +530,7 @@ async def _tick_import_worker(job_id: str, req: TickImportRequest) -> None:
 
 
 def _trade_filename_slug(value: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in value)[:80]
+    return "".join(c if (c.isascii() and c.isalnum()) or c in "-_" else "_" for c in value)[:80]
 
 
 def _ms_to_utc(ms: int | float | None) -> str:
