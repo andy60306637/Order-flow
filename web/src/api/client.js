@@ -15,7 +15,7 @@ export const backtestApi = {
   run:           (payload) => api.post('/api/backtest/run', payload),
   getJob:        (jobId)   => api.get(`/api/backtest/jobs/${jobId}`, { timeout: 0 }),
   exportUrl:     (jobId)   => `/api/backtest/jobs/${jobId}/export.xlsx`,
-  snapshot:      (jobId, tradeIdx) => api.get(`/api/backtest/jobs/${jobId}/snapshots/${tradeIdx}`),
+  snapshot:      (jobId, tradeIdx, interval) => api.get(`/api/backtest/jobs/${jobId}/snapshots/${tradeIdx}`, { params: interval ? { interval } : {} }),
   listJobs:      ()        => api.get('/api/backtest/jobs'),
 }
 

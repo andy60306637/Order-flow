@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from backtest.engine import BacktestConfig, simulate_trades
 from backtest.time_slice import TimeSlice
 from config.base import SYMBOLS, INTERVALS
+from utils.time_utils import interval_to_ms
 from server.job_store import create_job, get_job, list_jobs, JobStatus
 from strategies import STRATEGY_REGISTRY
 
@@ -594,6 +595,62 @@ def _bar_ms(klines: list) -> int:
     return 60_000
 
 
+_INTERVAL_LABELS: list[tuple[int, str]] = [
+    (60_000, "1m"), (180_000, "3m"), (300_000, "5m"), (900_000, "15m"),
+    (1_800_000, "30m"), (3_600_000, "1h"), (14_400_000, "4h"),
+]
+
+
+def _ms_to_interval_label(ms: int) -> str:
+    for m, label in _INTERVAL_LABELS:
+        if m == ms:
+            return label
+    return f"{max(1, ms // 60_000)}m"
+
+
+def _resample_window(
+    klines: list, features: list[Any], target_ms: int,
+) -> tuple[list[dict], list[Any], list[int]]:
+    """聚合一段 base K 線（+ 對齊的 bar_features）為 target_ms 週期的 bucket。
+
+    回傳 (resampled_klines, resampled_features, base_to_bucket)：
+    base_to_bucket[i] = 第 i 根 base K 線所屬的 resampled bucket index，
+    用來把 entry/exit/k0 index 重新映射到 resample 後的陣列。
+    每個 bucket 的 features 取其「最後一根（收盤）」base bar 的快照 ──
+    與策略本身在該週期收盤時所見到的狀態一致。
+    """
+    order: list[int] = []
+    acc_by_bucket: dict[int, dict] = {}
+    feat_by_bucket: dict[int, Any] = {}
+    idx_by_bucket: dict[int, int] = {}
+    base_to_bucket: list[int] = []
+
+    for i, k in enumerate(klines):
+        b0 = (int(k.open_time) // target_ms) * target_ms
+        acc = acc_by_bucket.get(b0)
+        if acc is None:
+            acc = {
+                "time_ms": b0, "close_time": int(k.close_time),
+                "open": float(k.open), "high": float(k.high), "low": float(k.low),
+                "close": float(k.close), "volume": float(k.volume),
+            }
+            acc_by_bucket[b0] = acc
+            idx_by_bucket[b0] = len(order)
+            order.append(b0)
+        else:
+            acc["high"] = max(acc["high"], float(k.high))
+            acc["low"] = min(acc["low"], float(k.low))
+            acc["close"] = float(k.close)
+            acc["close_time"] = int(k.close_time)
+            acc["volume"] += float(k.volume)
+        feat_by_bucket[b0] = features[i]
+        base_to_bucket.append(idx_by_bucket[b0])
+
+    resampled_klines = [acc_by_bucket[b0] for b0 in order]
+    resampled_features = [feat_by_bucket[b0] for b0 in order]
+    return resampled_klines, resampled_features, base_to_bucket
+
+
 def _signal_dict(sig: Any | None) -> dict | None:
     if sig is None:
         return None
@@ -673,7 +730,9 @@ def _snapshot_context_from_signals(signals: list, trade: dict, klines: list, con
     }
 
 
-def _snapshot_context_for_trade(job, trade_idx: int, context_bars: int = 10) -> dict:
+def _snapshot_context_for_trade(
+    job, trade_idx: int, context_bars: int = 10, display_interval: str | None = None,
+) -> dict:
     result = job.result or {}
     trades = [t for t in result.get("trade_list", []) if not t.get("skipped")]
     if trade_idx < 0 or trade_idx >= len(trades):
@@ -683,9 +742,20 @@ def _snapshot_context_for_trade(job, trade_idx: int, context_bars: int = 10) -> 
     if not klines:
         raise HTTPException(404, "Snapshot klines are not available for this job")
 
+    # ── 顯示週期：等比例放大 underlying (base) 範圍，讓畫面維持約略相同的顯示根數 ──
+    base_ms = _bar_ms(klines)
+    target_ms = base_ms
+    if display_interval:
+        try:
+            target_ms = interval_to_ms(display_interval)
+        except Exception:
+            target_ms = base_ms
+    ratio = max(1, target_ms // base_ms)
+    scaled_context_bars = context_bars * ratio
+
     trade = trades[trade_idx]
     signals = job.artifacts.get("snapshot_signals") or []
-    ctx = _snapshot_context_from_signals(signals, trade, klines, context_bars)
+    ctx = _snapshot_context_from_signals(signals, trade, klines, scaled_context_bars)
     if ctx is None:
         entry_idx = _find_bar_index(klines, int(trade.get("entry_time", 0) or 0))
         exit_idx = _find_bar_index(klines, int(trade.get("exit_time", 0) or 0))
@@ -696,8 +766,8 @@ def _snapshot_context_for_trade(job, trade_idx: int, context_bars: int = 10) -> 
             "entry_idx": entry_idx,
             "exit_idx": exit_idx,
             "k0_idx": None,
-            "win_start": max(0, entry_idx - context_bars),
-            "win_end": min(len(klines) - 1, latest + context_bars),
+            "win_start": max(0, entry_idx - scaled_context_bars),
+            "win_end": min(len(klines) - 1, latest + scaled_context_bars),
             "entry_signal": None,
             "exit_signal": None,
             "k0_signal": None,
@@ -756,20 +826,36 @@ def _snapshot_context_for_trade(job, trade_idx: int, context_bars: int = 10) -> 
     bar_features = job.artifacts.get("snapshot_bar_features") or {}
     window_features = [bar_features.get(k.open_time) for k in window]
 
+    if ratio > 1:
+        out_window, out_features, base_to_bucket = _resample_window(window, window_features, target_ms)
+        entry_index = base_to_bucket[entry_idx - start]
+        exit_index = base_to_bucket[exit_idx - start] if exit_idx is not None else None
+        k0_index = base_to_bucket[k0_idx - start] if k0_idx is not None else None
+        applied_ms = target_ms
+    else:
+        out_window = [_serialise_kline(k) for k in window]
+        out_features = window_features
+        entry_index = entry_idx - start
+        exit_index = (exit_idx - start) if exit_idx is not None else None
+        k0_index = (k0_idx - start) if k0_idx is not None else None
+        applied_ms = base_ms
+
     return _to_jsonable({
         "trade": trade,
         "trade_idx": trade_idx,
-        "window": [_serialise_kline(k) for k in window],
-        "window_features": window_features,
-        "entry_index": entry_idx - start,
-        "exit_index": (exit_idx - start) if exit_idx is not None else None,
-        "k0_index": (k0_idx - start) if k0_idx is not None else None,
+        "window": out_window,
+        "window_features": out_features,
+        "entry_index": entry_index,
+        "exit_index": exit_index,
+        "k0_index": k0_index,
         "entry_signal": _signal_dict(ctx.get("entry_signal")),
         "exit_signal": _signal_dict(ctx.get("exit_signal")),
         "k0_signal": _signal_dict(ctx.get("k0_signal")),
         "stop_price": stop_price,
         "tp_price": tp_price,
         "ticks": tick_rows,
+        "base_interval_ms": base_ms,
+        "display_interval": _ms_to_interval_label(applied_ms),
     })
 
 
@@ -978,10 +1064,10 @@ def export_job_excel(job_id: str) -> StreamingResponse:
 
 
 @router.get("/jobs/{job_id}/snapshots/{trade_idx}")
-def get_trade_snapshot(job_id: str, trade_idx: int) -> dict:
+def get_trade_snapshot(job_id: str, trade_idx: int, interval: str | None = None) -> dict:
     job = get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
     if job.status != JobStatus.DONE or not isinstance(job.result, dict):
         raise HTTPException(409, "Job result is not ready")
-    return _snapshot_context_for_trade(job, trade_idx)
+    return _snapshot_context_for_trade(job, trade_idx, display_interval=interval)

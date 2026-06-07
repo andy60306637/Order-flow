@@ -11,6 +11,11 @@
           </div>
         </div>
         <button class="btn-ghost nav-btn" :disabled="totalTrades > 0 && snapshot.trade_idx >= totalTrades - 1" @click="$emit('next')" title="下一筆">&#8250;</button>
+        <select v-if="intervalOptions.length > 1" v-model="displayInterval"
+                class="bg-bg border border-border rounded px-2 py-1 text-xs ml-4 focus:outline-none focus:border-accent"
+                title="切換顯示週期（較大週期會自動等比例放大前後 K 棒範圍）">
+          <option v-for="opt in intervalOptions" :key="opt" :value="opt">{{ opt }}</option>
+        </select>
         <button class="btn-ghost ml-4 px-2 py-0.5 text-[10px]" @click="resetZoom">重置縮放</button>
         <button class="btn-ghost ml-auto" @click="$emit('close')">關閉</button>
       </div>
@@ -50,6 +55,9 @@
               />
             </g>
 
+            <!-- EMA overlay -->
+            <path v-if="emaLine" :d="emaLine.d" :stroke="emaLine.color" stroke-width="1.6" fill="none" stroke-linejoin="round" />
+
             <g v-for="(k, i) in bars" :key="k.time_ms">
               <line
                 :x1="x(i)" :x2="x(i)"
@@ -75,6 +83,9 @@
 
             <line v-if="stopPrice != null" x1="46" :y1="y(stopPrice)" x2="958" :y2="y(stopPrice)" stroke="#ef5350" stroke-dasharray="5 5" />
             <line v-if="tpPrice != null" x1="46" :y1="y(tpPrice)" x2="958" :y2="y(tpPrice)" stroke="#26a69a" stroke-dasharray="5 5" />
+            <line v-if="valPrice != null" x1="46" :y1="y(valPrice)" x2="958" :y2="y(valPrice)" stroke="#42a5f5aa" stroke-dasharray="3 4" />
+            <line v-if="vahPrice != null" x1="46" :y1="y(vahPrice)" x2="958" :y2="y(vahPrice)" stroke="#ffa726aa" stroke-dasharray="3 4" />
+            <line v-if="pocPrice != null" x1="46" :y1="y(pocPrice)" x2="958" :y2="y(pocPrice)" stroke="#ce93d8cc" stroke-dasharray="2 2" />
 
             <path :d="entryMarkerPath" fill="#2196f3" stroke="#90caf9" stroke-width="1.2" />
             <path v-if="snapshot.exit_index != null" :d="exitMarkerPath" :fill="exitColor" :stroke="exitColor" stroke-width="1.2" />
@@ -89,27 +100,33 @@
             />
           </g>
 
-          <!-- Non-Clipped Price Labels (Always visible at edges) -->
-          <text v-if="stopPrice != null" x="952" :y="y(stopPrice) - 4" text-anchor="end" fill="#ef5350" font-size="11">SL {{ fmt(stopPrice) }}</text>
-          <text v-if="tpPrice != null" x="952" :y="y(tpPrice) + 14" text-anchor="end" fill="#26a69a" font-size="11">{{ pocPrice != null ? 'TP/POC' : 'TP' }} {{ fmt(tpPrice) }}</text>
-          <text :x="x(snapshot.entry_index) + 10" :y="y(trade.entry) - 10" fill="#90caf9" font-size="11" font-weight="600">Entry {{ fmt(trade.entry) }}</text>
-          <text v-if="snapshot.exit_index != null" :x="x(snapshot.exit_index) + 10" :y="y(trade.exit) + 16" :fill="exitColor" font-size="11" font-weight="600">
-            {{ trade.exit_label || 'Exit' }} {{ fmt(trade.exit) }}
+          <!-- Non-Clipped Price Labels (Right Y-Axis with Collision Avoidance) -->
+          <text v-for="(lbl, i) in yPriceLabels" :key="'yl'+i"
+                x="954" :y="lbl.y - 2" text-anchor="end"
+                :fill="lbl.color" :font-size="lbl.size" :font-weight="lbl.weight">
+            {{ lbl.text }}
           </text>
-
-          <template v-for="band in sigmaLines" :key="'lb' + band.key">
-            <text v-if="band.labelY != null" x="958" :y="band.labelY - 2" text-anchor="end" :fill="band.color" font-size="9" font-weight="600">{{ band.label }}</text>
-          </template>
+          <!-- Entry/Exit Labels with backgrounds -->
+          <g v-if="trade.entry != null">
+            <rect :x="x(snapshot.entry_index) + 6" :y="y(trade.entry) - 22" width="100" height="15" rx="2" fill="#0d1117cc" />
+            <text :x="x(snapshot.entry_index) + 10" :y="y(trade.entry) - 10" fill="#90caf9" font-size="10" font-weight="600">Entry {{ fmt(trade.entry) }}</text>
+          </g>
+          <g v-if="snapshot.exit_index != null">
+            <rect :x="x(snapshot.exit_index) + 6" :y="y(trade.exit) + 8" width="100" height="15" rx="2" fill="#0d1117cc" />
+            <text :x="x(snapshot.exit_index) + 10" :y="y(trade.exit) + 20" :fill="exitColor" font-size="10" font-weight="600">
+              {{ trade.exit_label || 'Exit' }} {{ fmt(trade.exit) }}
+            </text>
+          </g>
 
           <!-- Vertical Crosshair -->
           <line v-if="hoverIdx !== null" :x1="x(hoverIdx)" y1="24" :x2="x(hoverIdx)" y2="480" stroke="#ffffff66" stroke-width="1" stroke-dasharray="3 3" pointer-events="none" />
-          <!-- Info box on crosshair -->
+          <!-- Info box (Fixed top position to avoid obscuring current candle) -->
           <g v-if="hoverIdx !== null && bars[hoverIdx]">
-            <rect :x="x(hoverIdx) + (hoverIdx > (viewStart + viewEnd) / 2 ? -105 : 5)" :y="mouseY - 15" width="100" height="34" rx="3" fill="#1e222dee" stroke="#334058" stroke-width="1" pointer-events="none" />
-            <text :x="x(hoverIdx) + (hoverIdx > (viewStart + viewEnd) / 2 ? -100 : 10)" :y="mouseY" fill="#ffffff" font-size="10" font-weight="600" pointer-events="none">
+            <rect :x="x(hoverIdx) + (hoverIdx > (viewStart + viewEnd) / 2 ? -105 : 5)" y="28" width="100" height="34" rx="3" fill="#1e222dee" stroke="#334058" stroke-width="1" pointer-events="none" />
+            <text :x="x(hoverIdx) + (hoverIdx > (viewStart + viewEnd) / 2 ? -100 : 10)" y="43" fill="#ffffff" font-size="10" font-weight="600" pointer-events="none">
               P: {{ fmt(bars[hoverIdx].close) }}
             </text>
-            <text :x="x(hoverIdx) + (hoverIdx > (viewStart + viewEnd) / 2 ? -100 : 10)" :y="mouseY + 12" fill="#787b86" font-size="9" pointer-events="none">
+            <text :x="x(hoverIdx) + (hoverIdx > (viewStart + viewEnd) / 2 ? -100 : 10)" y="55" fill="#787b86" font-size="9" pointer-events="none">
               {{ fmtTime(bars[hoverIdx].time_ms).slice(11) }}
             </text>
           </g>
@@ -156,24 +173,42 @@
         </svg>
       </div>
 
-      <!-- ── Sigma legend ── -->
-      <div v-if="hasSigma" class="sigma-legend">
+      <!-- ── Sigma / EMA legend ── -->
+      <div v-if="hasSigma || emaLine || hasVolumeProfile" class="sigma-legend">
         <span v-for="band in sigmaLines" :key="'leg' + band.key" class="legend-item">
           <span class="legend-swatch" :style="{ background: band.color }"></span>
           {{ band.label }}
+        </span>
+        <span v-if="emaLine" class="legend-item">
+          <span class="legend-swatch" :style="{ background: emaLine.color }"></span>
+          {{ emaLine.label }}
+        </span>
+        <span v-if="hasVolumeProfile" class="legend-item">
+          <span class="legend-swatch" style="background:#ce93d8"></span>
+          VP 3D POC
+        </span>
+        <span v-if="hasVolumeProfile" class="legend-item">
+          <span class="legend-swatch" style="background:#42a5f5"></span>
+          VAL
+        </span>
+        <span v-if="hasVolumeProfile" class="legend-item">
+          <span class="legend-swatch" style="background:#ffa726"></span>
+          VAH
         </span>
         <span class="legend-item" style="margin-left:auto;color:#546e7a;font-size:10px">
           滾輪縮放 · 拖曳平移 · 雙擊重置
         </span>
       </div>
 
-      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2 text-xs">
+      <div class="grid grid-cols-2 md:grid-cols-5 lg:grid-cols-10 gap-2 text-xs">
         <div class="snap-stat"><span>Regime</span><b>{{ regimeLabel }}</b></div>
         <div class="snap-stat"><span>Entry</span><b>{{ fmt(trade.entry) }}</b></div>
         <div class="snap-stat"><span>Exit</span><b>{{ fmt(trade.exit) }}</b></div>
         <div class="snap-stat"><span>SL</span><b>{{ fmt(stopPrice) }}</b></div>
         <div class="snap-stat"><span>TP</span><b>{{ fmt(tpPrice) }}</b></div>
+        <div class="snap-stat"><span>VAL</span><b>{{ fmt(valPrice) }}</b></div>
         <div class="snap-stat"><span>POC</span><b>{{ fmt(pocPrice) }}</b></div>
+        <div class="snap-stat"><span>VAH</span><b>{{ fmt(vahPrice) }}</b></div>
         <div class="snap-stat"><span>PnL</span><b :class="trade.net_pnl >= 0 ? 'text-up' : 'text-down'">{{ fmtPnl(trade.net_pnl) }}</b></div>
         <div class="snap-stat"><span>Ticks</span><b>{{ snapshot.ticks?.length || 0 }}</b></div>
       </div>
@@ -188,7 +223,7 @@ const props = defineProps({
   snapshot: { type: Object, required: true },
   totalTrades: { type: Number, default: 0 },
 })
-defineEmits(['close', 'prev', 'next'])
+const emit = defineEmits(['close', 'prev', 'next', 'interval-change'])
 
 const hoverIdx = ref(null)
 const mouseY = ref(0)
@@ -210,6 +245,20 @@ const hasSigma = computed(() => windowFeatures.value.some(f => f?.vwap != null))
 const hasCvd = computed(() => windowFeatures.value.some(f => f?.cvd15 != null))
 
 const cvdVals = computed(() => windowFeatures.value.map(f => f?.cvd15 ?? null))
+const hasEma = computed(() => windowFeatures.value.some(f => f?.ema != null))
+
+// ── 顯示週期切換（多週期交互策略：放大週期時 server 等比例放大 underlying context）──
+const TF_ORDER = ['1m', '3m', '5m', '15m', '30m', '1h', '4h']
+const TF_MS = { '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000, '1h': 3_600_000, '4h': 14_400_000 }
+const intervalOptions = computed(() => {
+  const baseMs = props.snapshot.base_interval_ms || 60_000
+  const opts = TF_ORDER.filter(k => TF_MS[k] >= baseMs)
+  return opts.length ? opts : ['1m']
+})
+const displayInterval = computed({
+  get: () => props.snapshot.display_interval || intervalOptions.value[0],
+  set: (v) => emit('interval-change', v),
+})
 
 const regimeLabel = computed(() => {
   const t = trade.value
@@ -345,6 +394,7 @@ const SIGMA_CONFIGS = [
   { key: 'l1',   color: '#42a5f577', dash: '5 3', label: '-1σ' },
   { key: 'l2',   color: '#26a69a77', dash: '5 3', label: '-2σ' },
 ]
+const EMA_COLOR = '#ffd54fcc'
 const CVD_H = 90
 
 const candleW = computed(() => {
@@ -359,9 +409,26 @@ const cvdBarW = computed(() => {
 const stopPrice = computed(() => props.snapshot.stop_price ?? trade.value.entry_stop ?? trade.value.stop ?? null)
 const tpPrice = computed(() => props.snapshot.tp_price ?? null)
 const pocPrice = computed(() => {
-  const v = props.snapshot.entry_signal?.meta?.poc
+  const meta = props.snapshot.entry_signal?.meta || {}
+  const v = meta.poc ?? meta.vp_poc
   return v != null ? v : null
 })
+const valPrice = computed(() => {
+  const meta = props.snapshot.entry_signal?.meta || {}
+  const v = meta.val ?? meta.vp_val
+  return v != null ? v : null
+})
+const vahPrice = computed(() => {
+  const meta = props.snapshot.entry_signal?.meta || {}
+  const v = meta.vah ?? meta.vp_vah
+  return v != null ? v : null
+})
+const hasVolumeProfile = computed(() => pocPrice.value != null || valPrice.value != null || vahPrice.value != null)
+const isTpPoc = computed(() => (
+  tpPrice.value != null &&
+  pocPrice.value != null &&
+  Math.abs(Number(tpPrice.value) - Number(pocPrice.value)) < 1e-9
+))
 const exitColor = computed(() => {
   if (trade.value.exit_label === 'TS') return '#ff9800'
   if (trade.value.exit_label === 'TD') return '#ce93d8'
@@ -376,6 +443,26 @@ const badgeText = computed(() => {
     .filter(val => val && val !== '—').join(' | ')
 })
 
+// ── Sigma side visibility (which bands to show, based on trade direction) ─────
+// BTC VWAP EMA Crossover (entry_stage in meta is unique to this strategy):
+// long 只關心 VWAP/+1σ/+2σ（SL/TP 帶子皆在上緣），short 鏡像只關心 VWAP/-1σ/-2σ。
+const sigmaSideFilter = computed(() => {
+  const t = trade.value
+  const m = props.snapshot.entry_signal?.meta || {}
+  if (m.entry_stage != null) {
+    const side = t.side || t.dir || ''
+    return {
+      hideLower: side === 'long',
+      hideUpper: side === 'short',
+    }
+  }
+  const wt = t.wick_type || m.wick_type || ''
+  return {
+    hideLower: wt === 'long_breakout' || wt === 'short_reclaim',
+    hideUpper: wt === 'short_breakout' || wt === 'long_reclaim',
+  }
+})
+
 // ── Price bounds (include sigma bands so they're always visible) ──────────────
 const naturalBounds = computed(() => {
   const prices = []
@@ -385,12 +472,10 @@ const naturalBounds = computed(() => {
   if (stopPrice.value != null) prices.push(stopPrice.value)
   if (tpPrice.value != null) prices.push(tpPrice.value)
   if (pocPrice.value != null) prices.push(pocPrice.value)
+  if (valPrice.value != null) prices.push(valPrice.value)
+  if (vahPrice.value != null) prices.push(vahPrice.value)
 
-  const t = trade.value
-  const m = props.snapshot.entry_signal?.meta || {}
-  const wt = t.wick_type || m.wick_type || ''
-  const hideLower = wt === 'long_breakout' || wt === 'short_reclaim'
-  const hideUpper = wt === 'short_breakout' || wt === 'long_reclaim'
+  const { hideLower, hideUpper } = sigmaSideFilter.value
 
   const activeKeys = ['vwap']
   if (!hideUpper) activeKeys.push('u1', 'u2')
@@ -401,6 +486,7 @@ const naturalBounds = computed(() => {
     for (const k of activeKeys) {
       if (f[k] != null) prices.push(f[k])
     }
+    if (f.ema != null) prices.push(f.ema)
   }
   const lo = prices.length ? Math.min(...prices) : 0
   const hi = prices.length ? Math.max(...prices) : 1
@@ -413,16 +499,72 @@ const effectiveBounds = computed(() => ({
   hi: vEnd.value !== null ? vEnd.value : naturalBounds.value.hi
 }))
 
+// ── Right Y-Axis Collision Detection ──────────────────────────────────────────
+const yPriceLabels = computed(() => {
+  const labels = []
+
+  // 1. Primary trade markers
+  if (stopPrice.value != null) {
+    labels.push({ y: y(stopPrice.value), text: `SL ${fmt(stopPrice.value)}`, color: '#ef5350', weight: 600, size: 10 })
+  }
+  if (tpPrice.value != null) {
+    labels.push({ y: y(tpPrice.value), text: `${isTpPoc.value ? 'TP/POC' : 'TP'} ${fmt(tpPrice.value)}`, color: '#26a69a', weight: 600, size: 10 })
+  }
+
+  // 2. Volume Profile markers
+  if (vahPrice.value != null) {
+    labels.push({ y: y(vahPrice.value), text: `VAH ${fmt(vahPrice.value)}`, color: '#ffa726', weight: 600, size: 10 })
+  }
+  if (pocPrice.value != null && !isTpPoc.value) {
+    labels.push({ y: y(pocPrice.value), text: `POC ${fmt(pocPrice.value)}`, color: '#ce93d8', weight: 600, size: 10 })
+  }
+  if (valPrice.value != null) {
+    labels.push({ y: y(valPrice.value), text: `VAL ${fmt(valPrice.value)}`, color: '#42a5f5', weight: 600, size: 10 })
+  }
+
+  // 3. Sigma bands
+  sigmaLines.value.forEach(band => {
+    if (band.labelY != null) {
+      labels.push({ y: band.labelY, text: band.label, color: band.color, weight: 500, size: 9 })
+    }
+  })
+
+  // 4. EMA
+  if (emaLine.value?.labelY != null) {
+    labels.push({ y: emaLine.value.labelY, text: 'EMA', color: emaLine.value.color, weight: 500, size: 9 })
+  }
+
+  // Collision detection logic
+  if (!labels.length) return []
+  const sorted = [...labels].sort((a, b) => a.y - b.y)
+  const minGap = 13 // px
+
+  // Forward pass
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].y - sorted[i - 1].y < minGap) {
+      sorted[i].y = sorted[i - 1].y + minGap
+    }
+  }
+  // Backward pass (ensure we don't go off bottom)
+  const maxY = 480
+  if (sorted[sorted.length - 1].y > maxY) {
+    sorted[sorted.length - 1].y = maxY
+    for (let i = sorted.length - 2; i >= 0; i--) {
+      if (sorted[i + 1].y - sorted[i].y < minGap) {
+        sorted[i].y = sorted[i + 1].y - minGap
+      }
+    }
+  }
+
+  return sorted
+})
+
 // ── Sigma polylines ───────────────────────────────────────────────────────────
 const sigmaLines = computed(() => {
   if (!hasSigma.value) return []
   const feats = windowFeatures.value
 
-  const t = trade.value
-  const m = props.snapshot.entry_signal?.meta || {}
-  const wt = t.wick_type || m.wick_type || ''
-  const hideLower = wt === 'long_breakout' || wt === 'short_reclaim'
-  const hideUpper = wt === 'short_breakout' || wt === 'long_reclaim'
+  const { hideLower, hideUpper } = sigmaSideFilter.value
 
   const activeConfigs = SIGMA_CONFIGS.filter(cfg => {
     if (hideLower && (cfg.key === 'l1' || cfg.key === 'l2')) return false
@@ -445,6 +587,23 @@ const sigmaLines = computed(() => {
     }
     return { ...cfg, d, labelY }
   })
+})
+
+// ── EMA overlay (e.g. BTC VWAP EMA Crossover: ema stored per-bar in features) ─
+const emaLine = computed(() => {
+  if (!hasEma.value) return null
+  const feats = windowFeatures.value
+  let d = '', prevNull = true
+  let labelY = null
+  feats.forEach((f, i) => {
+    const v = f?.ema
+    if (v == null) { prevNull = true; return }
+    const px = x(i).toFixed(1), py = y(v).toFixed(1)
+    d += prevNull ? `M${px} ${py}` : ` L${px} ${py}`
+    prevNull = false
+    labelY = y(v)
+  })
+  return { d, labelY, label: 'EMA', color: EMA_COLOR }
 })
 
 // ── CVD panel ─────────────────────────────────────────────────────────────────
@@ -592,7 +751,14 @@ function tickOffset(i) { return ((i % 31) - 15) * 0.9 }
 
 
 function fmt(v) {
-  return v != null && v !== '' ? Number(v).toLocaleString('en-US', { maximumFractionDigits: 4 }) : '-'
+  if (v == null || v === '') return '-'
+  const n = Number(v)
+  const absN = Math.abs(n)
+  let prec = 2
+  if (absN >= 1000) prec = 1
+  if (absN >= 10000) prec = 1
+  if (absN < 1 && absN > 0) prec = 4
+  return n.toLocaleString('en-US', { minimumFractionDigits: prec, maximumFractionDigits: prec })
 }
 function fmtPnl(v) { return v != null ? `${v >= 0 ? '+' : ''}${Number(v).toFixed(2)}` : '-' }
 function fmtTime(ms) { return ms ? new Date(ms).toISOString().slice(0, 16).replace('T', ' ') : '-' }

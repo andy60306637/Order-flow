@@ -187,7 +187,8 @@
     <TradeSnapshot v-if="snapshot" :snapshot="snapshot" :total-trades="activeTradeList.length"
       @close="snapshot = null"
       @prev="navigateSnapshot(-1)"
-      @next="navigateSnapshot(1)" />
+      @next="navigateSnapshot(1)"
+      @interval-change="onSnapshotIntervalChange" />
 
     <div v-if="resultDialogOpen" class="modal-backdrop" @click.self="resultDialogOpen = false">
       <section class="result-dialog">
@@ -303,6 +304,7 @@ onErrorCaptured((err, instance, info) => {
 const tickImportFolder = ref('')
 const currentJobId = ref('')
 const snapshot = ref(null)
+const snapshotInterval = ref('')
 const selectedTradeIndex = ref(0)
 const resultDialogOpen = ref(false)
 const resultSession = ref('all')
@@ -750,6 +752,7 @@ async function runBacktest() {
   progressPct.value = 0.01
   stats.value = null
   snapshot.value = null
+  snapshotInterval.value = ''
   selectedTradeIndex.value = 0
   try {
     const payload = {
@@ -780,12 +783,18 @@ async function openSnapshot(idx) {
   }
   error.value = ''
   try {
-    const { data } = await backtestApi.snapshot(currentJobId.value, Math.max(0, idx || 0))
+    const { data } = await backtestApi.snapshot(currentJobId.value, Math.max(0, idx || 0), snapshotInterval.value)
     snapshot.value = data
     selectedTradeIndex.value = data.trade_idx ?? idx
+    if (!snapshotInterval.value && data.display_interval) snapshotInterval.value = data.display_interval
   } catch (e) {
     error.value = `Snapshot error: ${e.message}`
   }
+}
+
+function onSnapshotIntervalChange(interval) {
+  snapshotInterval.value = interval
+  if (snapshot.value) openSnapshot(snapshot.value.trade_idx ?? selectedTradeIndex.value)
 }
 
 function navigateSnapshot(delta) {
