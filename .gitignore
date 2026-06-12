@@ -40,5 +40,8 @@ tick_data/
 *.npz
 .ui_settings.json
 
+# ML generated artifacts
+ml/artifacts/
+
 # Ignore all report outputs
 docs/reports/

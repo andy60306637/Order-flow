@@ -91,3 +91,7 @@ STRATEGY_REGISTRY[_VPReclaimStrategy.name] = _VPReclaimStrategy
 
 from strategies.pipeline.vwap_regime import VWAPReclaimPipelineStrategy as _VWAPReclaimStrategy  # noqa: E402, F401
 STRATEGY_REGISTRY[_VWAPReclaimStrategy.name] = _VWAPReclaimStrategy
+
+# ── ML 策略（web adapter，@register 自動掛載至 STRATEGY_REGISTRY）──────────────
+from strategies import ml_tick_web as _ml_tick_web  # noqa: E402, F401
+from strategies import ml_tick_web_atr_sl as _ml_tick_web_atr_sl  # noqa: E402, F401
